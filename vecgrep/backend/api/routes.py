@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 
 from ..config import get_settings
 from ..embed import EmbedBackendError
@@ -20,14 +20,28 @@ from .schemas import (
     SearchResponse,
 )
 
-router = APIRouter(prefix="/api")
+def require_token(authorization: str | None = Header(default=None)) -> None:
+    """Bearer-token gate. No-op when settings.api_token is unset."""
+    expected = get_settings().api_token
+    if not expected:
+        return
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    if authorization[len("Bearer ") :].strip() != expected:
+        raise HTTPException(status_code=403, detail="Invalid bearer token")
+
+
+# Health is intentionally public — load balancers and watchdogs need it
+# without credentials. Everything else gets the gate via Depends.
+public_router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", dependencies=[Depends(require_token)])
 
 
 def _service() -> VecgrepService:
     return VecgrepService()
 
 
-@router.get("/health")
+@public_router.get("/health")
 def health() -> dict:
     return {"status": "ok"}
 
@@ -90,6 +104,7 @@ def search(req: SearchRequest) -> SearchResponse:
             rerank=req.rerank,
             rerank_model=req.rerank_model,
             filters=req.filters or None,
+            explain=req.explain,
         )
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -108,6 +123,7 @@ def search(req: SearchRequest) -> SearchResponse:
                 corpus=r.corpus,
                 metadata=r.metadata,
                 matched_by=r.matched_by,
+                explain=r.explain or {},
             )
             for r in results
         ]

@@ -15,7 +15,9 @@ from typing import Literal
 
 from .config import Settings, get_settings
 from .embed import EmbedBackend, EmbedBackendError, get_embed_backend
+from .embed.cache import CachedBackend, EmbedCache
 from .ingestion.adapters import (
+    AdapterError,
     Document,
     detect_adapter,
 )
@@ -67,6 +69,14 @@ class SearchResult:
     metadata: dict
     # Which retrievers placed this result. "vector", "bm25", or both.
     matched_by: list[str]
+    # Per-retriever score breakdown — populated when --explain is on.
+    # Empty dict otherwise. Keys: vector_cosine, vector_rank, bm25_score,
+    # bm25_rank, rrf, rerank_score (when reranked).
+    explain: dict = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.explain is None:
+            self.explain = {}
 
 
 class VecgrepService:
@@ -77,13 +87,29 @@ class VecgrepService:
         self.store = QdrantStore(None if ephemeral else self.settings.qdrant_path)
         self.bm25 = BM25Store(None if ephemeral else self.settings.home / "bm25")
         self._backend_cache: dict[str, EmbedBackend] = {}
+        # Embedding cache lives on disk except in ephemeral mode. Wrapping
+        # is opt-in per backend in _backend_for() so tests / mocks can
+        # bypass it by sticking a backend directly into _backend_cache.
+        self._embed_cache: EmbedCache | None = (
+            None if ephemeral else EmbedCache(self.settings.home / "embed_cache.db")
+        )
 
     # ----- backend resolution ---------------------------------------------------
     def _backend_for(self, corpus: Corpus | None) -> EmbedBackend:
         prefer = corpus.embed_backend if corpus else None
         cache_key = prefer or "auto"
         if cache_key not in self._backend_cache:
-            self._backend_cache[cache_key] = get_embed_backend(self.settings, prefer=prefer)
+            # Reuse an already-resolved 'auto' backend if it happens to match
+            # the corpus's pinned backend — avoids a redundant live resolve
+            # (and lets tests inject just one mock).
+            auto = self._backend_cache.get("auto")
+            if auto is not None and auto.name == prefer:
+                self._backend_cache[cache_key] = auto
+            else:
+                raw = get_embed_backend(self.settings, prefer=prefer)
+                self._backend_cache[cache_key] = (
+                    CachedBackend(raw, self._embed_cache) if self._embed_cache else raw
+                )
         backend = self._backend_cache[cache_key]
         if corpus and (backend.model != corpus.embed_model or backend.dim != corpus.dim):
             raise EmbedBackendError(
@@ -224,6 +250,7 @@ class VecgrepService:
         rerank: bool = False,
         rerank_model: str | None = None,
         filters: list[str] | None = None,
+        explain: bool = False,
     ) -> list[SearchResult]:
         top_k = top_k or self.settings.default_top_k
         if corpus_name:
@@ -241,13 +268,13 @@ class VecgrepService:
 
         results: list[SearchResult] = []
         for c in corpora:
-            results.extend(self._search_one(c, query, per_corpus_k, mode))
+            results.extend(self._search_one(c, query, per_corpus_k, mode, explain=explain))
 
         if filters:
             results = [r for r in results if _passes_filters(r, filters)]
 
         if rerank:
-            results = self._apply_rerank(query, results, top_k, rerank_model)
+            results = self._apply_rerank(query, results, top_k, rerank_model, explain=explain)
         else:
             results.sort(key=lambda r: r.score, reverse=True)
             results = results[:top_k]
@@ -259,6 +286,7 @@ class VecgrepService:
         candidates: list[SearchResult],
         top_k: int,
         model_name: str | None,
+        explain: bool = False,
     ) -> list[SearchResult]:
         from .rerank import DEFAULT_RERANKER, rerank as _rerank
 
@@ -273,6 +301,8 @@ class VecgrepService:
             r: SearchResult = original  # type: ignore[assignment]
             # Replace the score and pct with reranker output. matched_by
             # gains 'rerank' so the UI can show that this hit was rerank-confirmed.
+            if explain:
+                r.explain = {**(r.explain or {}), "rerank_score": float(score)}
             r.score = float(score)
             r.similarity_pct = float(score) * 100
             if "rerank" not in r.matched_by:
@@ -286,6 +316,7 @@ class VecgrepService:
         query: str,
         top_k: int,
         mode: SearchMode,
+        explain: bool = False,
     ) -> list[SearchResult]:
         collection = _collection_for(corpus.name)
 
@@ -301,11 +332,22 @@ class VecgrepService:
             bm25_hits = self.bm25.search(corpus.name, query, top_k=CANDIDATE_POOL)
 
         if mode == "vector":
-            return [_hit_to_result(h, ["vector"]) for h in vector_hits[:top_k]]
+            out: list[SearchResult] = []
+            for rank, h in enumerate(vector_hits[:top_k]):
+                r = _hit_to_result(h, ["vector"])
+                if explain:
+                    r.explain = {"vector_cosine": h.score, "vector_rank": rank + 1}
+                out.append(r)
+            return out
 
         if mode == "bm25":
-            return [_bm25_to_result(corpus.name, cid, score, payload, ["bm25"])
-                    for cid, score, payload in bm25_hits[:top_k]]
+            out = []
+            for rank, (cid, score, payload) in enumerate(bm25_hits[:top_k]):
+                r = _bm25_to_result(corpus.name, cid, score, payload, ["bm25"])
+                if explain:
+                    r.explain = {"bm25_score": score, "bm25_rank": rank + 1}
+                out.append(r)
+            return out
 
         # mode == "hybrid": Reciprocal Rank Fusion.
         # RRF score = sum_over_retrievers(1 / (k + rank)). Identity is the
@@ -314,6 +356,9 @@ class VecgrepService:
         sources: dict[str, list[str]] = {}
         payloads_by_id: dict[str, dict] = {}
         vector_score_by_id: dict[str, float] = {}
+        vector_rank_by_id: dict[str, int] = {}
+        bm25_score_by_id: dict[str, float] = {}
+        bm25_rank_by_id: dict[str, int] = {}
 
         for rank, hit in enumerate(vector_hits):
             cid = _id_for(hit)
@@ -323,14 +368,17 @@ class VecgrepService:
             sources.setdefault(cid, []).append("vector")
             payloads_by_id[cid] = _hit_payload(hit)
             vector_score_by_id[cid] = hit.score
+            vector_rank_by_id[cid] = rank + 1
 
-        for rank, (cid, _score, payload) in enumerate(bm25_hits):
+        for rank, (cid, score, payload) in enumerate(bm25_hits):
             rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
             sources.setdefault(cid, []).append("bm25")
             payloads_by_id.setdefault(cid, payload)
+            bm25_score_by_id[cid] = score
+            bm25_rank_by_id[cid] = rank + 1
 
         fused = sorted(rrf.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
-        out: list[SearchResult] = []
+        out = []
         for cid, fused_score in fused:
             payload = payloads_by_id[cid]
             matched_by = sources.get(cid, [])
@@ -342,7 +390,16 @@ class VecgrepService:
                 pct = _cosine_to_pct(vector_score_by_id[cid])
             else:
                 pct = min(100.0, fused_score * 100)
-            out.append(_payload_to_result(payload, fused_score, pct, matched_by))
+            r = _payload_to_result(payload, fused_score, pct, matched_by)
+            if explain:
+                r.explain = {"rrf": fused_score}
+                if cid in vector_score_by_id:
+                    r.explain["vector_cosine"] = vector_score_by_id[cid]
+                    r.explain["vector_rank"] = vector_rank_by_id[cid]
+                if cid in bm25_score_by_id:
+                    r.explain["bm25_score"] = bm25_score_by_id[cid]
+                    r.explain["bm25_rank"] = bm25_rank_by_id[cid]
+            out.append(r)
         return out
 
     # ----- corpus management ----------------------------------------------------
@@ -354,6 +411,171 @@ class VecgrepService:
 
     def list_corpora(self) -> list[Corpus]:
         return self.registry.list()
+
+    # ----- migration ------------------------------------------------------------
+    def migrate_corpus(
+        self,
+        name: str,
+        to_backend: str,
+        to_model: str | None = None,
+    ) -> Corpus:
+        """Re-embed every chunk in `name` with a new backend / model.
+
+        Strategy: re-index every original source under a temp corpus using
+        the requested backend, then atomically swap names. If everything
+        fails the original corpus is untouched (we created the temp first
+        and never modified the original until success).
+
+        Sources that no longer exist (deleted files, dead URLs) are skipped
+        with a warning rather than failing the whole migration.
+        """
+        old = self.registry.get(name)
+        if old.embed_backend == to_backend and (to_model is None or old.embed_model == to_model):
+            raise CorpusError(
+                f"Corpus '{name}' already uses {to_backend}"
+                + (f"/{to_model}" if to_model else "")
+                + " — nothing to migrate."
+            )
+
+        # Override the embed_model setting just long enough to resolve the
+        # new backend; we don't replace self.settings, so other corpora are
+        # untouched.
+        prev_embed_model = self.settings.embed_model
+        prev_openai_model = self.settings.openai_embed_model
+        if to_model:
+            if to_backend == "openai":
+                self.settings.openai_embed_model = to_model
+            else:
+                self.settings.embed_model = to_model
+        try:
+            new_backend = get_embed_backend(self.settings, prefer=to_backend)
+        finally:
+            self.settings.embed_model = prev_embed_model
+            self.settings.openai_embed_model = prev_openai_model
+
+        if to_model and new_backend.model != to_model:
+            raise EmbedBackendError(
+                f"Requested model '{to_model}' did not resolve to the expected "
+                f"backend model (got '{new_backend.model}'). Check env vars."
+            )
+
+        wrapped_new = (
+            CachedBackend(new_backend, self._embed_cache) if self._embed_cache else new_backend
+        )
+
+        # Reserve a temp slot in the same backend cache so index() finds the
+        # new backend when called against the temp corpus.
+        temp_name = f"__migrate__{name}__"
+        if self.registry.has(temp_name):
+            self.delete_corpus(temp_name)
+        # Stash the new backend under both 'auto' (for corpus creation) and
+        # under the new backend's name (for subsequent _backend_for calls).
+        prev_cache = dict(self._backend_cache)
+        self._backend_cache["auto"] = wrapped_new
+        self._backend_cache[wrapped_new.name] = wrapped_new
+
+        skipped: list[str] = []
+        try:
+            for src in old.sources:
+                try:
+                    self.index(src, temp_name, chunker_name=old.chunker)
+                except (AdapterError, EmbedBackendError) as e:
+                    skipped.append(f"{src}: {e}")
+        finally:
+            # Restore prior backend cache so subsequent operations against
+            # other corpora behave normally.
+            self._backend_cache = prev_cache
+
+        if not self.registry.has(temp_name):
+            raise CorpusError(
+                f"Migration produced an empty corpus — every source failed. "
+                f"Original '{name}' left untouched. Errors: {skipped}"
+            )
+
+        new_corpus = self.registry.get(temp_name)
+        new_corpus.name = name
+        new_corpus.created_at = old.created_at
+
+        # Drop the old corpus first (qdrant + bm25 + registry).
+        self.delete_corpus(name)
+
+        # Migrate temp -> final by copying points (Qdrant tracks collections
+        # via an in-memory + meta.json registry; renaming dirs corrupts it).
+        # Scroll points from the temp collection, upsert into the final
+        # collection, then drop temp.
+        temp_collection = _collection_for(temp_name)
+        new_collection = _collection_for(name)
+        self.store.ensure_collection(new_collection, new_corpus.dim)
+        offset: object = None
+        from qdrant_client.http import models as qm
+        while True:
+            points, offset = self.store.client.scroll(
+                collection_name=temp_collection,
+                with_payload=True,
+                with_vectors=True,
+                limit=256,
+                offset=offset,
+            )
+            if not points:
+                break
+            self.store.client.upsert(
+                collection_name=new_collection,
+                points=[
+                    qm.PointStruct(id=p.id, vector=p.vector, payload=p.payload or {})
+                    for p in points
+                ],
+                wait=True,
+            )
+            if offset is None:
+                break
+        self.store.drop_collection(temp_collection)
+
+        # BM25 pickle: rename file. Safe — nothing concurrent reads it.
+        old_bm25 = self.settings.home / "bm25" / f"{temp_name}.pkl"
+        new_bm25 = self.settings.home / "bm25" / f"{name}.pkl"
+        if old_bm25.exists():
+            if new_bm25.exists():
+                new_bm25.unlink()
+            old_bm25.rename(new_bm25)
+        # Force in-memory BM25 cache to drop stale temp_name entry — next
+        # access reloads from the renamed pickle under the new name.
+        self.bm25._cache.pop(temp_name, None)
+        self.bm25._cache.pop(name, None)
+
+        # Drop the temp registry entry; upsert under final name. We also
+        # rewrite each chunk payload's "corpus" field to the final name —
+        # otherwise filters / display would still show the temp name.
+        # The simplest way: scroll-and-rewrite payload corpus key in-place.
+        offset = None
+        while True:
+            points, offset = self.store.client.scroll(
+                collection_name=new_collection,
+                with_payload=True,
+                limit=256,
+                offset=offset,
+            )
+            if not points:
+                break
+            updates = []
+            for p in points:
+                payload = p.payload or {}
+                if payload.get("corpus") != name:
+                    payload["corpus"] = name
+                    updates.append((p.id, payload))
+            for pid, payload in updates:
+                self.store.client.set_payload(
+                    collection_name=new_collection,
+                    payload=payload,
+                    points=[pid],
+                    wait=True,
+                )
+            if offset is None:
+                break
+
+        self.registry.delete(temp_name)
+        self.registry.upsert(new_corpus)
+
+        return new_corpus
 
     # ----- export / import ------------------------------------------------------
     def export_corpus(self, name: str, dest: Path) -> Path:

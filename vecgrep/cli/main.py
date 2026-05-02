@@ -36,6 +36,11 @@ def _api_base() -> str:
     return f"http://{s.api_host}:{s.api_port}"
 
 
+def _auth_headers() -> dict:
+    token = get_settings().api_token
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 def _api_alive() -> bool:
     try:
         r = httpx.get(f"{_api_base()}/api/health", timeout=0.4)
@@ -45,7 +50,12 @@ def _api_alive() -> bool:
 
 
 def _post(path: str, payload: dict) -> Any:
-    r = httpx.post(f"{_api_base()}{path}", json=payload, timeout=600.0)
+    r = httpx.post(
+        f"{_api_base()}{path}",
+        json=payload,
+        timeout=600.0,
+        headers=_auth_headers(),
+    )
     if r.status_code >= 400:
         try:
             detail = r.json().get("detail", r.text)
@@ -56,14 +66,16 @@ def _post(path: str, payload: dict) -> Any:
 
 
 def _get(path: str) -> Any:
-    r = httpx.get(f"{_api_base()}{path}", timeout=30.0)
+    r = httpx.get(f"{_api_base()}{path}", timeout=30.0, headers=_auth_headers())
     if r.status_code >= 400:
         raise click.ClickException(r.text)
     return r.json()
 
 
 def _delete(path: str) -> Any:
-    r = httpx.delete(f"{_api_base()}{path}", timeout=30.0)
+    r = httpx.delete(
+        f"{_api_base()}{path}", timeout=30.0, headers=_auth_headers()
+    )
     if r.status_code >= 400:
         try:
             detail = r.json().get("detail", r.text)
@@ -96,6 +108,19 @@ def _print_results(hits: list[dict], json_out: bool) -> None:
         matched_by = h.get("matched_by") or []
         badge = f"  [{'+'.join(matched_by)}]" if matched_by else ""
         click.echo(f"\n[{i}] {pct:5.1f}%  {corpus}  {sid}{badge}")
+        explain = h.get("explain") or {}
+        if explain:
+            parts: list[str] = []
+            if "vector_cosine" in explain:
+                parts.append(f"vec={explain['vector_cosine']:.3f}@#{explain.get('vector_rank','?')}")
+            if "bm25_score" in explain:
+                parts.append(f"bm25={explain['bm25_score']:.3f}@#{explain.get('bm25_rank','?')}")
+            if "rrf" in explain:
+                parts.append(f"rrf={explain['rrf']:.4f}")
+            if "rerank_score" in explain:
+                parts.append(f"rerank={explain['rerank_score']:.3f}")
+            if parts:
+                click.echo(f"    explain: {' '.join(parts)}")
         before = (h.get("context_before") or "").strip()
         after = (h.get("context_after") or "").strip()
         chunk = _highlight(h["chunk"].strip())
@@ -201,6 +226,12 @@ def index(source: str, corpus: str, chunker: str, ephemeral: bool, force: bool) 
         "'meta.<key>=<value>'. Repeatable; all ANDed."
     ),
 )
+@click.option(
+    "--explain",
+    "explain",
+    is_flag=True,
+    help="Show per-retriever score breakdown for each hit.",
+)
 @click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
 def search(
     query: str,
@@ -210,6 +241,7 @@ def search(
     rerank: bool,
     rerank_model: str | None,
     filters: tuple[str, ...],
+    explain: bool,
     json_out: bool,
 ) -> None:
     """Semantic search across one or all corpora."""
@@ -225,6 +257,7 @@ def search(
                 "rerank": rerank,
                 "rerank_model": rerank_model,
                 "filters": filter_list,
+                "explain": explain,
             },
         )
         _print_results(out["hits"], json_out)
@@ -234,7 +267,7 @@ def search(
         results = svc.search(
             query, corpus, top_k,
             mode=mode, rerank=rerank, rerank_model=rerank_model,
-            filters=filter_list or None,
+            filters=filter_list or None, explain=explain,
         )
     except (CorpusError, EmbedBackendError) as e:
         raise click.ClickException(str(e))
@@ -256,6 +289,7 @@ def search(
                 "corpus": r.corpus,
                 "metadata": r.metadata,
                 "matched_by": r.matched_by,
+                "explain": r.explain or {},
             }
             for r in results
         ],
@@ -323,6 +357,41 @@ def corpora_import(archive: str, rename: str | None) -> None:
     except CorpusError as e:
         raise click.ClickException(str(e))
     click.echo(f"imported: {corpus.name} ({corpus.doc_count} doc(s), {corpus.chunk_count} chunk(s))")
+
+
+@corpora.command("migrate")
+@click.argument("name")
+@click.option(
+    "--to-backend",
+    required=True,
+    type=click.Choice(["ollama", "openai"]),
+    help="Target embedding backend.",
+)
+@click.option("--to-model", default=None, help="Target embedding model. Defaults to backend's default.")
+@click.option("--yes", is_flag=True, help="Skip confirmation.")
+def corpora_migrate(name: str, to_backend: str, to_model: str | None, yes: bool) -> None:
+    """Re-embed a corpus to a new backend / model.
+
+    Migration re-fetches every original source. URLs and files that no
+    longer exist are skipped with a warning. The old corpus is replaced
+    in place once the new one is fully built — partial failure leaves
+    the original untouched.
+    """
+    if not yes:
+        target = f"{to_backend}/{to_model}" if to_model else to_backend
+        click.confirm(
+            f"migrate corpus '{name}' to {target}? this re-fetches every source.",
+            abort=True,
+        )
+    svc = VecgrepService()
+    try:
+        out = svc.migrate_corpus(name, to_backend, to_model)
+    except (CorpusError, EmbedBackendError, AdapterError) as e:
+        raise click.ClickException(str(e))
+    click.echo(
+        f"migrated: {out.name} -> {out.embed_backend}/{out.embed_model} "
+        f"({out.doc_count} doc(s), {out.chunk_count} chunk(s))"
+    )
 
 
 @corpora.command("delete")
@@ -435,6 +504,57 @@ def _do_index(source: str, corpus: str, chunker: str, force: bool) -> None:
     if skipped:
         msg += f", {skipped} unchanged"
     click.echo(msg)
+
+
+@cli.group()
+def cache() -> None:
+    """Inspect and manage the embedding cache."""
+
+
+@cache.command("stats")
+@click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
+def cache_stats(json_out: bool) -> None:
+    """Show cached vector counts per (backend, model)."""
+    from ..backend.embed.cache import EmbedCache
+
+    s = get_settings()
+    db = s.home / "embed_cache.db"
+    if not db.exists():
+        click.echo("no cache yet.")
+        return
+    cache = EmbedCache(db)
+    stats = cache.stats()
+    if json_out:
+        click.echo(json.dumps(stats, indent=2))
+        return
+    if not stats:
+        click.echo("cache is empty.")
+        return
+    click.echo(f"{'IDENTITY':<40} {'COUNT':>10}")
+    for ident, count in sorted(stats.items()):
+        click.echo(f"{ident:<40} {count:>10}")
+
+
+@cache.command("clear")
+@click.option("--identity", default=None, help="Clear only this identity (e.g. 'ollama:nomic-embed-text').")
+@click.option("--yes", is_flag=True, help="Skip confirmation.")
+def cache_clear(identity: str | None, yes: bool) -> None:
+    """Drop cached vectors. Useful to free disk; embedded vectors will be
+    refetched on next embed call.
+    """
+    from ..backend.embed.cache import EmbedCache
+
+    s = get_settings()
+    db = s.home / "embed_cache.db"
+    if not db.exists():
+        click.echo("no cache to clear.")
+        return
+    target = f"identity={identity}" if identity else "ALL identities"
+    if not yes:
+        click.confirm(f"clear cache ({target})?", abort=True)
+    cache = EmbedCache(db)
+    n = cache.clear(identity)
+    click.echo(f"cleared: {n} entries")
 
 
 @cli.command()

@@ -24,6 +24,7 @@ class SearchRequest(BaseModel):
     rerank: bool = False
     rerank_model: str | None = None
     filters: list[str] = []
+    explain: bool = False
 
 
 class SearchHit(BaseModel):
@@ -35,6 +36,7 @@ class SearchHit(BaseModel):
     corpus: str
     metadata: dict
     matched_by: list[str] = []
+    explain: dict = {}
 
 
 class SearchResponse(BaseModel):

@@ -24,6 +24,10 @@ class Settings:
     api_host: str = "127.0.0.1"
     api_port: int = 8765
     default_top_k: int = 5
+    # If set, all /api/* routes (except /api/health) require a matching
+    # `Authorization: Bearer <token>` header. Useful when you bind to 0.0.0.0
+    # for Tailscale / LAN access. Unset (None) = no auth, the default.
+    api_token: str | None = None
 
     @property
     def qdrant_path(self) -> Path:
@@ -66,6 +70,7 @@ def load_settings() -> Settings:
         "VECGREP_API_HOST": "api_host",
         "VECGREP_API_PORT": "api_port",
         "VECGREP_TOP_K": "default_top_k",
+        "VECGREP_API_TOKEN": "api_token",
     }
     for env_key, attr in env_map.items():
         if env_key in os.environ:
