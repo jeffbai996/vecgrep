@@ -153,8 +153,11 @@ class VecgrepService:
         corpus.doc_count = len(corpus.sources)
         corpus.chunk_count += total_chunks
         corpus.updated_at = time.time()
+        # Always update the in-memory registry so search() can find the corpus
+        # in the same process; only skip the file write when ephemeral.
+        self.registry._corpora[corpus.name] = corpus
         if not self.ephemeral:
-            self.registry.upsert(corpus)
+            self.registry._save()
         return total_docs, total_chunks
 
     # ----- search ---------------------------------------------------------------
