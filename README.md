@@ -137,7 +137,36 @@ Each corpus pins the embedding backend and dimension at index time, and refuses 
 
 ## Web UI
 
-`vecgrep serve` boots the FastAPI server and serves a single-page React UI from the same port. Index forms, corpus list with delete, search bar with top-k slider, results with surrounding context and the matched chunk highlighted. It's deliberately small — every action it supports has a CLI equivalent.
+`vecgrep serve` boots the FastAPI server and serves a single-page React UI from the same port. Index forms, corpus list with delete, search bar with top-k slider, mode toggle (hybrid/vector/bm25), reranker checkbox, results with surrounding context and the matched chunk highlighted. It's deliberately small — every action it supports has a CLI equivalent.
+
+## MCP server
+
+`vecgrep` ships an MCP server so Claude Desktop, Cursor, or any MCP-aware client can search your corpora as a tool. Install with the extra and run over stdio:
+
+```bash
+pip install "vecgrep[mcp]"
+vecgrep mcp
+```
+
+Tools exposed:
+- `search(query, corpus?, top_k?, mode?, rerank?)` — returns ranked chunks with surrounding context as JSON
+- `list_corpora()` — every corpus and its stats
+- `get_corpus(name)` — one corpus's full metadata including source list
+
+Wire it into Claude Desktop with this snippet in `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "vecgrep": {
+      "command": "vecgrep",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Then index a corpus once (`vecgrep index ./my-notes --corpus notes`), and the model can call `search("rate hikes", corpus="notes")` instead of asking you to paste documents.
 
 ## Roadmap
 
@@ -147,8 +176,8 @@ The plan is short and ordered. Make search good first, connect it to where you a
 - ✅ Hybrid search (BM25 + vector + RRF), default on. Pure vector misses exact-token matches like CVE numbers, ticker symbols, function names; BM25 nails them.
 - ✅ Cross-encoder reranking (`--rerank`, off by default). Local, ~30ms for 50 chunks on CPU.
 
-**v0.3 — connect it**
-- MCP server: expose `vecgrep` as a tool to Claude / Cursor / any MCP client. Index a corpus once, let your assistant retrieve from it instead of stuffing context.
+**v0.3 — connect it (in progress)**
+- ✅ MCP server: expose `vecgrep` as a tool to Claude / Cursor / any MCP client. Index a corpus once, let your assistant retrieve from it instead of stuffing context.
 - Discord JSONL adapter: drop in chat exports, search them as a corpus.
 - Claude / ChatGPT export adapters: search your own conversation history.
 
