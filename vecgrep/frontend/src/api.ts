@@ -60,11 +60,12 @@ export const api = {
     query: string,
     corpus: string | null,
     top_k: number,
-    mode: SearchMode = "hybrid"
+    mode: SearchMode = "hybrid",
+    rerank = false
   ) =>
     request<{ hits: SearchHit[] }>("/api/search", {
       method: "POST",
-      body: JSON.stringify({ query, corpus, top_k, mode }),
+      body: JSON.stringify({ query, corpus, top_k, mode, rerank }),
     }),
   config: () => request<Record<string, unknown>>("/api/config"),
 };

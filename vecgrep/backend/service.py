@@ -203,6 +203,8 @@ class VecgrepService:
         corpus_name: str | None = None,
         top_k: int | None = None,
         mode: SearchMode = DEFAULT_MODE,
+        rerank: bool = False,
+        rerank_model: str | None = None,
     ) -> list[SearchResult]:
         top_k = top_k or self.settings.default_top_k
         if corpus_name:
@@ -212,12 +214,47 @@ class VecgrepService:
         if not corpora:
             return []
 
+        # When reranking, ask each retriever for the full candidate pool so
+        # the reranker has more to work with; truncate to top_k after.
+        per_corpus_k = CANDIDATE_POOL if rerank else top_k
+
         results: list[SearchResult] = []
         for c in corpora:
-            results.extend(self._search_one(c, query, top_k, mode))
+            results.extend(self._search_one(c, query, per_corpus_k, mode))
 
-        results.sort(key=lambda r: r.score, reverse=True)
-        return results[:top_k]
+        if rerank:
+            results = self._apply_rerank(query, results, top_k, rerank_model)
+        else:
+            results.sort(key=lambda r: r.score, reverse=True)
+            results = results[:top_k]
+        return results
+
+    def _apply_rerank(
+        self,
+        query: str,
+        candidates: list[SearchResult],
+        top_k: int,
+        model_name: str | None,
+    ) -> list[SearchResult]:
+        from .rerank import DEFAULT_RERANKER, rerank as _rerank
+
+        if not candidates:
+            return []
+        # rerank() takes (text, payload-ish) pairs. We pass each candidate's
+        # chunk text + a dict that lets us reconstruct the SearchResult.
+        pairs = [(c.chunk, c) for c in candidates]
+        scored = _rerank(query, pairs, model_name or DEFAULT_RERANKER)
+        out: list[SearchResult] = []
+        for score, original in scored[:top_k]:
+            r: SearchResult = original  # type: ignore[assignment]
+            # Replace the score and pct with reranker output. matched_by
+            # gains 'rerank' so the UI can show that this hit was rerank-confirmed.
+            r.score = float(score)
+            r.similarity_pct = float(score) * 100
+            if "rerank" not in r.matched_by:
+                r.matched_by = [*r.matched_by, "rerank"]
+            out.append(r)
+        return out
 
     def _search_one(
         self,

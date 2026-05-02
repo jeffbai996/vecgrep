@@ -161,27 +161,55 @@ def index(source: str, corpus: str, chunker: str, ephemeral: bool) -> None:
     show_default=True,
     help="Retrieval strategy. Hybrid fuses BM25 + vector via RRF.",
 )
+@click.option(
+    "--rerank",
+    is_flag=True,
+    help="Rerank top candidates with a cross-encoder. Needs `pip install vecgrep[rerank]`.",
+)
+@click.option(
+    "--rerank-model",
+    default=None,
+    help="Override the cross-encoder model (default: BAAI/bge-reranker-base).",
+)
 @click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
 def search(
     query: str,
     corpus: str | None,
     top_k: int | None,
     mode: str,
+    rerank: bool,
+    rerank_model: str | None,
     json_out: bool,
 ) -> None:
     """Semantic search across one or all corpora."""
     if _api_alive():
         out = _post(
             "/api/search",
-            {"query": query, "corpus": corpus, "top_k": top_k, "mode": mode},
+            {
+                "query": query,
+                "corpus": corpus,
+                "top_k": top_k,
+                "mode": mode,
+                "rerank": rerank,
+                "rerank_model": rerank_model,
+            },
         )
         _print_results(out["hits"], json_out)
         return
     svc = VecgrepService(ephemeral=False)
     try:
-        results = svc.search(query, corpus, top_k, mode=mode)
+        results = svc.search(
+            query, corpus, top_k, mode=mode, rerank=rerank, rerank_model=rerank_model
+        )
     except (CorpusError, EmbedBackendError) as e:
         raise click.ClickException(str(e))
+    except Exception as e:
+        # RerankerError lives in vecgrep.backend.rerank but importing it
+        # eagerly would force the optional dep at CLI start. Catch broadly
+        # only when --rerank is on.
+        if rerank:
+            raise click.ClickException(str(e))
+        raise
     _print_results(
         [
             {

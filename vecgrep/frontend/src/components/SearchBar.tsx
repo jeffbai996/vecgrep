@@ -2,7 +2,7 @@ import { useState } from "react";
 import { SearchMode } from "../api";
 
 type Props = {
-  onSearch: (query: string, topK: number, mode: SearchMode) => void;
+  onSearch: (query: string, topK: number, mode: SearchMode, rerank: boolean) => void;
   disabled: boolean;
   corpus: string | null;
   corpusCount: number;
@@ -14,11 +14,12 @@ export default function SearchBar({ onSearch, disabled, corpus, corpusCount }: P
   const [query, setQuery] = useState("");
   const [topK, setTopK] = useState(5);
   const [mode, setMode] = useState<SearchMode>("hybrid");
+  const [rerank, setRerank] = useState(false);
 
   const onSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!query.trim() || corpusCount === 0) return;
-    onSearch(query.trim(), topK, mode);
+    onSearch(query.trim(), topK, mode, rerank);
   };
 
   const placeholder =
@@ -56,22 +57,33 @@ export default function SearchBar({ onSearch, disabled, corpus, corpusCount }: P
           {disabled ? "..." : "search"}
         </button>
       </div>
-      <div className="flex items-center gap-1 text-[10px] font-mono">
-        <span className="text-zinc-600 mr-1 uppercase tracking-wider">mode</span>
-        {MODES.map((m) => (
-          <button
-            key={m}
-            type="button"
-            onClick={() => setMode(m)}
-            className={`px-2 py-0.5 rounded border ${
-              mode === m
-                ? "bg-zinc-800 border-zinc-600 text-zinc-100"
-                : "border-zinc-800 text-zinc-500 hover:text-zinc-300"
-            }`}
-          >
-            {m}
-          </button>
-        ))}
+      <div className="flex items-center gap-3 text-[10px] font-mono">
+        <div className="flex items-center gap-1">
+          <span className="text-zinc-600 mr-1 uppercase tracking-wider">mode</span>
+          {MODES.map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setMode(m)}
+              className={`px-2 py-0.5 rounded border ${
+                mode === m
+                  ? "bg-zinc-800 border-zinc-600 text-zinc-100"
+                  : "border-zinc-800 text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+        <label className="flex items-center gap-1 cursor-pointer text-zinc-500 hover:text-zinc-300">
+          <input
+            type="checkbox"
+            checked={rerank}
+            onChange={(e) => setRerank(e.target.checked)}
+            className="accent-zinc-100"
+          />
+          <span className="uppercase tracking-wider">rerank</span>
+        </label>
       </div>
     </form>
   );
