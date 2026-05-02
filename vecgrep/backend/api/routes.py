@@ -78,8 +78,10 @@ def index(req: IndexRequest) -> IndexResponse:
 @router.post("/search", response_model=SearchResponse)
 def search(req: SearchRequest) -> SearchResponse:
     svc = _service()
+    if req.mode not in ("hybrid", "vector", "bm25"):
+        raise HTTPException(status_code=400, detail=f"Unknown search mode: {req.mode}")
     try:
-        results = svc.search(req.query, req.corpus, req.top_k)
+        results = svc.search(req.query, req.corpus, req.top_k, mode=req.mode)
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except EmbedBackendError as e:
@@ -94,6 +96,7 @@ def search(req: SearchRequest) -> SearchResponse:
                 source_id=r.source_id,
                 corpus=r.corpus,
                 metadata=r.metadata,
+                matched_by=r.matched_by,
             )
             for r in results
         ]

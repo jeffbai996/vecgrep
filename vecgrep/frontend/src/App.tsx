@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, Corpus, SearchHit } from "./api";
+import { api, Corpus, SearchHit, SearchMode } from "./api";
 import SearchBar from "./components/SearchBar";
 import IndexPanel from "./components/IndexPanel";
 import CorpusList from "./components/CorpusList";
@@ -24,11 +24,11 @@ export default function App() {
     refresh();
   }, []);
 
-  const onSearch = async (query: string, topK: number) => {
+  const onSearch = async (query: string, topK: number, mode: SearchMode) => {
     setError(null);
     setSearching(true);
     try {
-      const r = await api.search(query, selectedCorpus, topK);
+      const r = await api.search(query, selectedCorpus, topK, mode);
       setHits(r.hits);
     } catch (e) {
       setError(String((e as Error).message ?? e));

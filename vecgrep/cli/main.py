@@ -92,7 +92,9 @@ def _print_results(hits: list[dict], json_out: bool) -> None:
         pct = h["similarity_pct"]
         sid = h["source_id"]
         corpus = h["corpus"]
-        click.echo(f"\n[{i}] {pct:5.1f}%  {corpus}  {sid}")
+        matched_by = h.get("matched_by") or []
+        badge = f"  [{'+'.join(matched_by)}]" if matched_by else ""
+        click.echo(f"\n[{i}] {pct:5.1f}%  {corpus}  {sid}{badge}")
         before = (h.get("context_before") or "").strip()
         after = (h.get("context_after") or "").strip()
         chunk = _highlight(h["chunk"].strip())
@@ -152,16 +154,32 @@ def index(source: str, corpus: str, chunker: str, ephemeral: bool) -> None:
 @click.argument("query")
 @click.option("--corpus", default=None, help="Search one corpus (default: all).")
 @click.option("--top", "top_k", default=None, type=int, help="Max results.")
+@click.option(
+    "--mode",
+    default="hybrid",
+    type=click.Choice(["hybrid", "vector", "bm25"]),
+    show_default=True,
+    help="Retrieval strategy. Hybrid fuses BM25 + vector via RRF.",
+)
 @click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
-def search(query: str, corpus: str | None, top_k: int | None, json_out: bool) -> None:
+def search(
+    query: str,
+    corpus: str | None,
+    top_k: int | None,
+    mode: str,
+    json_out: bool,
+) -> None:
     """Semantic search across one or all corpora."""
     if _api_alive():
-        out = _post("/api/search", {"query": query, "corpus": corpus, "top_k": top_k})
+        out = _post(
+            "/api/search",
+            {"query": query, "corpus": corpus, "top_k": top_k, "mode": mode},
+        )
         _print_results(out["hits"], json_out)
         return
     svc = VecgrepService(ephemeral=False)
     try:
-        results = svc.search(query, corpus, top_k)
+        results = svc.search(query, corpus, top_k, mode=mode)
     except (CorpusError, EmbedBackendError) as e:
         raise click.ClickException(str(e))
     _print_results(
@@ -174,6 +192,7 @@ def search(query: str, corpus: str | None, top_k: int | None, json_out: bool) ->
                 "source_id": r.source_id,
                 "corpus": r.corpus,
                 "metadata": r.metadata,
+                "matched_by": r.matched_by,
             }
             for r in results
         ],
