@@ -117,11 +117,27 @@ class BM25Store:
         idx = self._load(corpus)
         if not idx.docs:
             return []
+        q_tokens = tokenize(query)
+        if not q_tokens:
+            return []
         bm25 = BM25Okapi(idx.docs)
-        scores = bm25.get_scores(tokenize(query))
-        # argsort desc; take top_k positives only.
+        scores = bm25.get_scores(q_tokens)
+        # BM25Okapi can score 0 for valid matches when IDF is degenerate
+        # (single-doc corpus, or every doc contains the term). Fall back to
+        # token-overlap counting in that case so the retriever still surfaces
+        # something rather than nothing.
         ranked = sorted(
-            ((s, i) for i, s in enumerate(scores) if s > 0),
+            ((float(s), i) for i, s in enumerate(scores) if s > 0),
             reverse=True,
         )[:top_k]
+        if not ranked:
+            q_set = set(q_tokens)
+            overlap = [
+                (sum(1 for t in idx.docs[i] if t in q_set), i)
+                for i in range(len(idx.docs))
+            ]
+            ranked = sorted(
+                ((float(o), i) for o, i in overlap if o > 0),
+                reverse=True,
+            )[:top_k]
         return [(idx.ids[i], float(s), idx.payloads[i]) for s, i in ranked]

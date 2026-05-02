@@ -220,8 +220,15 @@ The plan is short and ordered. Make search good first, connect it to where you a
 - ✅ `vecgrep corpora migrate` — re-embed a corpus to a new backend / model in place
 - ✅ Bearer-token auth for `/api/*` — set `VECGREP_API_TOKEN` to lock down a remote-bound server
 
-**Later (unsorted)**
-EPUB/DOCX/code-aware adapters, OCR fallback, single-binary distribution, query-aware chunking, query rewriting, faceted clustering. See [docs/IDEAS.md](docs/IDEAS.md) for the long list.
+**v0.6 — quality of life**
+- ✅ Test suite — hermetic pytest, service layer + stores + adapters + cache + migration. Caught three real bugs on first run.
+- `uvx vecgrep` verification + docs
+- Plugin API docs (the registries already work, just need an example)
+- Per-source TTL on URLs
+- Whole-machine `vecgrep backup` / `restore`
+
+**Later**
+Code-aware adapter (tree-sitter), EPUB/DOCX, OCR fallback, RSS feeds, query-aware chunking, query rewriting, single-binary build. See [docs/IDEAS.md](docs/IDEAS.md) for the live list and a "won't do" section explaining what we've explicitly ruled out.
 
 **v1.0 — stability**
 - Locked HTTP API and CLI surface
@@ -246,6 +253,15 @@ Use the right tool for the job. `vecgrep` is for when you have a folder and a qu
 Issues and PRs welcome. Keep it focused — `vecgrep` is a tool, not a framework.
 
 See [docs/DEVELOPING.md](docs/DEVELOPING.md) for layout, dev loop, and extension points (adapters, chunkers, embed backends).
+
+## Tests
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+Tests live in `tests/` and run hermetically — no Ollama, no network, no shared `~/.vecgrep`. Each test gets its own `VECGREP_HOME` under `tmp_path` and a deterministic stub embedding backend. The suite covers the service layer, BM25 store, adapters, embedding cache, and migration — the surfaces where every shipped bug has lived. Skip if you don't care; the tooling itself doesn't require them.
 
 ## License
 
