@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import click
@@ -122,32 +123,52 @@ def cli() -> None:
     show_default=True,
 )
 @click.option("--ephemeral", is_flag=True, help="Don't persist to disk.")
-def index(source: str, corpus: str, chunker: str, ephemeral: bool) -> None:
-    """Index a file, directory, or URL into a corpus."""
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Re-embed even if content hash matches the previous index.",
+)
+def index(source: str, corpus: str, chunker: str, ephemeral: bool, force: bool) -> None:
+    """Index a file, directory, or URL into a corpus.
+
+    Incremental by default: if a source's content hash matches the last
+    index, it's skipped. Pass --force to re-embed unconditionally.
+    """
+    def _format(out: dict | tuple) -> str:
+        if isinstance(out, tuple):
+            docs, chunks, skipped = out
+        else:
+            docs, chunks, skipped = out["docs"], out["chunks"], out.get("skipped", 0)
+        msg = f"indexed: {docs} doc(s), {chunks} chunk(s)"
+        if skipped:
+            msg += f", {skipped} unchanged (skipped)"
+        return msg
+
     if ephemeral:
         # Ephemeral runs don't go through the API server (which has its own
         # persistent state). They're always in-process.
         svc = VecgrepService(ephemeral=True)
         try:
-            docs, chunks = svc.index(source, corpus, chunker)
+            out = svc.index(source, corpus, chunker, force=force)
         except (AdapterError, CorpusError, EmbedBackendError) as e:
             raise click.ClickException(str(e))
-        click.echo(f"indexed (ephemeral): {docs} doc(s), {chunks} chunk(s)")
+        click.echo(_format(out).replace("indexed", "indexed (ephemeral)"))
         return
 
     if _api_alive():
-        out = _post("/api/index", {"source": source, "corpus": corpus, "chunker": chunker})
-        click.echo(f"indexed: {out['docs']} doc(s), {out['chunks']} chunk(s)")
+        out = _post(
+            "/api/index",
+            {"source": source, "corpus": corpus, "chunker": chunker, "force": force},
+        )
+        click.echo(_format(out))
         return
 
-    # No server running -> run in-process. Persisting to disk because this
-    # is not ephemeral; subsequent runs will see the corpus.
     svc = VecgrepService(ephemeral=False)
     try:
-        docs, chunks = svc.index(source, corpus, chunker)
+        out = svc.index(source, corpus, chunker, force=force)
     except (AdapterError, CorpusError, EmbedBackendError) as e:
         raise click.ClickException(str(e))
-    click.echo(f"indexed: {docs} doc(s), {chunks} chunk(s)")
+    click.echo(_format(out))
 
 
 @cli.command()
@@ -171,6 +192,15 @@ def index(source: str, corpus: str, chunker: str, ephemeral: bool) -> None:
     default=None,
     help="Override the cross-encoder model (default: BAAI/bge-reranker-base).",
 )
+@click.option(
+    "--filter",
+    "filters",
+    multiple=True,
+    help=(
+        "Filter results. Forms: 'source:<glob>', 'corpus:<name>', "
+        "'meta.<key>=<value>'. Repeatable; all ANDed."
+    ),
+)
 @click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
 def search(
     query: str,
@@ -179,9 +209,11 @@ def search(
     mode: str,
     rerank: bool,
     rerank_model: str | None,
+    filters: tuple[str, ...],
     json_out: bool,
 ) -> None:
     """Semantic search across one or all corpora."""
+    filter_list = list(filters)
     if _api_alive():
         out = _post(
             "/api/search",
@@ -192,6 +224,7 @@ def search(
                 "mode": mode,
                 "rerank": rerank,
                 "rerank_model": rerank_model,
+                "filters": filter_list,
             },
         )
         _print_results(out["hits"], json_out)
@@ -199,7 +232,9 @@ def search(
     svc = VecgrepService(ephemeral=False)
     try:
         results = svc.search(
-            query, corpus, top_k, mode=mode, rerank=rerank, rerank_model=rerank_model
+            query, corpus, top_k,
+            mode=mode, rerank=rerank, rerank_model=rerank_model,
+            filters=filter_list or None,
         )
     except (CorpusError, EmbedBackendError) as e:
         raise click.ClickException(str(e))
@@ -258,6 +293,38 @@ def corpora_list(json_out: bool) -> None:
         )
 
 
+@corpora.command("export")
+@click.argument("name")
+@click.option(
+    "--out",
+    "out",
+    default=None,
+    help="Output path. Defaults to ./<name>.vecgrep.tar.gz",
+)
+def corpora_export(name: str, out: str | None) -> None:
+    """Export a corpus to a portable .tar.gz."""
+    dest = Path(out) if out else Path.cwd() / f"{name}.vecgrep.tar.gz"
+    svc = VecgrepService()
+    try:
+        path = svc.export_corpus(name, dest)
+    except (CorpusError, EmbedBackendError) as e:
+        raise click.ClickException(str(e))
+    click.echo(f"exported: {path}")
+
+
+@corpora.command("import")
+@click.argument("archive")
+@click.option("--rename", default=None, help="Restore under a different corpus name.")
+def corpora_import(archive: str, rename: str | None) -> None:
+    """Restore a corpus from a .tar.gz produced by `corpora export`."""
+    svc = VecgrepService()
+    try:
+        corpus = svc.import_corpus(Path(archive), rename=rename)
+    except CorpusError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"imported: {corpus.name} ({corpus.doc_count} doc(s), {corpus.chunk_count} chunk(s))")
+
+
 @corpora.command("delete")
 @click.argument("name")
 @click.option("--yes", is_flag=True, help="Skip confirmation.")
@@ -290,6 +357,84 @@ def serve(host: str | None, port: int | None, reload: bool) -> None:
         port=port or s.api_port,
         reload=reload,
     )
+
+
+@cli.command()
+@click.argument("path")
+@click.option("--corpus", required=True, help="Named corpus to keep current.")
+@click.option(
+    "--chunker",
+    default="sentence_window",
+    type=click.Choice(["sentence_window", "fixed_token"]),
+    show_default=True,
+)
+@click.option(
+    "--debounce",
+    default=1.0,
+    show_default=True,
+    type=float,
+    help="Coalesce events arriving within this window (seconds).",
+)
+def watch(path: str, corpus: str, chunker: str, debounce: float) -> None:
+    """Watch a directory and re-index on change.
+
+    Re-indexes incrementally — only sources whose content hash changed get
+    re-embedded. Press Ctrl+C to stop.
+
+    Note: file-system events depend on the OS. Linux uses inotify; WSL2's
+    inotify on /tmp can be flaky on some kernels (fine on /home). macOS
+    and most Linux native filesystems work as expected.
+    """
+    try:
+        from watchfiles import watch as _watch
+    except ImportError:
+        raise click.ClickException(
+            "watch requires `watchfiles`. Install with `pip install \"vecgrep[watch]\"`."
+        )
+
+    target = Path(path).resolve()
+    if not target.is_dir():
+        raise click.ClickException(f"watch target must be a directory: {target}")
+
+    click.echo(f"watching {target} -> corpus '{corpus}' (Ctrl+C to stop)")
+    # Initial pass picks up everything currently on disk.
+    _do_index(str(target), corpus, chunker, force=False)
+
+    try:
+        for changes in _watch(str(target), step=int(debounce * 1000)):
+            kinds = {kind.name for kind, _ in changes}
+            paths = sorted({p for _, p in changes})
+            click.echo(f"  ! {len(paths)} change(s) [{','.join(sorted(kinds))}] — reindexing")
+            try:
+                _do_index(str(target), corpus, chunker, force=False)
+            except click.ClickException as e:
+                # Don't kill the watcher on a transient error — log and keep going.
+                click.echo(f"  error: {e.message}", err=True)
+    except KeyboardInterrupt:
+        click.echo("\nstopped.")
+
+
+def _do_index(source: str, corpus: str, chunker: str, force: bool) -> None:
+    """Shared index path used by `index` and `watch`. Prints, doesn't raise."""
+    if _api_alive():
+        out = _post(
+            "/api/index",
+            {"source": source, "corpus": corpus, "chunker": chunker, "force": force},
+        )
+        msg = f"  indexed {out['docs']} doc(s), {out['chunks']} chunk(s)"
+        if out.get("skipped"):
+            msg += f", {out['skipped']} unchanged"
+        click.echo(msg)
+        return
+    svc = VecgrepService(ephemeral=False)
+    try:
+        docs, chunks, skipped = svc.index(source, corpus, chunker, force=force)
+    except (AdapterError, CorpusError, EmbedBackendError) as e:
+        raise click.ClickException(str(e))
+    msg = f"  indexed {docs} doc(s), {chunks} chunk(s)"
+    if skipped:
+        msg += f", {skipped} unchanged"
+    click.echo(msg)
 
 
 @cli.command()

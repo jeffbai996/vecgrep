@@ -72,6 +72,14 @@ def _build_server() -> Any:
                             "description": "Cross-encoder rerank top candidates. Slower, more accurate.",
                             "default": False,
                         },
+                        "filters": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Optional filter expressions. Forms: 'source:<glob>', "
+                                "'corpus:<name>', 'meta.<key>=<value>'. All ANDed."
+                            ),
+                        },
                     },
                     "required": ["query"],
                 },
@@ -106,6 +114,7 @@ def _build_server() -> Any:
                 top_k=args.get("top_k"),
                 mode=args.get("mode", "hybrid"),
                 rerank=bool(args.get("rerank", False)),
+                filters=args.get("filters") or None,
             )
             payload = [
                 {

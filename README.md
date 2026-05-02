@@ -35,6 +35,8 @@ Early. v0.1 is a working MVP: index, search, named corpora, web UI, CLI. The pub
 pip install vecgrep                # base — Ollama embedding, hybrid search
 pip install "vecgrep[openai]"      # also: OpenAI embedding fallback
 pip install "vecgrep[rerank]"      # also: cross-encoder reranking (~hundreds of MB, torch)
+pip install "vecgrep[watch]"       # also: file watcher for `vecgrep watch`
+pip install "vecgrep[mcp]"         # also: MCP server for Claude Desktop / Cursor
 ```
 
 You also need [Ollama](https://ollama.com) running locally for the default embedding backend:
@@ -49,11 +51,17 @@ If you'd rather use OpenAI, install with `[openai]`, set `OPENAI_API_KEY`, and `
 ## Quickstart
 
 ```bash
-# Index a folder (mixed file types are fine)
+# Index a folder (mixed file types are fine; incremental — unchanged files skipped)
 vecgrep index ./my-docs --corpus papers
+
+# Re-embed everything regardless of content hash
+vecgrep index ./my-docs --corpus papers --force
 
 # Index a URL — vecgrep fetches and strips boilerplate
 vecgrep index https://example.com/article --corpus web
+
+# Watch a folder and re-index on change
+vecgrep watch ./my-docs --corpus papers
 
 # Hybrid search (default — BM25 + vector fused via RRF), top 10
 vecgrep search "missile guidance systems" --corpus papers --top 10
@@ -65,11 +73,18 @@ vecgrep search "FOMC" --mode bm25
 # Cross-encoder reranking on the candidate pool — slower, more accurate
 vecgrep search "what did we decide about rates" --rerank
 
+# Filter results — repeatable, all ANDed
+vecgrep search "rate hikes" --filter "source:*2026*.md" --filter "corpus:papers"
+
 # Search across every corpus you have
 vecgrep search "rate hikes"
 
 # Don't persist — index, query, throw away
 vecgrep index ./scratch --corpus tmp --ephemeral
+
+# Move a corpus between machines
+vecgrep corpora export papers --out papers.tar.gz
+vecgrep corpora import papers.tar.gz --rename papers-from-laptop
 
 # Manage corpora
 vecgrep corpora list
@@ -184,8 +199,14 @@ The plan is short and ordered. Make search good first, connect it to where you a
 - ✅ Discord JSONL adapter: drop in chat exports, search them as a corpus.
 - ✅ Claude / ChatGPT export adapters: search your own conversation history.
 
+**v0.4 — operate it like a tool**
+- ✅ Incremental indexing — content-hash skip
+- ✅ `vecgrep watch` — file-watcher
+- ✅ `vecgrep corpora export/import` — tarball roundtrip
+- ✅ Search filters — `--filter source:GLOB`, `corpus:NAME`, `meta.KEY=VALUE`
+
 **Later (unsorted)**
-File-watcher mode, incremental re-indexing, EPUB/DOCX/code-aware adapters, OCR fallback, single-binary distribution, multi-tenant mode, query-aware chunking, `--explain`. See [docs/IDEAS.md](docs/IDEAS.md) for the long list.
+EPUB/DOCX/code-aware adapters, OCR fallback, single-binary distribution, multi-tenant mode, query-aware chunking, `--explain`. See [docs/IDEAS.md](docs/IDEAS.md) for the long list.
 
 **v1.0 — stability**
 - Locked HTTP API and CLI surface
