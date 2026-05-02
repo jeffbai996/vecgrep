@@ -97,6 +97,9 @@ docs ──▶ adapters ──▶ chunkers ──▶ embed ──▶ qdrant
 
 Issues and PRs welcome. Keep it focused — `vecgrep` is a tool, not a framework.
 
+See [docs/DEVELOPING.md](docs/DEVELOPING.md) for layout, dev loop, and
+extension points.
+
 ## License
 
 MIT.
