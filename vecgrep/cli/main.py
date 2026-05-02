@@ -293,6 +293,20 @@ def serve(host: str | None, port: int | None, reload: bool) -> None:
 
 
 @cli.command()
+def mcp() -> None:
+    """Run vecgrep as an MCP server over stdio.
+
+    Configure your MCP client (Claude Desktop, Cursor, etc.) to launch this
+    command. Tools exposed: search, list_corpora, get_corpus.
+    """
+    try:
+        from ..mcp.server import run as run_mcp
+    except RuntimeError as e:
+        raise click.ClickException(str(e))
+    run_mcp()
+
+
+@cli.command()
 @click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
 def config(json_out: bool) -> None:
     """Show current resolved configuration."""
