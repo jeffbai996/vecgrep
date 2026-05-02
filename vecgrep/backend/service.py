@@ -5,6 +5,8 @@ corpus lifecycle so callers don't have to coordinate four subsystems.
 """
 from __future__ import annotations
 
+import fnmatch
+import hashlib
 import time
 import uuid
 from dataclasses import dataclass
@@ -105,8 +107,16 @@ class VecgrepService:
         source: str,
         corpus_name: str,
         chunker_name: str = "sentence_window",
-    ) -> tuple[int, int]:
-        """Index a source into a corpus. Returns (docs, chunks)."""
+        force: bool = False,
+    ) -> tuple[int, int, int]:
+        """Index a source into a corpus. Returns (docs, chunks, skipped).
+
+        Incremental: per-document content hashes are persisted in the corpus
+        metadata. A second index() call against the same source skips
+        embedding when the content hash hasn't changed. Pass force=True to
+        re-embed unconditionally (e.g. after a chunker change you want to
+        replay).
+        """
         if corpus_name == EPHEMERAL_NAME and not self.ephemeral:
             raise CorpusError("Use --ephemeral to write to the ephemeral corpus.")
 
@@ -148,9 +158,16 @@ class VecgrepService:
         # When a source is being re-indexed, subtract its old chunk count so
         # the corpus total stays accurate after we replace it.
         chunks_freed = 0
+        skipped = 0
         for doc in _expand(source, adapter):
             chunks = chunker.chunk(doc.text)
             if not chunks:
+                continue
+
+            doc_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
+            if not force and corpus.source_hashes.get(doc.source_id) == doc_hash:
+                # Already indexed at this exact content — skip embed call.
+                skipped += 1
                 continue
 
             chunks_freed += _count_chunks_for_source(self.bm25, corpus_name, doc.source_id)
@@ -185,6 +202,7 @@ class VecgrepService:
             total_chunks += len(chunks)
             if doc.source_id not in corpus.sources:
                 corpus.sources.append(doc.source_id)
+            corpus.source_hashes[doc.source_id] = doc_hash
 
         corpus.doc_count = len(corpus.sources)
         corpus.chunk_count = corpus.chunk_count - chunks_freed + total_chunks
@@ -194,7 +212,7 @@ class VecgrepService:
         self.registry._corpora[corpus.name] = corpus
         if not self.ephemeral:
             self.registry._save()
-        return total_docs, total_chunks
+        return total_docs, total_chunks, skipped
 
     # ----- search ---------------------------------------------------------------
     def search(
@@ -205,6 +223,7 @@ class VecgrepService:
         mode: SearchMode = DEFAULT_MODE,
         rerank: bool = False,
         rerank_model: str | None = None,
+        filters: list[str] | None = None,
     ) -> list[SearchResult]:
         top_k = top_k or self.settings.default_top_k
         if corpus_name:
@@ -214,13 +233,18 @@ class VecgrepService:
         if not corpora:
             return []
 
-        # When reranking, ask each retriever for the full candidate pool so
-        # the reranker has more to work with; truncate to top_k after.
-        per_corpus_k = CANDIDATE_POOL if rerank else top_k
+        # Filtering shrinks the result set after retrieval. Pull a wider pool
+        # when filters are active so we don't end up with empty results just
+        # because the top hits failed the filter.
+        wider = bool(filters) or rerank
+        per_corpus_k = CANDIDATE_POOL if wider else top_k
 
         results: list[SearchResult] = []
         for c in corpora:
             results.extend(self._search_one(c, query, per_corpus_k, mode))
+
+        if filters:
+            results = [r for r in results if _passes_filters(r, filters)]
 
         if rerank:
             results = self._apply_rerank(query, results, top_k, rerank_model)
@@ -331,6 +355,125 @@ class VecgrepService:
     def list_corpora(self) -> list[Corpus]:
         return self.registry.list()
 
+    # ----- export / import ------------------------------------------------------
+    def export_corpus(self, name: str, dest: Path) -> Path:
+        """Write a portable .tar.gz containing this corpus' state.
+
+        Bundle layout:
+            corpus.json            metadata (name, embed model, dim, source list, hashes)
+            qdrant/                collection storage (dir tree)
+            bm25.pkl               inverted index pickle (if present)
+        """
+        import json
+        import tarfile
+        import tempfile
+
+        corpus = self.registry.get(name)
+        # Force an explicit close on the qdrant client so the storage dir is
+        # in a consistent state before we tar it. Re-create on next use.
+        self.store.client.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            staging = Path(tmp)
+            (staging / "corpus.json").write_text(
+                json.dumps(_corpus_to_dict(corpus), indent=2, sort_keys=True)
+            )
+
+            # Qdrant embedded mode stores everything in one folder; per-collection
+            # data lives under that folder. Easiest portable export: ship the
+            # whole Qdrant dir but only collections matching this corpus.
+            collection = _collection_for(name)
+            src_qdrant = self.settings.qdrant_path / "collection" / collection
+            if src_qdrant.is_dir():
+                _copytree(src_qdrant, staging / "qdrant" / "collection" / collection)
+            meta_root = self.settings.qdrant_path / "meta.json"
+            if meta_root.is_file():
+                (staging / "qdrant" / "meta.json").parent.mkdir(parents=True, exist_ok=True)
+                (staging / "qdrant" / "meta.json").write_bytes(meta_root.read_bytes())
+
+            bm25_src = self.settings.home / "bm25" / f"{name}.pkl"
+            if bm25_src.is_file():
+                (staging / "bm25.pkl").write_bytes(bm25_src.read_bytes())
+
+            dest = dest.expanduser().resolve()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(dest, "w:gz") as tar:
+                for child in staging.iterdir():
+                    tar.add(child, arcname=child.name)
+
+        # Re-open the store so subsequent calls work.
+        self.store = QdrantStore(None if self.ephemeral else self.settings.qdrant_path)
+        return dest
+
+    def import_corpus(self, archive: Path, rename: str | None = None) -> Corpus:
+        """Restore a corpus from a tarball produced by export_corpus()."""
+        import json
+        import tarfile
+        import tempfile
+
+        archive = archive.expanduser().resolve()
+        if not archive.is_file():
+            raise CorpusError(f"Archive not found: {archive}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            staging = Path(tmp)
+            with tarfile.open(archive, "r:gz") as tar:
+                tar.extractall(staging)
+
+            meta_path = staging / "corpus.json"
+            if not meta_path.is_file():
+                raise CorpusError(f"Archive missing corpus.json: {archive}")
+            meta = json.loads(meta_path.read_text())
+            target_name = rename or meta["name"]
+
+            if self.registry.has(target_name):
+                raise CorpusError(
+                    f"Corpus '{target_name}' already exists. "
+                    "Pass --rename to import under a different name."
+                )
+
+            # Close current store so we can write into its dir.
+            self.store.client.close()
+
+            # Restore qdrant collection. If we're renaming, the stored
+            # directory still has the old name; rename it on copy.
+            src_qdrant = staging / "qdrant" / "collection"
+            if src_qdrant.is_dir():
+                old_collection = _collection_for(meta["name"])
+                new_collection = _collection_for(target_name)
+                src_collection_dir = src_qdrant / old_collection
+                if src_collection_dir.is_dir():
+                    dest_collection_dir = (
+                        self.settings.qdrant_path / "collection" / new_collection
+                    )
+                    dest_collection_dir.parent.mkdir(parents=True, exist_ok=True)
+                    _copytree(src_collection_dir, dest_collection_dir)
+
+            bm25_src = staging / "bm25.pkl"
+            if bm25_src.is_file():
+                bm25_dir = self.settings.home / "bm25"
+                bm25_dir.mkdir(parents=True, exist_ok=True)
+                (bm25_dir / f"{target_name}.pkl").write_bytes(bm25_src.read_bytes())
+
+            corpus = Corpus(
+                name=target_name,
+                embed_backend=meta["embed_backend"],
+                embed_model=meta["embed_model"],
+                dim=meta["dim"],
+                chunker=meta.get("chunker", "sentence_window"),
+                doc_count=meta.get("doc_count", 0),
+                chunk_count=meta.get("chunk_count", 0),
+                created_at=meta.get("created_at", time.time()),
+                updated_at=time.time(),
+                sources=list(meta.get("sources", [])),
+                source_hashes=dict(meta.get("source_hashes", {})),
+            )
+            self.registry.upsert(corpus)
+
+        # Re-open store so the new collection is visible.
+        self.store = QdrantStore(None if self.ephemeral else self.settings.qdrant_path)
+        return corpus
+
 
 # ----- helpers ------------------------------------------------------------------
 def _collection_for(corpus_name: str) -> str:
@@ -358,6 +501,57 @@ def _hit_payload(hit: StoredHit) -> dict:
         "text": hit.chunk_text,
         "metadata": hit.metadata,
     }
+
+
+def _corpus_to_dict(c: Corpus) -> dict:
+    return {
+        "name": c.name,
+        "embed_backend": c.embed_backend,
+        "embed_model": c.embed_model,
+        "dim": c.dim,
+        "chunker": c.chunker,
+        "doc_count": c.doc_count,
+        "chunk_count": c.chunk_count,
+        "created_at": c.created_at,
+        "updated_at": c.updated_at,
+        "sources": list(c.sources),
+        "source_hashes": dict(c.source_hashes),
+    }
+
+
+def _copytree(src: Path, dst: Path) -> None:
+    import shutil
+
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+
+
+def _passes_filters(result: SearchResult, filters: list[str]) -> bool:
+    """Apply --filter expressions. Supported forms:
+
+        source:GLOB      — fnmatch against result.source_id
+        corpus:NAME      — exact corpus name match
+        meta.KEY=VALUE   — exact metadata field match (string compare)
+
+    All filters AND together. A malformed filter is silently ignored.
+    """
+    for f in filters:
+        if ":" not in f and "=" not in f:
+            continue
+        if f.startswith("source:"):
+            pat = f[len("source:") :]
+            if not fnmatch.fnmatch(result.source_id, pat):
+                return False
+        elif f.startswith("corpus:"):
+            if result.corpus != f[len("corpus:") :]:
+                return False
+        elif f.startswith("meta."):
+            key_value = f[len("meta.") :]
+            if "=" not in key_value:
+                continue
+            key, value = key_value.split("=", 1)
+            if str(result.metadata.get(key, "")) != value:
+                return False
+    return True
 
 
 def _count_chunks_for_source(bm25: BM25Store, corpus_name: str, source_id: str) -> int:

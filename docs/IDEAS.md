@@ -34,7 +34,7 @@ Not committed. We'll cherry-pick when something becomes the right next move.
 
 - **Query-aware chunking** — at index time, store small atomic chunks. At query time, find the best one, then expand outward by similarity to the query until a token budget is hit. Better recall on long docs without bloating chunk count.
 - **Query rewriting / synonym expansion** behind a flag — useful for short queries, harmful for long specific ones, so opt-in.
-- **Per-corpus filters** — `--filter source:papers/2026-*.md`, `--filter metadata.author=jeff`. Implemented at the Qdrant layer; just plumbing.
+- ~~Per-corpus filters~~ — shipped v0.4. `source:GLOB`, `corpus:NAME`, `meta.KEY=VALUE`. Repeatable, AND'd. Filtering happens after retrieval rather than at the Qdrant layer (simpler; works equally well for BM25 hits).
 - **Faceted result clustering** — group hits by source, by time, by topic (k-means on the result vectors).
 - **`--explain` flag** — dump similarity decomposition (which dimensions dominate, what BM25 contributed, what reranker thought).
 
@@ -48,9 +48,9 @@ Not committed. We'll cherry-pick when something becomes the right next move.
 
 ### Operate it like a tool
 
-- **`vecgrep watch ./docs --corpus live`** — file watcher, re-indexes on change. Pairs with a `vecgrep daemon` mode.
-- **Incremental indexing** — hash sources, re-embed only diffs. Foundation for `watch`.
-- **`vecgrep export` / `vecgrep import`** — ship a corpus between machines as a tarball.
+- ~~`vecgrep watch ./docs --corpus live`~~ — shipped v0.4.
+- ~~Incremental indexing~~ — shipped v0.4. Hashes per source, skip unchanged.
+- ~~`vecgrep corpora export/import`~~ — shipped v0.4. Tarball with metadata + qdrant collection + bm25 pickle.
 - **Per-source TTL** — `--ttl 30d` on URL ingestion, auto-evict on next index.
 - **Backup/restore** — single command, snapshot ~/.vecgrep.
 

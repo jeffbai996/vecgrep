@@ -66,14 +66,14 @@ def delete_corpus(name: str) -> dict:
 def index(req: IndexRequest) -> IndexResponse:
     svc = _service()
     try:
-        docs, chunks = svc.index(req.source, req.corpus, req.chunker)
+        docs, chunks, skipped = svc.index(req.source, req.corpus, req.chunker, force=req.force)
     except AdapterError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except EmbedBackendError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except CorpusError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return IndexResponse(docs=docs, chunks=chunks)
+    return IndexResponse(docs=docs, chunks=chunks, skipped=skipped)
 
 
 @router.post("/search", response_model=SearchResponse)
@@ -89,6 +89,7 @@ def search(req: SearchRequest) -> SearchResponse:
             mode=req.mode,
             rerank=req.rerank,
             rerank_model=req.rerank_model,
+            filters=req.filters or None,
         )
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))

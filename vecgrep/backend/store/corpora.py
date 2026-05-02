@@ -31,6 +31,10 @@ class Corpus:
     created_at: float = 0.0
     updated_at: float = 0.0
     sources: list[str] = field(default_factory=list)
+    # Maps source_id -> content sha256. Used to skip re-embedding sources
+    # whose contents haven't changed since the last index. Empty for old
+    # corpora — they fall back to "always re-embed" until the next index.
+    source_hashes: dict[str, str] = field(default_factory=dict)
 
 
 class CorpusRegistry:

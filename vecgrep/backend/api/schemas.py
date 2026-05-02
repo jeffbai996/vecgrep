@@ -7,11 +7,13 @@ class IndexRequest(BaseModel):
     source: str = Field(..., description="File path, directory, or URL")
     corpus: str
     chunker: str = "sentence_window"
+    force: bool = False
 
 
 class IndexResponse(BaseModel):
     docs: int
     chunks: int
+    skipped: int = 0
 
 
 class SearchRequest(BaseModel):
@@ -21,6 +23,7 @@ class SearchRequest(BaseModel):
     mode: str = "hybrid"
     rerank: bool = False
     rerank_model: str | None = None
+    filters: list[str] = []
 
 
 class SearchHit(BaseModel):
