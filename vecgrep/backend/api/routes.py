@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 from ..config import get_settings
 from ..embed import EmbedBackendError
 from ..ingestion.adapters import AdapterError
+from ..rerank import RerankerError
 from ..service import VecgrepService
 from ..store import CorpusError
 from .schemas import (
@@ -81,10 +82,19 @@ def search(req: SearchRequest) -> SearchResponse:
     if req.mode not in ("hybrid", "vector", "bm25"):
         raise HTTPException(status_code=400, detail=f"Unknown search mode: {req.mode}")
     try:
-        results = svc.search(req.query, req.corpus, req.top_k, mode=req.mode)
+        results = svc.search(
+            req.query,
+            req.corpus,
+            req.top_k,
+            mode=req.mode,
+            rerank=req.rerank,
+            rerank_model=req.rerank_model,
+        )
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except EmbedBackendError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except RerankerError as e:
         raise HTTPException(status_code=503, detail=str(e))
     return SearchResponse(
         hits=[

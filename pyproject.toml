@@ -39,6 +39,7 @@ dependencies = [
 
 [project.optional-dependencies]
 openai = ["openai>=1.30"]
+rerank = ["sentence-transformers>=2.7"]
 
 [project.urls]
 Homepage = "https://github.com/jeffbai996/vecgrep"

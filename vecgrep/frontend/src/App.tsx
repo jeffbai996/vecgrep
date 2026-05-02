@@ -24,11 +24,16 @@ export default function App() {
     refresh();
   }, []);
 
-  const onSearch = async (query: string, topK: number, mode: SearchMode) => {
+  const onSearch = async (
+    query: string,
+    topK: number,
+    mode: SearchMode,
+    rerank: boolean
+  ) => {
     setError(null);
     setSearching(true);
     try {
-      const r = await api.search(query, selectedCorpus, topK, mode);
+      const r = await api.search(query, selectedCorpus, topK, mode, rerank);
       setHits(r.hits);
     } catch (e) {
       setError(String((e as Error).message ?? e));

@@ -19,6 +19,8 @@ class SearchRequest(BaseModel):
     corpus: str | None = None
     top_k: int | None = None
     mode: str = "hybrid"
+    rerank: bool = False
+    rerank_model: str | None = None
 
 
 class SearchHit(BaseModel):
