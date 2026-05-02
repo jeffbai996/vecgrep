@@ -74,6 +74,16 @@ vecgrep search "what did we decide about rates" --rerank
 # Filter results — repeatable, all ANDed
 vecgrep search "rate hikes" --filter "source:*2026*.md" --filter "corpus:papers"
 
+# Show the score decomposition for each hit (cosine, BM25, RRF, rerank)
+vecgrep search "rate hikes" --explain
+
+# Inspect / clear the embedding cache
+vecgrep cache stats
+vecgrep cache clear --identity ollama:nomic-embed-text
+
+# Re-embed a corpus to a different backend / model
+vecgrep corpora migrate papers --to-backend openai --to-model text-embedding-3-small
+
 # Search across every corpus you have
 vecgrep search "rate hikes"
 
@@ -149,6 +159,7 @@ Each corpus pins the embedding backend and dimension at index time, and refuses 
 | `OPENAI_API_KEY` | unset | If set, used as fallback when Ollama is down |
 | `VECGREP_API_HOST` | `127.0.0.1` | API bind host |
 | `VECGREP_API_PORT` | `8765` | API port |
+| `VECGREP_API_TOKEN` | unset | If set, `/api/*` requires `Authorization: Bearer <token>` (health stays public) |
 | `VECGREP_TOP_K` | `5` | Default `--top` value |
 
 ## Web UI
@@ -203,8 +214,14 @@ The plan is short and ordered. Make search good first, connect it to where you a
 - ✅ `vecgrep corpora export/import` — tarball roundtrip
 - ✅ Search filters — `--filter source:GLOB`, `corpus:NAME`, `meta.KEY=VALUE`
 
+**v0.5 — power features**
+- ✅ `--explain` — per-retriever score breakdown (cosine, BM25, RRF, rerank)
+- ✅ Embedding cache — sqlite-backed `(model, sha256(text)) → vector` cache, free re-indexes
+- ✅ `vecgrep corpora migrate` — re-embed a corpus to a new backend / model in place
+- ✅ Bearer-token auth for `/api/*` — set `VECGREP_API_TOKEN` to lock down a remote-bound server
+
 **Later (unsorted)**
-EPUB/DOCX/code-aware adapters, OCR fallback, single-binary distribution, multi-tenant mode, query-aware chunking, `--explain`. See [docs/IDEAS.md](docs/IDEAS.md) for the long list.
+EPUB/DOCX/code-aware adapters, OCR fallback, single-binary distribution, query-aware chunking, query rewriting, faceted clustering. See [docs/IDEAS.md](docs/IDEAS.md) for the long list.
 
 **v1.0 — stability**
 - Locked HTTP API and CLI surface

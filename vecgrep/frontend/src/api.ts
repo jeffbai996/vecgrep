@@ -27,9 +27,25 @@ export type SearchHit = {
   matched_by: string[];
 };
 
+function _authHeaders(): Record<string, string> {
+  // If the operator has set VECGREP_API_TOKEN server-side, the UI needs to
+  // send the same token. We read it from localStorage so the user can drop
+  // it in via DevTools without us shipping a login screen.
+  try {
+    const tok = window.localStorage.getItem("vecgrep_token");
+    return tok ? { Authorization: `Bearer ${tok}` } : {};
+  } catch {
+    return {};
+  }
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ..._authHeaders(),
+      ...((init.headers as Record<string, string>) || {}),
+    },
     ...init,
   });
   if (!res.ok) {

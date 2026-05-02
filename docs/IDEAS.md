@@ -36,7 +36,7 @@ Not committed. We'll cherry-pick when something becomes the right next move.
 - **Query rewriting / synonym expansion** behind a flag — useful for short queries, harmful for long specific ones, so opt-in.
 - ~~Per-corpus filters~~ — shipped v0.4. `source:GLOB`, `corpus:NAME`, `meta.KEY=VALUE`. Repeatable, AND'd. Filtering happens after retrieval rather than at the Qdrant layer (simpler; works equally well for BM25 hits).
 - **Faceted result clustering** — group hits by source, by time, by topic (k-means on the result vectors).
-- **`--explain` flag** — dump similarity decomposition (which dimensions dominate, what BM25 contributed, what reranker thought).
+- ~~`--explain` flag~~ — shipped v0.5. Per-retriever scores: vector_cosine, vector_rank, bm25_score, bm25_rank, rrf, rerank_score.
 
 ### Ingestion
 
@@ -56,10 +56,11 @@ Not committed. We'll cherry-pick when something becomes the right next move.
 
 ### Power features
 
-- **Multi-tenant mode** — namespaced corpora behind a bearer token; for shared servers.
-- **Embedding model migration tool** — re-embed a corpus to a new model in place, with rollback.
-- **Documented plugin API** — pip-installable third-party adapters and chunkers.
-- **Hybrid embedding cache** — cache (text_hash → vector) so re-indexing the same content is free.
+- ~~Bearer-token auth~~ — shipped v0.5. `VECGREP_API_TOKEN` env. Health stays public. Frontend reads token from `localStorage.vecgrep_token`. Note: this is single-shared-secret, not multi-user — no per-user namespacing of corpora yet.
+- ~~Embedding model migration~~ — shipped v0.5. `vecgrep corpora migrate <name> --to-backend X --to-model Y`. Re-fetches all sources, swaps in atomically.
+- **Documented plugin API** — pip-installable third-party adapters and chunkers. Mostly a docs job; the registries already work.
+- ~~Embedding cache~~ — shipped v0.5. SQLite at `~/.vecgrep/embed_cache.db` keyed on (backend identity, sha256(text)). Transparent wrapper around any backend.
+- **True multi-user namespacing** — separate corpora per token holder. Bigger lift than bearer auth alone; needs token registry, owner-tagged corpus paths.
 
 ### Distribution / polish
 
