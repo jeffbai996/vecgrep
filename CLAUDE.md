@@ -33,10 +33,24 @@ vecgrep/frontend/        React + Tailwind, single page, built into dist/
 ## Don'ts
 
 - No telemetry, no phone-home, no analytics
-- No tests in initial scaffold (per spec)
-- No Claude/ChatGPT export adapters yet (v2) — leave the hook
-- Don't hardcode tickers, hostnames, or anything from CLAUDE.md memories
+- No tests in initial scaffold (per spec) — add them at the service layer when v0.2 starts
+- Don't hardcode tickers, hostnames, or anything from global CLAUDE.md memories
 - No emojis in source code or commits
+
+## What's next (committed)
+
+Build order is fixed. See `docs/IDEAS.md` for the long unsorted list.
+
+**v0.2 — search quality**
+1. Hybrid search: BM25 + vector via Reciprocal Rank Fusion. Add `rank-bm25` (or inline ~50 LOC), per-corpus inverted index alongside Qdrant. `--mode {hybrid,vector,bm25}`, default hybrid.
+2. Cross-encoder reranking, `--rerank` flag, off by default. `BAAI/bge-reranker-base`. Optional `vecgrep[rerank]` extra.
+
+**v0.3 — connect**
+3. MCP server: stdio transport, expose `search` and `list_corpora`.
+4. Discord JSONL adapter: reads discord-logger output, channel-as-source.
+5. Claude / ChatGPT export adapters (the v2 hook the spec called out).
+
+Anything else (file-watcher, EPUB/DOCX, OCR, single-binary, multi-tenant, query-aware chunking) is **Later** — capture in `docs/IDEAS.md`, don't pull forward.
 
 ## Embedding dimensions reference
 
