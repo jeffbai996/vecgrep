@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Virtual envs
+venv/
+.venv/
+env/
+
+# Local data and secrets
+.env
+.env.local
+~/.vecgrep/
+data/
+*.db
+*.sqlite
+
+# Frontend
+vecgrep/frontend/node_modules/
+vecgrep/frontend/dist/
+vecgrep/frontend/.vite/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Qdrant local storage if anyone runs it from repo root
+qdrant_storage/
