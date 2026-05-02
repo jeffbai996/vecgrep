@@ -85,14 +85,15 @@ class QdrantStore:
         top_k: int,
     ) -> list[StoredHit]:
         try:
-            results = self.client.search(
+            response = self.client.query_points(
                 collection_name=collection,
-                query_vector=query_vector,
+                query=query_vector,
                 limit=top_k,
                 with_payload=True,
             )
         except Exception:
             return []
+        results = response.points
         hits: list[StoredHit] = []
         for r in results:
             p = r.payload or {}
