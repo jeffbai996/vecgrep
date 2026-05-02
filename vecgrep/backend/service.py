@@ -179,6 +179,13 @@ class VecgrepService:
         chunker = self.chunker(chunker_name)
         collection = _collection_for(corpus_name)
 
+        # --force should also bust the embedding cache for these texts;
+        # otherwise we just re-write identical vectors. The wrapped backend
+        # has a `bypass` flag we toggle for the duration of this call.
+        prev_bypass = getattr(backend, "bypass", None)
+        if force and hasattr(backend, "bypass"):
+            backend.bypass = True
+
         total_docs = 0
         total_chunks = 0
         # When a source is being re-indexed, subtract its old chunk count so
@@ -238,6 +245,11 @@ class VecgrepService:
         self.registry._corpora[corpus.name] = corpus
         if not self.ephemeral:
             self.registry._save()
+
+        # Restore the bypass flag for subsequent calls (other corpora etc.)
+        if prev_bypass is not None and hasattr(backend, "bypass"):
+            backend.bypass = prev_bypass
+
         return total_docs, total_chunks, skipped
 
     # ----- search ---------------------------------------------------------------
@@ -530,17 +542,25 @@ class VecgrepService:
                 break
         self.store.drop_collection(temp_collection)
 
-        # BM25 pickle: rename file. Safe — nothing concurrent reads it.
+        # BM25 pickle: rename file AND rewrite payload.corpus inside it.
+        # Otherwise BM25 hits surface with the temp_name in their payload,
+        # which leaks the implementation detail into search results and
+        # breaks corpus filters.
         old_bm25 = self.settings.home / "bm25" / f"{temp_name}.pkl"
         new_bm25 = self.settings.home / "bm25" / f"{name}.pkl"
         if old_bm25.exists():
             if new_bm25.exists():
                 new_bm25.unlink()
             old_bm25.rename(new_bm25)
-        # Force in-memory BM25 cache to drop stale temp_name entry — next
-        # access reloads from the renamed pickle under the new name.
+        # Drop in-memory caches for BOTH names so the rename is visible.
         self.bm25._cache.pop(temp_name, None)
         self.bm25._cache.pop(name, None)
+        # Now rewrite payloads under the new name.
+        idx = self.bm25._load(name)
+        for payload in idx.payloads:
+            if payload.get("corpus") != name:
+                payload["corpus"] = name
+        self.bm25._persist(name)
 
         # Drop the temp registry entry; upsert under final name. We also
         # rewrite each chunk payload's "corpus" field to the final name —

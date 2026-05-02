@@ -103,6 +103,9 @@ class CachedBackend(EmbedBackend):
 
     Cache is keyed on the wrapped backend's `identity` so two backends with
     different models live in the same DB without collision.
+
+    Set `bypass=True` on a per-call basis (e.g. during --force reindex) to
+    skip the cache and overwrite stale entries with fresh embeddings.
     """
 
     def __init__(self, inner: EmbedBackend, cache: EmbedCache) -> None:
@@ -111,13 +114,18 @@ class CachedBackend(EmbedBackend):
         self.name = inner.name
         self.model = inner.model
         self.dim = inner.dim
+        self.bypass = False
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
         identity = self._inner.identity
+        if self.bypass:
+            # Refresh: re-embed everything, overwrite cache entries.
+            vectors = self._inner.embed(texts)
+            self._cache.put_many(identity, texts, vectors)
+            return vectors
         cached = self._cache.get_many(identity, texts)
-        # Map text -> shaSing the input twice would re-hash; pre-hash once.
         shas = [EmbedCache._sha(t) for t in texts]
         missing_idx = [i for i, s in enumerate(shas) if s not in cached]
         if missing_idx:

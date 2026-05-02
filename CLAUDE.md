@@ -33,9 +33,15 @@ vecgrep/frontend/        React + Tailwind, single page, built into dist/
 ## Don'ts
 
 - No telemetry, no phone-home, no analytics
-- No tests in initial scaffold (per spec) — add them at the service layer when v0.2 starts
 - Don't hardcode tickers, hostnames, or anything from global CLAUDE.md memories
 - No emojis in source code or commits
+
+## Tests
+
+- `pip install -e ".[dev]"` then `pytest`. Hermetic: no network, no Ollama, no shared `~/.vecgrep` — each test gets its own `VECGREP_HOME` under `tmp_path`.
+- Stub backend is `tests.conftest.StubEmbed`. Inject via `svc._backend_cache["auto"] = CachedBackend(stub, svc._embed_cache)` (the fixture already does this).
+- New features must come with at least one test against the service layer. That's where bugs hide; FastAPI / Click plumbing tests itself.
+- BM25 has a known degenerate case (single-doc corpus, or all docs share the term → IDF=0 → score=0). The store falls back to token-overlap counting in that case. Don't remove the fallback — covered by `tests/test_bm25_store.py::test_persistence_round_trip`.
 
 ## What's next (committed)
 
