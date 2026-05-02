@@ -87,6 +87,9 @@ vecgrep serve
 | `markdown` | `.md`, `.markdown`, `.mdx` |
 | `pdf` | `.pdf` (text layer only — scanned PDFs need OCR first) |
 | `url` | `http://`, `https://` — strips `<script>`, `<style>`, etc., keeps prose |
+| `discord_jsonl` | `.jsonl` files where each line is a Discord message (DiscordChatExporter format or any one-message-per-line JSONL with `author` + `content`) |
+| `claude_export` | Anthropic data export `conversations.json` — one Document per conversation |
+| `chatgpt_export` | OpenAI data export `conversations.json` — one Document per conversation, follows main thread |
 
 Pointing `vecgrep index` at a directory walks it recursively and dispatches each file to the matching adapter. Unrecognized files are skipped silently — no errors.
 
@@ -176,10 +179,10 @@ The plan is short and ordered. Make search good first, connect it to where you a
 - ✅ Hybrid search (BM25 + vector + RRF), default on. Pure vector misses exact-token matches like CVE numbers, ticker symbols, function names; BM25 nails them.
 - ✅ Cross-encoder reranking (`--rerank`, off by default). Local, ~30ms for 50 chunks on CPU.
 
-**v0.3 — connect it (in progress)**
+**v0.3 — connect it**
 - ✅ MCP server: expose `vecgrep` as a tool to Claude / Cursor / any MCP client. Index a corpus once, let your assistant retrieve from it instead of stuffing context.
-- Discord JSONL adapter: drop in chat exports, search them as a corpus.
-- Claude / ChatGPT export adapters: search your own conversation history.
+- ✅ Discord JSONL adapter: drop in chat exports, search them as a corpus.
+- ✅ Claude / ChatGPT export adapters: search your own conversation history.
 
 **Later (unsorted)**
 File-watcher mode, incremental re-indexing, EPUB/DOCX/code-aware adapters, OCR fallback, single-binary distribution, multi-tenant mode, query-aware chunking, `--explain`. See [docs/IDEAS.md](docs/IDEAS.md) for the long list.
