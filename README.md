@@ -128,36 +128,26 @@ Each corpus pins the embedding backend and dimension at index time, and refuses 
 
 ## Roadmap
 
+The plan is short and ordered. Make search good first, connect it to where you actually work second, polish later.
+
 **v0.2 — search quality**
-- Hybrid search: BM25 keyword scoring fused with vector similarity (RRF)
-- Cross-encoder reranking on top-k results (configurable, off by default)
-- Per-corpus search filters: by source path glob, by metadata field
-- Query rewriting: synonym expansion behind a flag
+- Hybrid search: BM25 keyword scoring fused with vector similarity via Reciprocal Rank Fusion. Pure vector misses exact-token matches like CVE numbers, ticker symbols, function names; BM25 nails them.
+- Cross-encoder reranking on top-k results (`--rerank` flag, off by default). Local model, ~30ms for 50 chunks on CPU.
 
-**v0.3 — ingestion breadth**
-- Adapters for Claude/ChatGPT JSON exports — search your own conversations
-- EPUB and DOCX adapters
-- Code-aware adapter (tree-sitter) that respects function/class boundaries
-- OCR fallback path for image-only PDFs (Tesseract optional dep)
+**v0.3 — connect it**
+- MCP server: expose `vecgrep` as a tool to Claude / Cursor / any MCP client. Index a corpus once, let your assistant retrieve from it instead of stuffing context.
+- Discord JSONL adapter: drop in chat exports, search them as a corpus.
+- Claude / ChatGPT export adapters: search your own conversation history.
 
-**v0.4 — operate it like a tool**
-- Incremental indexing: detect changed files since last index, re-embed only the diff
-- File-watcher mode: `vecgrep watch ./docs --corpus live` keeps a corpus current
-- `vecgrep export` / `vecgrep import` for shipping a corpus between machines
-- Per-source TTL — auto-evict URLs older than N days
-
-**v0.5 — power features**
-- MCP server so Claude/Cursor/etc can query corpora as a tool
-- Multi-tenant mode: namespaced corpora behind a token, for shared servers
-- Faceted result clustering (group hits by source, time, or topic)
-- `--explain` flag that dumps the embedding similarity decomposition
+**Later (unsorted)**
+File-watcher mode, incremental re-indexing, EPUB/DOCX/code-aware adapters, OCR fallback, single-binary distribution, multi-tenant mode, query-aware chunking, `--explain`. See [docs/IDEAS.md](docs/IDEAS.md) for the long list.
 
 **v1.0 — stability**
 - Locked HTTP API and CLI surface
 - Migration tooling for embedding model upgrades
 - Documented plugin API for adapters, chunkers, embed backends, rerankers
 
-The roadmap is intentions, not commitments. PRs welcome on any of it; open an issue first if it's a big change.
+PRs welcome on anything in v0.2 or v0.3. For larger items in **Later**, open an issue first.
 
 ## Why not just use X?
 
