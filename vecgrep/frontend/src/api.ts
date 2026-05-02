@@ -14,6 +14,8 @@ export type Corpus = {
   updated_at: number;
 };
 
+export type SearchMode = "hybrid" | "vector" | "bm25";
+
 export type SearchHit = {
   similarity_pct: number;
   chunk: string;
@@ -22,6 +24,7 @@ export type SearchHit = {
   source_id: string;
   corpus: string;
   metadata: Record<string, unknown>;
+  matched_by: string[];
 };
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -53,10 +56,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ source, corpus, chunker }),
     }),
-  search: (query: string, corpus: string | null, top_k: number) =>
+  search: (
+    query: string,
+    corpus: string | null,
+    top_k: number,
+    mode: SearchMode = "hybrid"
+  ) =>
     request<{ hits: SearchHit[] }>("/api/search", {
       method: "POST",
-      body: JSON.stringify({ query, corpus, top_k }),
+      body: JSON.stringify({ query, corpus, top_k, mode }),
     }),
   config: () => request<Record<string, unknown>>("/api/config"),
 };

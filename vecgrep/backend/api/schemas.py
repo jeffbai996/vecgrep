@@ -18,6 +18,7 @@ class SearchRequest(BaseModel):
     query: str
     corpus: str | None = None
     top_k: int | None = None
+    mode: str = "hybrid"
 
 
 class SearchHit(BaseModel):
@@ -28,6 +29,7 @@ class SearchHit(BaseModel):
     source_id: str
     corpus: str
     metadata: dict
+    matched_by: list[str] = []
 
 
 class SearchResponse(BaseModel):

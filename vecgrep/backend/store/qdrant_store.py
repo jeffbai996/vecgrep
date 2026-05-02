@@ -66,14 +66,15 @@ class QdrantStore:
     def upsert(
         self,
         collection: str,
+        ids: list[str],
         vectors: list[list[float]],
         payloads: list[dict],
     ) -> int:
         if not vectors:
             return 0
         points = [
-            qm.PointStruct(id=str(uuid.uuid4()), vector=v, payload=p)
-            for v, p in zip(vectors, payloads)
+            qm.PointStruct(id=cid, vector=v, payload=p)
+            for cid, v, p in zip(ids, vectors, payloads)
         ]
         self.client.upsert(collection_name=collection, points=points, wait=True)
         return len(points)
