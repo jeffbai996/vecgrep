@@ -6,9 +6,15 @@ to its own Qdrant collection. Payload schema:
     {
       "corpus": str,
       "source_id": str,
-      "source_text": str,        # the full source text, kept once on the
-                                  #   first chunk of each source so context
-                                  #   reconstruction needs no extra storage
+      "source_text": str,        # the full source text, duplicated onto
+                                  #   every chunk so any single hit can
+                                  #   reconstruct surrounding context
+                                  #   without a second store lookup. Wastes
+                                  #   space (one copy per chunk, not per
+                                  #   source) — fine at MVP scale, slated
+                                  #   for v1.0 cleanup once ingestion
+                                  #   targets large corpora like full
+                                  #   Discord/ChatGPT exports.
       "chunk_index": int,
       "chunk_start": int,
       "chunk_end": int,
