@@ -458,7 +458,7 @@ def watch(path: str, corpus: str, chunker: str, debounce: float) -> None:
         from watchfiles import watch as _watch
     except ImportError:
         raise click.ClickException(
-            "watch requires `watchfiles`. Install with `pip install watchfiles`."
+            "watch requires `watchfiles`. Install with `pip install \"vecgrep[watch]\"`."
         )
 
     target = Path(path).resolve()

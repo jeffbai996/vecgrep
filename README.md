@@ -35,6 +35,8 @@ Alpha (`v0.6.0`). Hybrid retrieval (BM25 + vector + RRF), cross-encoder rerank, 
 pip install vecgrep                # base — Ollama embedding, hybrid search
 pip install "vecgrep[openai]"      # also: OpenAI embedding fallback
 pip install "vecgrep[rerank]"      # also: cross-encoder reranking (~hundreds of MB, torch)
+pip install "vecgrep[watch]"       # also: file watcher for `vecgrep watch`
+pip install "vecgrep[mcp]"         # also: MCP server for Claude Desktop / Cursor
 ```
 
 You also need [Ollama](https://ollama.com) running locally for the default embedding backend:
