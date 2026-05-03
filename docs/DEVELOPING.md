@@ -73,7 +73,17 @@ as `matches()` returns True for the given source string.
 4. Add the name to the `--chunker` CLI choice list in
    `vecgrep/cli/main.py`
 
-## Why no tests?
+## Tests
 
-v0.1 is intentionally test-free per spec. Once the API stabilizes (v0.2),
-add pytest tests for the service layer first — that's where bugs hide.
+```bash
+pip install -e ".[dev]"
+pytest -q
+```
+
+Hermetic — no Ollama, no network, no shared `~/.vecgrep`. Every test
+gets its own `VECGREP_HOME` under `tmp_path` and a deterministic stub
+embedding backend (see `tests/conftest.py`). Coverage spans the service
+layer, BM25 store, adapters, embedding cache, export/import, and
+backend/model migration — i.e. the surfaces where shipped bugs have
+historically lived. New extension points (adapters, chunkers, embed
+backends) should land with a unit test in the matching `test_*.py`.
