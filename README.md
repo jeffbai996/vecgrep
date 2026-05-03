@@ -27,7 +27,7 @@ The closest equivalents — `txtai`, `chroma`, `LlamaIndex` — are libraries yo
 
 ## Status
 
-Early. v0.1 is a working MVP: index, search, named corpora, web UI, CLI. The public API (HTTP + CLI flags) is unstable until v1.0 — expect breaking changes within v0.x.
+Alpha (`v0.6.0`). Hybrid retrieval (BM25 + vector + RRF), cross-encoder rerank, MCP server, named corpora, incremental indexing + file watcher, embedding cache, model/backend migration, optional bearer-token auth, web UI, CLI, and a hermetic pytest suite. Adapters cover plaintext, markdown, PDF, URLs, Discord JSONL, Claude export, and ChatGPT export. The public API (HTTP + CLI flags) is unstable until v1.0 — expect breaking changes within v0.x.
 
 ## Install
 
