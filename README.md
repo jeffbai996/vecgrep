@@ -182,20 +182,52 @@ Tools exposed:
 - `list_corpora()` — every corpus and its stats
 - `get_corpus(name)` — one corpus's full metadata including source list
 
-Wire it into Claude Desktop with this snippet in `claude_desktop_config.json`:
+Then index a corpus once (`vecgrep index ./my-notes --corpus notes`), and the model can call `search("rate hikes", corpus="notes")` instead of asking you to paste documents.
+
+### Wiring into Claude Code (CLI)
+
+```bash
+# basic — uses default OLLAMA_URL (localhost:11434)
+claude mcp add vecgrep --scope user -- vecgrep mcp
+
+# pointing at a remote Ollama (e.g. on a homelab box over Tailscale)
+claude mcp add vecgrep --scope user \
+  --env VECGREP_OLLAMA_URL=http://my-server:11434 \
+  -- /absolute/path/to/vecgrep mcp
+```
+
+Verify with `claude mcp list` — should show `vecgrep: ... ✓ Connected`.
+
+If `vecgrep` isn't on `PATH` (common when you installed it inside a venv), give the absolute path to the venv's `vecgrep` binary, e.g. `~/repos/vecgrep/venv/bin/vecgrep`.
+
+### Wiring into Claude Desktop / Cursor
+
+Add to `claude_desktop_config.json` (Settings → Developer → Edit Config):
 
 ```json
 {
   "mcpServers": {
     "vecgrep": {
       "command": "vecgrep",
-      "args": ["mcp"]
+      "args": ["mcp"],
+      "env": {
+        "VECGREP_OLLAMA_URL": "http://my-server:11434"
+      }
     }
   }
 }
 ```
 
-Then index a corpus once (`vecgrep index ./my-notes --corpus notes`), and the model can call `search("rate hikes", corpus="notes")` instead of asking you to paste documents.
+Restart Claude Desktop after editing. Same shape works for Cursor's `~/.cursor/mcp.json`.
+
+### Wiring into Claude.ai (web)
+
+Claude.ai's web app supports remote MCP servers (HTTP, not stdio). To expose vecgrep over HTTP you need to wrap the stdio MCP server with a stdio-to-HTTP bridge — there's no native HTTP transport in vecgrep yet. Two approaches:
+
+1. **`mcp-remote` proxy on a small VPS** that exposes vecgrep's stdio MCP as an SSE endpoint. Then add the URL in Claude.ai → Settings → Connectors → Custom MCP server.
+2. **Run the FastAPI backend (`vecgrep serve`)** and call `/api/search` directly from a Claude Project's instructions or a tool definition. Not full MCP but works for read-only search.
+
+For most users, the CLI / Claude Desktop / Cursor stdio paths above are enough — Claude.ai over HTTP is on the roadmap.
 
 ## Roadmap
 
