@@ -4,6 +4,10 @@
 
 `vecgrep` is a local-first semantic search engine for any corpus you throw at it. Drop in documents — text, markdown, PDFs, URLs — and search by concept instead of exact words. Runs on your machine, no cloud roundtrip required.
 
+![vecgrep web UI — index panel and corpus list on the left, search bar with mode toggle, side-by-side primer on vector vs BM25 retrieval](docs/assets/web-ui.png)
+
+*The web UI: index a corpus from the sidebar, pick a mode (hybrid / vector / bm25), search. Each result shows confidence (high / soft / weak), which retriever found it (V semantic, K keyword, VK both), and the matched chunk in context. Tucked into the bottom of the page is a primer explaining how vecgrep finds things — vector vs BM25 vs hybrid, what the % can and can't tell you.*
+
 ```
 $ vecgrep search "what did we decide about rate hikes" --corpus notes
 [1]  92.4%  notes  papers/2026-q1-review.md
@@ -27,7 +31,7 @@ The closest equivalents — `txtai`, `chroma`, `LlamaIndex` — are libraries yo
 
 ## Status
 
-Alpha (`v0.6.0`). Hybrid retrieval (BM25 + vector + RRF), cross-encoder rerank, MCP server, named corpora, incremental indexing + file watcher, embedding cache, model/backend migration, optional bearer-token auth, web UI, CLI, and a hermetic pytest suite. Adapters cover plaintext, markdown, PDF, URLs, Discord JSONL, Claude export, and ChatGPT export. The public API (HTTP + CLI flags) is unstable until v1.0 — expect breaking changes within v0.x.
+Alpha (`v0.6.x`). Hybrid retrieval (BM25 + vector + RRF, BM25-weighted by default), cross-encoder rerank, MCP server, named corpora, incremental indexing + file watcher, embedding cache, model/backend migration, optional bearer-token auth, web UI with confidence-tier coloring + V/K/VK match badges, CLI, and a hermetic pytest suite. Adapters cover plaintext, markdown, PDF, URLs, Discord JSONL, Claude export, and ChatGPT export. The public API (HTTP + CLI flags) is unstable until v1.0 — expect breaking changes within v0.x.
 
 ## Install
 
@@ -131,7 +135,8 @@ docs ──▶ adapters ──▶ chunkers ──┤                      ├─
 - **Embed backends** are pluggable. Ollama (`nomic-embed-text`, 768-dim) is the default. OpenAI (`text-embedding-3-small`, 1536-dim) takes over when Ollama is unreachable and `OPENAI_API_KEY` is set.
 - **Qdrant** runs in embedded mode (no server, no Docker) at `~/.vecgrep/qdrant/`. Each named corpus is its own collection.
 - **BM25** index runs alongside Qdrant, persisted as a pickle per corpus. Tokenizer splits identifiers (`sharpe_ratio` → `sharpe`, `ratio`) so code search isn't blind to underscore- or camelCase-style naming.
-- **Hybrid retrieval** is the default. Each retriever returns its top 50 candidates; their ranks are fused via Reciprocal Rank Fusion (`score = Σ 1/(60+rank)`). Pure-vector or pure-BM25 are available with `--mode vector` / `--mode bm25`.
+- **Hybrid retrieval** is the default. Each retriever returns its top 50 candidates; their ranks are fused via Reciprocal Rank Fusion (`score = Σ w / (60+rank)`). BM25's weight is `1.5` by default — high enough to float exact-keyword hits over the vector noise floor on short queries, low enough to leave long conceptual queries vector-dominated. Override with `VECGREP_BM25_WEIGHT`. Pure-vector or pure-BM25 are available with `--mode vector` / `--mode bm25`.
+- **Match-aware confidence display.** The raw fused RRF score for a BM25-only hit is `~1.6%`, which reads as noise. vecgrep rescales BM25-only display percentages per query (top BM25 hit ≈ 90%, weaker hits taper to 60%) so a literal-keyword match doesn't look like dust. Ranking is unaffected — the underlying RRF score is still authoritative. The web UI surfaces this with V/K/VK badges and tier colors so you can tell at a glance which results are real.
 - **Cross-encoder reranker** (`--rerank`, off by default) rescores the candidate pool with `BAAI/bge-reranker-base`. Local, ~30ms for 50 chunks on CPU. Lazy-loaded — the heavy `torch` import only happens when you ask for it.
 
 Each corpus pins the embedding backend and dimension at index time, and refuses to mix models within itself. If you change embedding model, recreate the corpus.
@@ -163,10 +168,13 @@ Each corpus pins the embedding backend and dimension at index time, and refuses 
 | `VECGREP_API_PORT` | `8765` | API port |
 | `VECGREP_API_TOKEN` | unset | If set, `/api/*` requires `Authorization: Bearer <token>` (health stays public) |
 | `VECGREP_TOP_K` | `5` | Default `--top` value |
+| `VECGREP_BM25_WEIGHT` | `1.5` | Weight on BM25 contribution to RRF fusion. >1 boosts literal-keyword matches over semantic noise on short queries. Set to `1.0` for pure RRF, higher for keyword-leaning ranking. |
 
 ## Web UI
 
-`vecgrep serve` boots the FastAPI server and serves a single-page React UI from the same port. Index forms, corpus list with delete, search bar with top-k slider, mode toggle (hybrid/vector/bm25), reranker checkbox, results with surrounding context and the matched chunk highlighted. It's deliberately small — every action it supports has a CLI equivalent.
+`vecgrep serve` boots the FastAPI server and serves a single-page React UI from the same port. Index forms (with a built-in dropdown explainer for source types), corpus list with delete, search bar with top-k slider, mode toggle (hybrid/vector/bm25), reranker checkbox, and results with surrounding context and the matched chunk highlighted. Confidence is shown as a colored tier (high / soft / weak) tied to which retriever placed the hit (V vector, K keyword, VK both) — so a 1.6% BM25 hit reads as the strong literal-keyword match it actually is, not noise.
+
+Sidebar carries a legend mapping V / K / VK and confidence colors at a glance. The bottom of the page hides a primer explaining vector vs BM25 vs hybrid RRF in plain English — open it once if you're new, ignore it after that. Every action the UI supports has a CLI equivalent.
 
 ## MCP server
 
@@ -256,6 +264,12 @@ The plan is short and ordered. Make search good first, connect it to where you a
 
 **v0.6 — quality of life**
 - ✅ Test suite — hermetic pytest, service layer + stores + adapters + cache + migration. Caught three real bugs on first run.
+
+**v0.7 — search legibility (in progress)**
+- ✅ Weighted RRF — BM25 gets `1.5×` over vector by default so genuine keyword hits float above the vector noise floor (`VECGREP_BM25_WEIGHT` overrides). Fixed the "rare token returns 1.6% noise" problem.
+- ✅ BM25-only display percentages rescaled per query — 60–90% band, ranking unchanged.
+- ✅ Web UI confidence tiers + match-method badges (V / K / VK) — see what's a literal hit, what's semantic, what's both.
+- ✅ In-page primers — index help dropdown, sidebar legend, BM25/vector explainer at the page footer. All `<details>`, default closed.
 - `uvx vecgrep` verification + docs
 - Plugin API docs (the registries already work, just need an example)
 - Per-source TTL on URLs
