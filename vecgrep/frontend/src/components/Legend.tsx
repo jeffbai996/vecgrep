@@ -57,8 +57,9 @@ export default function Legend() {
       <p className="text-[10px] text-zinc-500 leading-relaxed">
         confidence considers <span className="text-zinc-400">both</span> the
         score <span className="text-zinc-400">and</span> the match method.
-        a literal-keyword (K) hit always reads as high &mdash; BM25 scores
-        are not directly comparable to vector cosines.
+        only <span className="text-violet-300">VK</span> (both retrievers
+        agreed) or a high score auto-reads as high &mdash; K alone goes
+        soft so common keywords don&apos;t carpet the list green.
       </p>
     </div>
   );

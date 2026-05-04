@@ -4,16 +4,20 @@ type Props = { hits: SearchHit[] | null; searching: boolean };
 
 // Confidence tiers — must match bot logic in cc-context discord_handler.py.
 // Pct alone is unreliable: vector embeddings floor around 70-75% on noise,
-// and BM25 hits get crushed by RRF into single-digit pcts. So we tier on
-// (pct, matched_by) jointly: a BM25 hit is "high" even at 1.6%.
+// BM25 hits get rescaled into the 60-90% band. Tier on (pct, matched_by)
+// jointly, but tightened so K-alone hits don't carpet the whole list green
+// when the keyword is common — only V+K or a high pct auto-promotes.
 type Tier = "high" | "med" | "none";
 
 function confidenceTier(pct: number, matchedBy: string[] | undefined): Tier {
   const set = new Set(matchedBy || []);
   const hasBm25 = set.has("bm25");
   const hasVector = set.has("vector");
-  if (pct >= 85 || hasBm25) return "high";
-  if (pct >= 78 || (hasVector && pct >= 75)) return "med";
+  const hasBoth = hasBm25 && hasVector;
+  if (pct >= 85 || hasBoth) return "high";
+  if (pct >= 78 || (hasBm25 && pct >= 70) || (hasVector && pct >= 75)) {
+    return "med";
+  }
   return "none";
 }
 

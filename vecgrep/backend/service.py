@@ -308,8 +308,13 @@ class VecgrepService:
         if rerank:
             results = self._apply_rerank(query, results, top_k, rerank_model, explain=explain)
         else:
+            # Display order matches the displayed similarity_pct so the user
+            # can trust their eyes (a higher % is always above a lower %).
+            # `r.score` is the underlying RRF fused score — used for selection
+            # of the top_k pool, not for visible ranking.
             results.sort(key=lambda r: r.score, reverse=True)
             results = results[:top_k]
+            results.sort(key=lambda r: r.similarity_pct, reverse=True)
         return results
 
     def _apply_rerank(
@@ -439,6 +444,8 @@ class VecgrepService:
                     r.explain["bm25_score"] = bm25_score_by_id[cid]
                     r.explain["bm25_rank"] = bm25_rank_by_id[cid]
             out.append(r)
+        # Final display sort happens in search() — _search_one returns RRF
+        # order so the outer caller can fuse multi-corpus results sensibly.
         return out
 
     # ----- corpus management ----------------------------------------------------
