@@ -4,6 +4,8 @@ import SearchBar from "./components/SearchBar";
 import IndexPanel from "./components/IndexPanel";
 import CorpusList from "./components/CorpusList";
 import ResultList from "./components/ResultList";
+import Legend from "./components/Legend";
+import AboutFooter from "./components/AboutFooter";
 
 export default function App() {
   const [corpora, setCorpora] = useState<Corpus[]>([]);
@@ -64,6 +66,7 @@ export default function App() {
             onSelect={setSelectedCorpus}
             onDeleted={refresh}
           />
+          <Legend />
         </aside>
 
         <section className="col-span-12 md:col-span-9 space-y-4">
@@ -79,6 +82,7 @@ export default function App() {
             </div>
           )}
           <ResultList hits={hits} searching={searching} />
+          <AboutFooter />
         </section>
       </main>
     </div>
