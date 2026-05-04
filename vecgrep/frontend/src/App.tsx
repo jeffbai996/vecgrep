@@ -52,9 +52,18 @@ export default function App() {
           <h1 className="text-xl font-mono font-semibold tracking-tight">vecgrep</h1>
           <span className="text-zinc-500 text-sm">grep for meaning, not keywords.</span>
         </div>
-        <span className="text-xs text-zinc-500 font-mono">
-          {corpora.length} corp{corpora.length === 1 ? "us" : "ora"}
-        </span>
+        <div className="flex items-center gap-4">
+          <a
+            href="/squad/"
+            className="text-xs font-mono text-zinc-500 hover:text-zinc-200 transition-colors"
+            title="shared-memory — durable squad facts and journal"
+          >
+            shared-memory ↗
+          </a>
+          <span className="text-xs text-zinc-500 font-mono">
+            {corpora.length} corp{corpora.length === 1 ? "us" : "ora"}
+          </span>
+        </div>
       </header>
 
       <main className="flex-1 grid grid-cols-12 gap-6 px-6 py-6 max-w-7xl mx-auto w-full">
