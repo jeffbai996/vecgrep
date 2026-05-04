@@ -54,7 +54,9 @@ export default function App() {
         </div>
         <div className="flex items-center gap-4">
           <a
-            href="/squad/"
+            href="https://fragserv.tailab4af9.ts.net:8443/squad/"
+            target="_blank"
+            rel="noopener noreferrer"
             className="text-xs font-mono text-zinc-500 hover:text-zinc-200 transition-colors"
             title="squad-store — durable squad facts and journal"
           >
