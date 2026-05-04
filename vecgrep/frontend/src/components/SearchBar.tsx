@@ -10,6 +10,25 @@ type Props = {
 
 const MODES: SearchMode[] = ["hybrid", "vector", "bm25"];
 
+// Subdued tints that match the legend/result palette but sit one shade
+// darker so the mode toggle doesn't shout — V (sky), K/bm25 (emerald),
+// hybrid (violet, the VK "both" hue). Each mode has an "active" state
+// (filled) and an "idle" state (outline-only, very muted).
+const MODE_STYLES: Record<SearchMode, { active: string; idle: string }> = {
+  hybrid: {
+    active: "bg-violet-950/60 border-violet-800/70 text-violet-300",
+    idle: "border-violet-950/60 text-violet-900 hover:text-violet-400 hover:border-violet-800/60",
+  },
+  vector: {
+    active: "bg-sky-950/60 border-sky-800/70 text-sky-300",
+    idle: "border-sky-950/60 text-sky-900 hover:text-sky-400 hover:border-sky-800/60",
+  },
+  bm25: {
+    active: "bg-emerald-950/60 border-emerald-800/70 text-emerald-300",
+    idle: "border-emerald-950/60 text-emerald-900 hover:text-emerald-400 hover:border-emerald-800/60",
+  },
+};
+
 export default function SearchBar({ onSearch, disabled, corpus, corpusCount }: Props) {
   const [query, setQuery] = useState("");
   const [topK, setTopK] = useState(5);
@@ -60,20 +79,21 @@ export default function SearchBar({ onSearch, disabled, corpus, corpusCount }: P
       <div className="flex items-center gap-3 text-[10px] font-mono">
         <div className="flex items-center gap-1">
           <span className="text-zinc-600 mr-1 uppercase tracking-wider">mode</span>
-          {MODES.map((m) => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => setMode(m)}
-              className={`px-2 py-0.5 rounded border ${
-                mode === m
-                  ? "bg-zinc-800 border-zinc-600 text-zinc-100"
-                  : "border-zinc-800 text-zinc-500 hover:text-zinc-300"
-              }`}
-            >
-              {m}
-            </button>
-          ))}
+          {MODES.map((m) => {
+            const styles = MODE_STYLES[m];
+            return (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setMode(m)}
+                className={`px-2 py-0.5 rounded border transition-colors ${
+                  mode === m ? styles.active : styles.idle
+                }`}
+              >
+                {m}
+              </button>
+            );
+          })}
         </div>
         <label className="flex items-center gap-1 cursor-pointer text-zinc-500 hover:text-zinc-300">
           <input
