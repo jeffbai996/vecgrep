@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -44,6 +45,25 @@ DEFAULT_MODE: SearchMode = "hybrid"
 # Reciprocal Rank Fusion constant. 60 is the canonical value from the
 # original RRF paper; we expose it here as a single knob.
 RRF_K = 60
+
+# BM25 weight in hybrid fusion. >1 boosts literal-keyword hits over
+# semantic-only matches, which matters because nomic-embed-text floors
+# around 70-75% similarity for *any* English query — the vector retriever
+# almost always returns a noisy top-50 even when nothing matches
+# semantically. Without a BM25 boost, that noise crowds out genuine
+# keyword hits in the fused ranking. 1.5 chosen empirically: enough to
+# float exact-match hits to the top of short queries, not so much that
+# it dominates long conceptual queries where vector should win.
+# Override via env var VECGREP_BM25_WEIGHT.
+BM25_WEIGHT = float(os.environ.get("VECGREP_BM25_WEIGHT", "1.5"))
+
+# Floor + headroom for displaying BM25-only hit pct. The fused RRF score
+# for a BM25-only hit is ~1/(60+1) ≈ 1.6%, which reads as noise when shown
+# as "1.6%". For display only, we re-scale BM25-only hits within the
+# result set: top BM25 hit -> ~90%, weaker hits taper to 60%. Ranking is
+# unaffected — the underlying RRF score is still authoritative.
+BM25_DISPLAY_FLOOR = 60.0
+BM25_DISPLAY_TOP = 90.0
 
 # How many candidates each retriever returns before fusion. Larger pool
 # = better recall, marginal cost. 50 is a good default for small corpora.
@@ -383,23 +403,30 @@ class VecgrepService:
             vector_rank_by_id[cid] = rank + 1
 
         for rank, (cid, score, payload) in enumerate(bm25_hits):
-            rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
+            rrf[cid] = rrf.get(cid, 0.0) + BM25_WEIGHT / (RRF_K + rank + 1)
             sources.setdefault(cid, []).append("bm25")
             payloads_by_id.setdefault(cid, payload)
             bm25_score_by_id[cid] = score
             bm25_rank_by_id[cid] = rank + 1
 
         fused = sorted(rrf.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
+        # For BM25-only display: rescale per-query so the top BM25 hit reads
+        # at BM25_DISPLAY_TOP (~90%) and weaker BM25 hits taper toward
+        # BM25_DISPLAY_FLOOR. The raw fused RRF score is unchanged for ranking.
+        max_bm25 = max(bm25_score_by_id.values()) if bm25_score_by_id else 0.0
+
         out = []
         for cid, fused_score in fused:
             payload = payloads_by_id[cid]
             matched_by = sources.get(cid, [])
-            # similarity_pct displays the underlying vector cosine when the
-            # vector retriever saw it; otherwise we display the RRF score
-            # scaled to 0-100 for visual continuity. The numeric `score`
-            # field always carries the fused RRF for ranking honesty.
+            # similarity_pct: vector cosine when vector retriever saw it
+            # (truthful semantic distance), else a BM25-relative pct so a
+            # genuine literal-keyword hit doesn't read as "1.6% noise".
             if "vector" in matched_by:
                 pct = _cosine_to_pct(vector_score_by_id[cid])
+            elif max_bm25 > 0 and cid in bm25_score_by_id:
+                ratio = bm25_score_by_id[cid] / max_bm25
+                pct = BM25_DISPLAY_FLOOR + (BM25_DISPLAY_TOP - BM25_DISPLAY_FLOOR) * ratio
             else:
                 pct = min(100.0, fused_score * 100)
             r = _payload_to_result(payload, fused_score, pct, matched_by)

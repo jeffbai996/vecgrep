@@ -86,6 +86,39 @@ def test_hybrid_search_includes_both_retrievers(svc, make_doc):
     assert any({"vector", "bm25"} <= s for s in matched_sets), matched_sets
 
 
+def test_hybrid_floats_keyword_match_above_vector_noise(svc, make_doc):
+    """Regression for the "jackson problem":
+
+    nomic-embed-text floors at ~70-75% similarity for any English query, so
+    the vector retriever returns 50 noisy near-ties even when nothing
+    matches semantically. With unweighted RRF, a genuine literal-keyword
+    hit (BM25 rank 1) tied with vector noise (also rank 1) — and vector's
+    larger candidate pool dominated.
+
+    Fix: BM25_WEIGHT > 1 in fused RRF. The doc that actually contains the
+    rare query token must rank #1 even when vector noise is loud.
+    """
+    rare = make_doc("rare.md", "Quartzite formations are rare in this region.")
+    other = make_doc(
+        "other.md",
+        "Generic content about rocks, minerals, sediment, and geology in general.",
+    )
+    svc.index(str(rare), "test")
+    svc.index(str(other), "test")
+
+    hits = svc.search("quartzite", "test", top_k=5, mode="hybrid")
+    assert hits, "no hits at all"
+    top = hits[0]
+    assert "rare.md" in top.source_id, (
+        f"expected the doc containing 'quartzite' to rank #1, got "
+        f"{top.source_id} matched_by={top.matched_by}"
+    )
+    # And the BM25-only hit should display as confident, not 1.6%-noise.
+    assert top.similarity_pct >= 50.0, (
+        f"BM25-only hit should display in 'real result' band, got {top.similarity_pct}%"
+    )
+
+
 def test_vector_only_mode_excludes_bm25(svc, make_doc):
     p = make_doc("doc.md", "Cats and dogs. Birds and fish. The end.")
     svc.index(str(p), "test")
