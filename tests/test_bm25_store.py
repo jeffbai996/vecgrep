@@ -166,6 +166,164 @@ def test_fallback_path_respects_coverage():
     assert hits == [], f"partial-coverage doc must not surface via fallback, got {hits}"
 
 
+def test_filter_mode_is_default():
+    """No env var set -> filter behavior (hard rejection of partial coverage).
+
+    Belt-and-suspenders alongside `test_short_query_requires_full_coverage`:
+    pin the contract that the default mode is filter, even after the penalty
+    mode lands. If a future change flips the default, this test fails first.
+    """
+    store = BM25Store(None)
+    store.upsert(
+        "t",
+        ids=["a", "b"],
+        texts=[
+            "ibkr terminal monitoring server",  # only "monitoring"
+            "glucose monitoring CGM continuous",  # both
+        ],
+        payloads=[{"source_id": "1"}, {"source_id": "2"}],
+    )
+    hits = store.search("t", "glucose monitoring", top_k=5)
+    ids = [h[0] for h in hits]
+    assert ids == ["b"], f"default (filter) mode should drop partial, got {ids}"
+
+
+def test_penalty_mode_keeps_partial_match_with_demoted_score(monkeypatch: pytest.MonkeyPatch):
+    """Penalty mode keeps partial-coverage docs but demotes them.
+
+    Doc A has 2/2 query tokens, doc B has 1/2. Both should appear, A above B,
+    and B's score should be roughly its raw BM25 score * (1/2)**2 = 0.25.
+    """
+    monkeypatch.setenv("VECGREP_BM25_COVERAGE_MODE", "penalty")
+    store = BM25Store(None)
+    # Need a multi-doc corpus with enough variety that BM25 IDF is non-zero
+    # for both query tokens. Filler docs make `glucose` and `monitoring`
+    # discriminative. Doc B contains only "monitoring" plus filler.
+    store.upsert(
+        "t",
+        ids=["a", "b", "f1", "f2", "f3"],
+        texts=[
+            "glucose monitoring CGM continuous reading",  # 2/2
+            "ibkr terminal monitoring server logs",  # 1/2 (monitoring only)
+            "totally unrelated filler one",
+            "totally unrelated filler two",
+            "totally unrelated filler three",
+        ],
+        payloads=[{"source_id": str(i)} for i in range(5)],
+    )
+
+    # Capture the unfiltered BM25 score for doc B so we can verify the
+    # penalty multiplier is roughly 0.25.
+    monkeypatch.setenv("VECGREP_BM25_DISABLE_COVERAGE_FILTER", "1")
+    raw = {h[0]: h[1] for h in store.search("t", "glucose monitoring", top_k=5)}
+    monkeypatch.delenv("VECGREP_BM25_DISABLE_COVERAGE_FILTER")
+
+    hits = store.search("t", "glucose monitoring", top_k=5)
+    ids = [h[0] for h in hits]
+    scores = {h[0]: h[1] for h in hits}
+    assert "a" in ids and "b" in ids, f"both should appear in penalty mode, got {ids}"
+    assert ids.index("a") < ids.index("b"), f"full-coverage doc should rank first, got {ids}"
+    # B's penalised score = raw_b * 0.25. Loose tolerance for float math.
+    expected_b = raw["b"] * 0.25
+    assert scores["b"] == pytest.approx(expected_b, rel=1e-6), (
+        f"expected B≈{expected_b}, got {scores['b']}"
+    )
+
+
+def test_penalty_mode_excludes_zero_overlap(monkeypatch: pytest.MonkeyPatch):
+    """Penalty mode still drops docs with no query-token overlap at all."""
+    monkeypatch.setenv("VECGREP_BM25_COVERAGE_MODE", "penalty")
+    store = BM25Store(None)
+    store.upsert(
+        "t",
+        ids=["a", "b"],
+        texts=[
+            "glucose monitoring CGM continuous",  # both tokens
+            "completely unrelated content here",  # zero overlap
+        ],
+        payloads=[{"source_id": "1"}, {"source_id": "2"}],
+    )
+    hits = store.search("t", "glucose monitoring", top_k=5)
+    ids = [h[0] for h in hits]
+    assert ids == ["a"], f"zero-overlap doc must not surface, got {ids}"
+
+
+def test_penalty_mode_default_exponent_demotes_partial_below_full(monkeypatch: pytest.MonkeyPatch):
+    """The exponent=2.0 default should be firm enough to flip ordering.
+
+    Contrived setup: the partial-match doc has a HIGHER raw BM25 score than
+    the full-match doc (long doc with high term frequency on the matching
+    token; full-match doc shorter and noisier). The default penalty must
+    still push the full-match doc to the top — that's the load-bearing claim
+    for choosing 2.0 as the default.
+    """
+    monkeypatch.setenv("VECGREP_BM25_COVERAGE_MODE", "penalty")
+    store = BM25Store(None)
+    # Doc B repeats "monitoring" many times -> high TF on the partial token.
+    # Doc A contains both query tokens once each, plus other words diluting TF.
+    # Filler docs contain "glucose" so its IDF is suppressed and B's TF on
+    # "monitoring" carries B's raw BM25 score above A's. Without this, A wins
+    # raw on `glucose` IDF alone and the test can't make its point.
+    store.upsert(
+        "t",
+        ids=["a", "b", "f1", "f2", "f3", "f4"],
+        texts=[
+            "glucose monitoring stuff random words filler more text padding here",
+            "monitoring monitoring monitoring monitoring monitoring monitoring "
+            "monitoring monitoring monitoring monitoring monitoring server",
+            "glucose filler doc one with other vocabulary",
+            "glucose filler doc two completely different",
+            "glucose filler doc three entirely separate",
+            "glucose filler doc four something else entirely",
+        ],
+        payloads=[{"source_id": str(i)} for i in range(6)],
+    )
+
+    # Sanity: in raw (filter-disabled) mode, B outranks A.
+    monkeypatch.setenv("VECGREP_BM25_DISABLE_COVERAGE_FILTER", "1")
+    raw = store.search("t", "glucose monitoring", top_k=5)
+    monkeypatch.delenv("VECGREP_BM25_DISABLE_COVERAGE_FILTER")
+    raw_ids = [h[0] for h in raw]
+    assert raw_ids.index("b") < raw_ids.index("a"), (
+        f"contrived setup invariant broken: B should outrank A raw, got {raw_ids}"
+    )
+
+    # Now with penalty mode + default exponent (2.0): A flips to top.
+    hits = store.search("t", "glucose monitoring", top_k=5)
+    ids = [h[0] for h in hits]
+    assert ids[0] == "a", f"default exponent should flip ordering to full-match first, got {ids}"
+
+
+def test_penalty_exponent_env_override(monkeypatch: pytest.MonkeyPatch):
+    """`VECGREP_BM25_COVERAGE_PENALTY_EXPONENT=1.0` -> linear penalty (K/N)."""
+    monkeypatch.setenv("VECGREP_BM25_COVERAGE_MODE", "penalty")
+    monkeypatch.setenv("VECGREP_BM25_COVERAGE_PENALTY_EXPONENT", "1.0")
+    store = BM25Store(None)
+    store.upsert(
+        "t",
+        ids=["a", "b", "f1", "f2", "f3"],
+        texts=[
+            "glucose monitoring CGM continuous reading",
+            "ibkr terminal monitoring server logs",
+            "filler one unrelated",
+            "filler two unrelated",
+            "filler three unrelated",
+        ],
+        payloads=[{"source_id": str(i)} for i in range(5)],
+    )
+
+    # Raw score for B at K/N=0.5: under linear penalty, B's score should be
+    # exactly raw_b * 0.5.
+    monkeypatch.setenv("VECGREP_BM25_DISABLE_COVERAGE_FILTER", "1")
+    raw = {h[0]: h[1] for h in store.search("t", "glucose monitoring", top_k=5)}
+    monkeypatch.delenv("VECGREP_BM25_DISABLE_COVERAGE_FILTER")
+
+    hits = {h[0]: h[1] for h in store.search("t", "glucose monitoring", top_k=5)}
+    assert hits["b"] == pytest.approx(raw["b"] * 0.5, rel=1e-6), (
+        f"linear penalty: expected B≈{raw['b'] * 0.5}, got {hits['b']}"
+    )
+
+
 def test_by_source_map_intact_after_partial_delete(tmp_path):
     """Regression: by_source map referenced freed array indices, breaking
     chunk-count math on subsequent reindexes.
