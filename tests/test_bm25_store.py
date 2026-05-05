@@ -4,8 +4,11 @@ Past bugs covered:
 - by_source map drifting after delete (chunk_count miscounts on reindex)
 - pickle round-trip losing entries
 - tokenizer not splitting underscore/CamelCase identifiers
+- short-query partial-token matches dominating fused ranking
 """
 from __future__ import annotations
+
+import pytest
 
 from vecgrep.backend.store.bm25_store import BM25Store, tokenize
 
@@ -83,6 +86,84 @@ def test_drop_removes_pickle(tmp_path):
     assert pkl.exists()
     store.drop("demo")
     assert not pkl.exists()
+
+
+def test_short_query_requires_full_coverage():
+    """2-token query against partial-match doc should not return that doc.
+
+    Reproduces the 'glucose monitoring' floods-the-corpus bug: doc with
+    only 'monitoring' (and no 'glucose') used to score on its IDF alone
+    and beat genuine vector hits in the fused ranking.
+    """
+    store = BM25Store(None)
+    store.upsert(
+        "t",
+        ids=["a", "b"],
+        texts=[
+            "ibkr terminal monitoring server",  # only "monitoring"
+            "glucose monitoring CGM continuous",  # both tokens
+        ],
+        payloads=[{"source_id": "1"}, {"source_id": "2"}],
+    )
+    hits = store.search("t", "glucose monitoring", top_k=5)
+    ids = [h[0] for h in hits]
+    assert ids == ["b"], f"only the full-match doc should survive, got {ids}"
+
+
+def test_disable_coverage_filter_via_env(monkeypatch: pytest.MonkeyPatch):
+    """Safety hatch: VECGREP_BM25_DISABLE_COVERAGE_FILTER=1 restores old behavior."""
+    monkeypatch.setenv("VECGREP_BM25_DISABLE_COVERAGE_FILTER", "1")
+    store = BM25Store(None)
+    store.upsert(
+        "t",
+        ids=["a", "b"],
+        texts=[
+            "ibkr terminal monitoring server",
+            "glucose monitoring CGM continuous",
+        ],
+        payloads=[{"source_id": "1"}, {"source_id": "2"}],
+    )
+    hits = store.search("t", "glucose monitoring", top_k=5)
+    ids = sorted(h[0] for h in hits)
+    assert ids == ["a", "b"], f"both docs should return when filter is off, got {ids}"
+
+
+def test_long_query_partial_match_meets_threshold():
+    """5-token query: 50% threshold = need 3 distinct tokens. Doc with 3/5 wins."""
+    store = BM25Store(None)
+    store.upsert(
+        "t",
+        ids=["a", "b"],
+        texts=[
+            # Has alpha, beta, gamma -> 3/5 of query, meets 50%
+            "alpha beta gamma corpus filler text here",
+            # Only "alpha" -> 1/5, below threshold
+            "alpha unrelated words filler content",
+        ],
+        payloads=[{"source_id": "1"}, {"source_id": "2"}],
+    )
+    hits = store.search("t", "alpha beta gamma delta epsilon", top_k=5)
+    ids = [h[0] for h in hits]
+    assert "a" in ids, f"doc covering 3/5 tokens should be returned, got {ids}"
+    assert "b" not in ids, f"doc covering 1/5 tokens should be filtered, got {ids}"
+
+
+def test_fallback_path_respects_coverage():
+    """Fallback path (all BM25 scores zero) must also enforce coverage.
+
+    Forced by inserting only one doc — single-doc corpus zeroes all IDF,
+    so BM25Okapi.get_scores returns zeros and the token-overlap fallback
+    fires. Without gating, the fallback would re-introduce the bug.
+    """
+    store = BM25Store(None)
+    store.upsert(
+        "t",
+        ids=["only"],
+        texts=["ibkr terminal monitoring server"],  # only "monitoring" overlaps
+        payloads=[{"source_id": "1"}],
+    )
+    hits = store.search("t", "glucose monitoring", top_k=5)
+    assert hits == [], f"partial-coverage doc must not surface via fallback, got {hits}"
 
 
 def test_by_source_map_intact_after_partial_delete(tmp_path):

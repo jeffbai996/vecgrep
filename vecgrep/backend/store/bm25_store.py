@@ -7,6 +7,8 @@ without dragging in nltk.
 """
 from __future__ import annotations
 
+import math
+import os
 import pickle
 import re
 from dataclasses import dataclass, field
@@ -20,6 +22,18 @@ from rank_bm25 import BM25Okapi
 _TOKEN = re.compile(r"[A-Za-z]+|\d+", re.UNICODE)
 _CAMEL_SPLIT = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
+# Minimum query-term coverage required for a doc to be a BM25 candidate.
+# Without this, a 2-token query like "glucose monitoring" against a repo
+# corpus where only "monitoring" appears (e.g. an architecture diagram in
+# some unrelated README) returns that README at top rank — its single-term
+# IDF score survives the BM25 sort, gets fused via RRF with the BM25
+# weight, and outranks genuine vector hits. We require that short queries
+# match every token, longer queries match at least half. Override per-call
+# via env var; the safety hatch fully disables the filter.
+BM25_SHORT_QUERY_THRESHOLD = 3
+BM25_SHORT_QUERY_COVERAGE = 1.0
+BM25_LONG_QUERY_COVERAGE = 0.5
+
 
 def tokenize(text: str) -> list[str]:
     out: list[str] = []
@@ -28,6 +42,41 @@ def tokenize(text: str) -> list[str]:
             if piece:
                 out.append(piece.lower())
     return out
+
+
+def _required_coverage(n_query_tokens: int) -> int:
+    """Number of distinct query tokens a doc must contain to be a candidate.
+
+    Env vars are read at call time so tests can monkeypatch them.
+    """
+    if n_query_tokens <= 0:
+        return 0
+    short_frac = float(
+        os.environ.get("VECGREP_BM25_SHORT_QUERY_COVERAGE", BM25_SHORT_QUERY_COVERAGE)
+    )
+    long_frac = float(
+        os.environ.get("VECGREP_BM25_LONG_QUERY_COVERAGE", BM25_LONG_QUERY_COVERAGE)
+    )
+    frac = short_frac if n_query_tokens <= BM25_SHORT_QUERY_THRESHOLD else long_frac
+    # ceil so 50% of 5 -> 3, not 2; one-token queries always require 1.
+    needed = math.ceil(n_query_tokens * frac)
+    return max(1, min(needed, n_query_tokens))
+
+
+def _meets_coverage(q_tokens: list[str], doc_tokens: list[str]) -> bool:
+    """True if `doc_tokens` covers enough of the query's distinct tokens.
+
+    Reads env vars on every call (cheap, and lets the safety-hatch
+    `VECGREP_BM25_DISABLE_COVERAGE_FILTER` flip mid-process).
+    """
+    if os.environ.get("VECGREP_BM25_DISABLE_COVERAGE_FILTER") == "1":
+        return True
+    q_set = set(q_tokens)
+    if not q_set:
+        return True
+    needed = _required_coverage(len(q_set))
+    doc_set = set(doc_tokens)
+    return sum(1 for t in q_set if t in doc_set) >= needed
 
 
 @dataclass
@@ -136,7 +185,11 @@ class BM25Store:
         # token-overlap counting in that case so the retriever still surfaces
         # something rather than nothing.
         ranked = sorted(
-            ((float(s), i) for i, s in enumerate(scores) if s > 0),
+            (
+                (float(s), i)
+                for i, s in enumerate(scores)
+                if s > 0 and _meets_coverage(q_tokens, idx.docs[i])
+            ),
             reverse=True,
         )[:top_k]
         if not ranked:
@@ -144,6 +197,7 @@ class BM25Store:
             overlap = [
                 (sum(1 for t in idx.docs[i] if t in q_set), i)
                 for i in range(len(idx.docs))
+                if _meets_coverage(q_tokens, idx.docs[i])
             ]
             ranked = sorted(
                 ((float(o), i) for o, i in overlap if o > 0),
