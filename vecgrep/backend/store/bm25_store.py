@@ -44,6 +44,7 @@ class BM25Store:
         # root=None -> ephemeral (in-memory only).
         self.root = root
         self._cache: dict[str, _CorpusIndex] = {}
+        self._bm25_instances: dict[str, BM25Okapi] = {}
         if root is not None:
             root.mkdir(parents=True, exist_ok=True)
 
@@ -84,6 +85,7 @@ class BM25Store:
             idx.payloads.append(payload)
             sid = payload.get("source_id", "")
             idx.by_source.setdefault(sid, []).append(arr_pos)
+        self._bm25_instances.pop(corpus, None)
         self._persist(corpus)
 
     def delete_by_source(self, corpus: str, source_id: str) -> None:
@@ -105,10 +107,12 @@ class BM25Store:
             sid = idx.payloads[i].get("source_id", "")
             new.by_source.setdefault(sid, []).append(new_pos)
         self._cache[corpus] = new
+        self._bm25_instances.pop(corpus, None)
         self._persist(corpus)
 
     def drop(self, corpus: str) -> None:
         self._cache.pop(corpus, None)
+        self._bm25_instances.pop(corpus, None)
         p = self._path(corpus)
         if p and p.exists():
             p.unlink()
@@ -120,7 +124,12 @@ class BM25Store:
         q_tokens = tokenize(query)
         if not q_tokens:
             return []
-        bm25 = BM25Okapi(idx.docs)
+        
+        bm25 = self._bm25_instances.get(corpus)
+        if bm25 is None:
+            bm25 = BM25Okapi(idx.docs)
+            self._bm25_instances[corpus] = bm25
+
         scores = bm25.get_scores(q_tokens)
         # BM25Okapi can score 0 for valid matches when IDF is degenerate
         # (single-doc corpus, or every doc contains the term). Fall back to
