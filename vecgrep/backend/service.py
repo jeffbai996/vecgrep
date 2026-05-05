@@ -455,6 +455,22 @@ class VecgrepService:
         self.bm25.drop(corpus.name)
         self.registry.delete(name)
 
+    def delete_source(self, corpus_name: str, source_id: str) -> None:
+        corpus = self.registry.get(corpus_name)
+        collection = _collection_for(corpus.name)
+        chunks_freed = _count_chunks_for_source(self.bm25, corpus.name, source_id)
+        self.store.delete_by_source(collection, source_id)
+        self.bm25.delete_by_source(corpus.name, source_id)
+        if source_id in corpus.sources:
+            corpus.sources.remove(source_id)
+        corpus.source_hashes.pop(source_id, None)
+        corpus.doc_count = len(corpus.sources)
+        corpus.chunk_count = max(0, corpus.chunk_count - chunks_freed)
+        corpus.updated_at = time.time()
+        self.registry._corpora[corpus.name] = corpus
+        if not self.ephemeral:
+            self.registry._save()
+
     def list_corpora(self) -> list[Corpus]:
         return self.registry.list()
 
