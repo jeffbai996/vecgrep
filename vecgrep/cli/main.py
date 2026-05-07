@@ -473,14 +473,31 @@ def watch(path: str, corpus: str, chunker: str, debounce: float) -> None:
         for changes in _watch(str(target), step=int(debounce * 1000)):
             kinds = {kind.name for kind, _ in changes}
             paths = sorted({p for _, p in changes})
-            click.echo(f"  ! {len(paths)} change(s) [{','.join(sorted(kinds))}] — reindexing")
-            try:
-                _do_index(str(target), corpus, chunker, force=False)
-            except click.ClickException as e:
-                # Don't kill the watcher on a transient error — log and keep going.
-                click.echo(f"  error: {e.message}", err=True)
+            click.echo(f"  ! {len(paths)} change(s) [{','.join(sorted(kinds))}] — processing")
+            for change_kind, p in changes:
+                try:
+                    if change_kind.name == "deleted":
+                        _do_delete_source(p, corpus)
+                    else:
+                        _do_index(p, corpus, chunker, force=False)
+                except click.ClickException as e:
+                    # Don't kill the watcher on a transient error — log and keep going.
+                    click.echo(f"  error: {e.message}", err=True)
     except KeyboardInterrupt:
         click.echo("\nstopped.")
+
+
+def _do_delete_source(source: str, corpus: str) -> None:
+    if _api_alive():
+        _delete(f"/api/corpora/{corpus}/source/{source}")
+        click.echo(f"  deleted {source}")
+        return
+    svc = VecgrepService(ephemeral=False)
+    try:
+        svc.delete_source(corpus, source)
+    except (CorpusError, EmbedBackendError) as e:
+        raise click.ClickException(str(e))
+    click.echo(f"  deleted {source}")
 
 
 def _do_index(source: str, corpus: str, chunker: str, force: bool) -> None:
