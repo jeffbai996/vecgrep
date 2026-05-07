@@ -208,6 +208,33 @@ Verify with `claude mcp list` — should show `vecgrep: ... ✓ Connected`.
 
 If `vecgrep` isn't on `PATH` (common when you installed it inside a venv), give the absolute path to the venv's `vecgrep` binary, e.g. `~/repos/vecgrep/venv/bin/vecgrep`.
 
+### Remote MCP over HTTP (one server, many clients)
+
+`vecgrep serve` now exposes `/mcp` for streamable HTTP MCP clients alongside the existing `/api/*` REST routes. Same port, same bearer auth. This means a Claude Code CLI on a different machine can hit your vecgrep box without having to launch its own stdio subprocess (or maintain a separate index).
+
+**Server side.** Bind to a non-loopback interface and set an API token:
+
+```bash
+export VECGREP_API_TOKEN=$(openssl rand -hex 32)   # share this with clients
+vecgrep serve --host 0.0.0.0
+```
+
+The default `api_host` is loopback — `--host 0.0.0.0` opens it to your LAN / VPN. Anything reachable from the network must have an `Authorization: Bearer <token>` header or it gets a 401. There is no off switch for the auth check once `VECGREP_API_TOKEN` is set; that's intentional.
+
+For TLS, run vecgrep behind whatever reverse proxy you already use — Tailscale Serve, Caddy, nginx — and let it terminate HTTPS. vecgrep itself is HTTP-only.
+
+**Client side.** Point Claude Code CLI at the remote endpoint with the bearer token in a header:
+
+```bash
+claude mcp add --scope user --transport http vecgrep \
+  https://your-server.example/mcp \
+  --header "Authorization: Bearer $VECGREP_API_TOKEN"
+```
+
+Verify with `claude mcp list` — should show `vecgrep: https://your-server.example/mcp (HTTP) - ✓ Connected`.
+
+The same URL + bearer token works for any MCP client that supports the streamable HTTP transport. Stdio clients (Claude Desktop, Cursor) keep using the local `vecgrep mcp` invocation above.
+
 ### Wiring into Claude Desktop / Cursor
 
 Add to `claude_desktop_config.json` (Settings → Developer → Edit Config):
@@ -230,12 +257,7 @@ Restart Claude Desktop after editing. Same shape works for Cursor's `~/.cursor/m
 
 ### Wiring into Claude.ai (web)
 
-Claude.ai's web app supports remote MCP servers (HTTP, not stdio). To expose vecgrep over HTTP you need to wrap the stdio MCP server with a stdio-to-HTTP bridge — there's no native HTTP transport in vecgrep yet. Two approaches:
-
-1. **`mcp-remote` proxy on a small VPS** that exposes vecgrep's stdio MCP as an SSE endpoint. Then add the URL in Claude.ai → Settings → Connectors → Custom MCP server.
-2. **Run the FastAPI backend (`vecgrep serve`)** and call `/api/search` directly from a Claude Project's instructions or a tool definition. Not full MCP but works for read-only search.
-
-For most users, the CLI / Claude Desktop / Cursor stdio paths above are enough — Claude.ai over HTTP is on the roadmap.
+Claude.ai's web app supports remote MCP servers (HTTP, not stdio). Use the same `vecgrep serve` HTTP endpoint described above and add it under Claude.ai → Settings → Connectors → Custom MCP server. The endpoint must be reachable from Anthropic's servers (so loopback or Tailscale-only addresses won't work — terminate TLS at a public hostname or skip Claude.ai web for this).
 
 ## Roadmap
 
