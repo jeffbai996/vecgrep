@@ -182,3 +182,29 @@ def test_delete_corpus_removes_all_state(svc, make_doc):
     assert not svc.list_corpora()
     # BM25 pickle gone too
     assert not (svc.settings.home / "bm25" / "test.pkl").exists()
+
+
+def test_delete_source_removes_only_that_source(svc, make_doc):
+    a = make_doc("a.md", "Cats sit on mats. Cats are nice.")
+    b = make_doc("b.md", "Dogs run in parks. Dogs bark loudly.")
+    svc.index(str(a), "test")
+    svc.index(str(b), "test")
+
+    corpus = svc.list_corpora()[0]
+    assert str(a.resolve()) in corpus.sources
+    assert str(b.resolve()) in corpus.sources
+    chunks_before = corpus.chunk_count
+
+    svc.delete_source("test", str(a.resolve()))
+
+    corpus = svc.list_corpora()[0]
+    assert str(a.resolve()) not in corpus.sources
+    assert str(b.resolve()) in corpus.sources
+    assert corpus.doc_count == 1
+    assert corpus.chunk_count < chunks_before
+    # B is still searchable
+    hits = svc.search("dogs", "test", top_k=2)
+    assert hits and all(h.source_id == str(b.resolve()) for h in hits)
+    # A is not
+    hits = svc.search("cats", "test", top_k=2)
+    assert not hits or all(h.source_id != str(a.resolve()) for h in hits)

@@ -6,7 +6,16 @@ from typing import Iterator
 from .base import Adapter, AdapterError, Document
 from .registry import register_adapter
 
-_TEXT_EXTS = {".txt", ".log", ".csv", ".tsv", ".rst", ".org", ".tex", ".srt", ""}
+_TEXT_EXTS = {
+    ".txt", ".log", ".csv", ".tsv", ".rst", ".org", ".tex", ".srt", "",
+    ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+    ".go", ".rs", ".java", ".kt", ".rb", ".php", ".c", ".h", ".cpp", ".hpp", ".cs",
+    ".sh", ".bash", ".zsh", ".fish", ".ps1",
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env",
+    ".html", ".htm", ".xml", ".css", ".scss", ".sass", ".less",
+    ".sql", ".graphql", ".proto",
+    ".dockerfile", ".gitignore", ".gitattributes", ".editorconfig",
+}
 
 
 @register_adapter

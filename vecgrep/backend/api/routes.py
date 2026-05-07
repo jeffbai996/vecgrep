@@ -37,8 +37,12 @@ public_router = APIRouter(prefix="/api")
 router = APIRouter(prefix="/api", dependencies=[Depends(require_token)])
 
 
+_SERVICE: VecgrepService | None = None
 def _service() -> VecgrepService:
-    return VecgrepService()
+    global _SERVICE
+    if _SERVICE is None:
+        _SERVICE = VecgrepService()
+    return _SERVICE
 
 
 @public_router.get("/health")
@@ -74,6 +78,16 @@ def delete_corpus(name: str) -> dict:
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return {"deleted": name}
+
+
+@router.delete("/corpora/{name}/source/{id:path}")
+def delete_source(name: str, id: str) -> dict:
+    svc = _service()
+    try:
+        svc.delete_source(name, id)
+    except CorpusError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"deleted": id}
 
 
 @router.post("/index", response_model=IndexResponse)
