@@ -1,18 +1,19 @@
 """MCP server: expose vecgrep as a tool for Claude / Cursor / any MCP client.
 
-Stdio transport. The MCP SDK is gated behind the `vecgrep[mcp]` extra so
-the base install stays slim. Run with:
+Two transports share the same configured Server:
 
-    vecgrep mcp
+* stdio  — `vecgrep mcp` (default for desktop/CLI MCP clients)
+* HTTP   — mounted at /mcp by `vecgrep serve` for remote MCP clients
+
+The MCP SDK is gated behind the `vecgrep[mcp]` extra so the base install
+stays slim. Imports stay lazy here on purpose: importing this module must
+not require the extra to be installed (the CLI catches the RuntimeError
+at the call site).
 
 Tools:
     search          — semantic search across one or all corpora
     list_corpora    — list every persisted corpus and its stats
     get_corpus      — get details for one corpus by name
-
-The point: stop dumping 10K-token contexts into your assistant when a
-focused retrieval would do. Index a corpus once, let the model call
-search() against it.
 """
 from __future__ import annotations
 
@@ -22,16 +23,28 @@ from typing import Any
 from ..backend.service import VecgrepService
 
 
-def _build_server() -> Any:
+def _require_mcp() -> Any:
+    """Lazy-import the mcp SDK pieces we need. Centralised so both the
+    stdio and HTTP entrypoints raise the same actionable error when the
+    optional extra is missing.
+    """
     try:
         from mcp.server import Server
-        from mcp.server.stdio import stdio_server
         from mcp.types import TextContent, Tool
     except ImportError as e:
         raise RuntimeError(
             "MCP server requires the 'mcp' extra. "
             "Install with `pip install vecgrep[mcp]`."
         ) from e
+    return Server, TextContent, Tool
+
+
+def build_mcp_server() -> Any:
+    """Construct the configured MCP Server with the three tools registered.
+
+    Transport-agnostic: callers pick stdio or HTTP and wrap accordingly.
+    """
+    Server, TextContent, Tool = _require_mcp()
 
     server = Server("vecgrep")
 
@@ -165,14 +178,61 @@ def _build_server() -> Any:
 
         return [TextContent(type="text", text=f"unknown tool: {name}")]
 
-    return server, stdio_server
+    return server
+
+
+def build_http_app() -> Any:
+    """Wrap the configured MCP server in a Starlette ASGI app speaking
+    streamable HTTP.
+
+    Mount this app under a path on the FastAPI server (see
+    `backend/main.py`). The lifespan context drives the session manager
+    — it's required for streamable HTTP to clean up sessions on shutdown.
+
+    Each call returns a fresh Starlette app + session manager pair.
+    StreamableHTTPSessionManager is documented as not reusable across
+    `.run()` cycles, so building per-app is the safe pattern.
+    """
+    _require_mcp()  # surface the helpful error before importing the rest
+    import contextlib
+    from collections.abc import AsyncIterator
+
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+
+    server = build_mcp_server()
+    # stateless=True: each request is independent, no server-side session
+    # state to coordinate across the FastAPI process. Simpler for a
+    # multi-tenant remote endpoint and avoids tying up resources on a
+    # client that disconnects without sending DELETE.
+    session_manager = StreamableHTTPSessionManager(app=server, stateless=True)
+
+    async def handle(scope: Any, receive: Any, send: Any) -> None:
+        await session_manager.handle_request(scope, receive, send)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: Starlette) -> AsyncIterator[None]:
+        # session_manager.run() is the documented way to start/stop the
+        # background task group that handles transport sessions.
+        async with session_manager.run():
+            yield
+
+    # Mount at "/" because the parent FastAPI app already mounts this
+    # whole Starlette app at /mcp — double-prefixing would give /mcp/mcp.
+    return Starlette(
+        routes=[Mount("/", app=handle)],
+        lifespan=lifespan,
+    )
 
 
 def run() -> None:
-    """Entry point for `vecgrep mcp`."""
+    """Entry point for `vecgrep mcp` (stdio transport)."""
     import asyncio
 
-    server, stdio_server = _build_server()
+    from mcp.server.stdio import stdio_server
+
+    server = build_mcp_server()
 
     async def main() -> None:
         async with stdio_server() as (read_stream, write_stream):
