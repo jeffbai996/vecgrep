@@ -185,11 +185,15 @@ def build_http_app() -> Any:
     """Wrap the configured MCP server in a Starlette ASGI app speaking
     streamable HTTP.
 
-    Mount this app under a path on the FastAPI server (see
-    `backend/main.py`). The lifespan context drives the session manager
-    — it's required for streamable HTTP to clean up sessions on shutdown.
+    The returned app exposes a single endpoint at `/` that handles every
+    method the streamable HTTP transport uses (GET / POST / DELETE).
+    Using an explicit Route instead of a sub-Mount means the parent
+    FastAPI app's `app.mount("/mcp", ...)` matches `/mcp` even without
+    a trailing slash — Mount-on-Mount only matches with the slash.
 
-    Each call returns a fresh Starlette app + session manager pair.
+    The lifespan context drives the session manager — required for
+    streamable HTTP to clean up sessions on shutdown. Each call returns
+    a fresh Starlette app + session manager pair.
     StreamableHTTPSessionManager is documented as not reusable across
     `.run()` cycles, so building per-app is the safe pattern.
     """
@@ -199,7 +203,7 @@ def build_http_app() -> Any:
 
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
     from starlette.applications import Starlette
-    from starlette.routing import Mount
+    from starlette.routing import Route
 
     server = build_mcp_server()
     # stateless=True: each request is independent, no server-side session
@@ -208,8 +212,13 @@ def build_http_app() -> Any:
     # client that disconnects without sending DELETE.
     session_manager = StreamableHTTPSessionManager(app=server, stateless=True)
 
-    async def handle(scope: Any, receive: Any, send: Any) -> None:
-        await session_manager.handle_request(scope, receive, send)
+    class _Handler:
+        # Class instance, not a function: Starlette's Route treats raw
+        # functions as `func(request)` handlers. A class instance with
+        # __call__ is recognised as a 3-arg ASGI callable and handed
+        # the scope/receive/send tuple directly.
+        async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+            await session_manager.handle_request(scope, receive, send)
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
@@ -218,10 +227,8 @@ def build_http_app() -> Any:
         async with session_manager.run():
             yield
 
-    # Mount at "/" because the parent FastAPI app already mounts this
-    # whole Starlette app at /mcp — double-prefixing would give /mcp/mcp.
     return Starlette(
-        routes=[Mount("/", app=handle)],
+        routes=[Route("/", endpoint=_Handler(), methods=["GET", "POST", "DELETE"])],
         lifespan=lifespan,
     )
 
