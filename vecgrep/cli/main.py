@@ -590,6 +590,85 @@ def mcp() -> None:
 
 @cli.command()
 @click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
+def status(json_out: bool) -> None:
+    """One-shot health snapshot: daemon, auth, and per-corpus chunk counts.
+
+    Useful first thing when something looks off — e.g. why a remote MCP
+    client is seeing different results than local. If the daemon is up,
+    we hit /api/corpora; otherwise we synthesize the view from a local
+    VecgrepService so the command works the same either way.
+    """
+    s = get_settings()
+    daemon_alive = _api_alive()
+
+    corpora_err: str | None = None
+    corpora: list[dict[str, Any]] = []
+    if daemon_alive:
+        try:
+            corpora = _get("/api/corpora")
+        except click.ClickException as e:
+            corpora_err = e.message
+    else:
+        try:
+            svc = VecgrepService()
+            corpora = [asdict(c) for c in svc.list_corpora()]
+        except Exception as e:
+            # Most common failure: the qdrant lock file is held by the
+            # daemon's process that we just thought was dead — surface
+            # that as an explicit error rather than an empty list.
+            corpora_err = str(e)
+
+    totals = {
+        "docs": sum(c.get("doc_count", 0) for c in corpora),
+        "chunks": sum(c.get("chunk_count", 0) for c in corpora),
+    }
+    payload = {
+        "version": __version__,
+        "daemon": {
+            "alive": daemon_alive,
+            "url": _api_base(),
+        },
+        "auth": {"enabled": bool(s.api_token)},
+        "home": str(s.home),
+        "embed": {
+            "backend": "openai" if s.openai_api_key else "ollama",
+            "model": s.embed_model,
+        },
+        "corpora": corpora,
+        "totals": totals,
+        "error": corpora_err,
+    }
+
+    if json_out:
+        click.echo(json.dumps(payload, indent=2, default=str))
+        return
+
+    click.echo(f"vecgrep {__version__}")
+    click.echo(f"  daemon:  {'up' if daemon_alive else 'down'}    ({payload['daemon']['url']})")
+    click.echo(f"  auth:    {'enabled (token set)' if s.api_token else 'disabled (no token)'}")
+    click.echo(f"  home:    {payload['home']}")
+    click.echo(f"  embed:   {payload['embed']['backend']} / {payload['embed']['model']}")
+    if corpora_err:
+        click.echo(f"  error:   {corpora_err}")
+    click.echo("")
+    if not corpora:
+        click.echo("no corpora yet. try `vecgrep index <path> --corpus <name>`.")
+        return
+    click.echo("corpora:")
+    click.echo(f"  {'NAME':<20} {'BACKEND':<10} {'MODEL':<28} {'DOCS':>6} {'CHUNKS':>8}")
+    for c in corpora:
+        click.echo(
+            f"  {c['name']:<20} "
+            f"{c['embed_backend']:<10} "
+            f"{c['embed_model']:<28} "
+            f"{c['doc_count']:>6} "
+            f"{c['chunk_count']:>8}"
+        )
+    click.echo(f"  {'':<20} {'':<10} {'TOTAL':<28} {totals['docs']:>6} {totals['chunks']:>8}")
+
+
+@cli.command()
+@click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
 def config(json_out: bool) -> None:
     """Show current resolved configuration."""
     if _api_alive():
