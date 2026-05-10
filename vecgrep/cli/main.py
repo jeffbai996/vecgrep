@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -233,6 +235,17 @@ def index(source: str, corpus: str, chunker: str, ephemeral: bool, force: bool) 
     help="Show per-retriever score breakdown for each hit.",
 )
 @click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
+@click.option(
+    "--watch", "-w", is_flag=True,
+    help="Re-run the query at --interval and print a diff of source IDs.",
+)
+@click.option(
+    "--interval",
+    default=5.0,
+    type=float,
+    show_default=True,
+    help="Seconds between re-runs in --watch mode.",
+)
 def search(
     query: str,
     corpus: str | None,
@@ -243,43 +256,42 @@ def search(
     filters: tuple[str, ...],
     explain: bool,
     json_out: bool,
+    watch: bool,
+    interval: float,
 ) -> None:
     """Semantic search across one or all corpora."""
     filter_list = list(filters)
-    if _api_alive():
-        out = _post(
-            "/api/search",
-            {
-                "query": query,
-                "corpus": corpus,
-                "top_k": top_k,
-                "mode": mode,
-                "rerank": rerank,
-                "rerank_model": rerank_model,
-                "filters": filter_list,
-                "explain": explain,
-            },
-        )
-        _print_results(out["hits"], json_out)
-        return
-    svc = VecgrepService(ephemeral=False)
-    try:
-        results = svc.search(
-            query, corpus, top_k,
-            mode=mode, rerank=rerank, rerank_model=rerank_model,
-            filters=filter_list or None, explain=explain,
-        )
-    except (CorpusError, EmbedBackendError) as e:
-        raise click.ClickException(str(e))
-    except Exception as e:
-        # RerankerError lives in vecgrep.backend.rerank but importing it
-        # eagerly would force the optional dep at CLI start. Catch broadly
-        # only when --rerank is on.
-        if rerank:
+
+    def run_once() -> list[dict[str, Any]]:
+        if _api_alive():
+            out = _post(
+                "/api/search",
+                {
+                    "query": query,
+                    "corpus": corpus,
+                    "top_k": top_k,
+                    "mode": mode,
+                    "rerank": rerank,
+                    "rerank_model": rerank_model,
+                    "filters": filter_list,
+                    "explain": explain,
+                },
+            )
+            return out["hits"]
+        svc = VecgrepService(ephemeral=False)
+        try:
+            results = svc.search(
+                query, corpus, top_k,
+                mode=mode, rerank=rerank, rerank_model=rerank_model,
+                filters=filter_list or None, explain=explain,
+            )
+        except (CorpusError, EmbedBackendError) as e:
             raise click.ClickException(str(e))
-        raise
-    _print_results(
-        [
+        except Exception as e:
+            if rerank:
+                raise click.ClickException(str(e))
+            raise
+        return [
             {
                 "similarity_pct": r.similarity_pct,
                 "chunk": r.chunk,
@@ -292,9 +304,50 @@ def search(
                 "explain": r.explain or {},
             }
             for r in results
-        ],
-        json_out,
-    )
+        ]
+
+    if not watch:
+        _print_results(run_once(), json_out)
+        return
+
+    # --watch: loop, diff source_ids vs previous iteration, swallow Ctrl-C.
+    if json_out:
+        click.echo("note: --json is ignored in --watch mode (output is a live diff).", err=True)
+    prev_keys: set[tuple[str, str]] | None = None
+    iteration = 0
+    try:
+        while True:
+            iteration += 1
+            try:
+                hits = run_once()
+            except KeyboardInterrupt:
+                break
+            now = datetime.now().strftime("%H:%M:%S")
+            click.echo(f"\n--- iteration {iteration} @ {now} — {len(hits)} hit(s) ---")
+            cur_keys = {(h["corpus"], h["source_id"]) for h in hits}
+            if prev_keys is None:
+                # First pass: list every hit, no diff.
+                for h in hits:
+                    click.echo(f"  {h['similarity_pct']:5.1f}%  {h['corpus']}  {h['source_id']}")
+            else:
+                added = cur_keys - prev_keys
+                removed = prev_keys - cur_keys
+                if not added and not removed:
+                    click.echo("  (no change)")
+                else:
+                    by_key = {(h["corpus"], h["source_id"]): h for h in hits}
+                    for k in sorted(added):
+                        h = by_key[k]
+                        click.echo(f"  + {h['similarity_pct']:5.1f}%  {k[0]}  {k[1]}")
+                    for k in sorted(removed):
+                        click.echo(f"  - ----   {k[0]}  {k[1]}")
+            prev_keys = cur_keys
+            try:
+                time.sleep(interval)
+            except KeyboardInterrupt:
+                break
+    except KeyboardInterrupt:
+        pass
 
 
 @cli.group()
