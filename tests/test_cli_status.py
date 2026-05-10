@@ -131,6 +131,48 @@ def test_status_empty_corpora_renders_cleanly(vg_home: Path) -> None:
     assert "no corpora" in result.output.lower()
 
 
+def test_status_renders_updated_age_column(vg_home: Path) -> None:
+    """The text table should include a relative-time UPDATED column so
+    you can spot a stale corpus across machines (e.g. fragserv vs Mac)."""
+    import time
+
+    runner = CliRunner()
+    now = time.time()
+    fake_corpora = [
+        _fake_corpus_dict("fresh", 1, 10, updated=now - 60),         # ~1m ago
+        _fake_corpus_dict("medium", 1, 10, updated=now - 3600 * 4),  # ~4h ago
+        _fake_corpus_dict("stale", 1, 10, updated=now - 86400 * 3),  # ~3d ago
+    ]
+    with (
+        patch("vecgrep.cli.main._api_alive", return_value=True),
+        patch("vecgrep.cli.main._get", return_value=fake_corpora),
+    ):
+        result = runner.invoke(cli, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "UPDATED" in result.output
+    # All three rows must render *some* age string. We don't pin the exact
+    # format ("1m ago" vs "1 min ago") — just that it isn't empty / "0".
+    for line in result.output.splitlines():
+        if line.strip().startswith(("fresh", "medium", "stale")):
+            # Last token on the row should be the relative time.
+            tokens = line.split()
+            assert tokens[-1] not in ("0", ""), f"row missing age: {line!r}"
+
+
+def test_relative_time_helper_handles_ranges() -> None:
+    """The helper covers the bands we care about: now, minutes, hours,
+    days, and 'unknown' for a zero/missing timestamp."""
+    from vecgrep.cli.main import _relative_age
+    import time
+
+    now = time.time()
+    assert "now" in _relative_age(now).lower() or "s" in _relative_age(now)
+    assert "m" in _relative_age(now - 120)         # ~2m
+    assert "h" in _relative_age(now - 3600 * 5)    # ~5h
+    assert "d" in _relative_age(now - 86400 * 2)   # ~2d
+    assert _relative_age(0).lower() in ("never", "—", "-", "unknown")
+
+
 def test_status_totals_in_human_output(vg_home: Path) -> None:
     """The text table footer should include summed docs and chunks across
     all corpora — that's the whole point of running status."""

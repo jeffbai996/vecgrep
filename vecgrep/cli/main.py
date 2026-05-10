@@ -588,6 +588,28 @@ def mcp() -> None:
     run_mcp()
 
 
+def _relative_age(ts: float) -> str:
+    """Render a unix timestamp as a short relative age ('5m', '3h', '2d').
+
+    Returns 'never' for falsy / zero timestamps so a missing updated_at
+    doesn't render as '57y' or similar nonsense.
+    """
+    if not ts or ts <= 0:
+        return "never"
+    import time
+
+    delta = time.time() - ts
+    if delta < 0:
+        return "now"
+    if delta < 60:
+        return f"{int(delta)}s"
+    if delta < 3600:
+        return f"{int(delta // 60)}m"
+    if delta < 86400:
+        return f"{int(delta // 3600)}h"
+    return f"{int(delta // 86400)}d"
+
+
 @cli.command()
 @click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
 def status(json_out: bool) -> None:
@@ -655,16 +677,22 @@ def status(json_out: bool) -> None:
         click.echo("no corpora yet. try `vecgrep index <path> --corpus <name>`.")
         return
     click.echo("corpora:")
-    click.echo(f"  {'NAME':<20} {'BACKEND':<10} {'MODEL':<28} {'DOCS':>6} {'CHUNKS':>8}")
+    click.echo(
+        f"  {'NAME':<20} {'BACKEND':<10} {'MODEL':<28} {'DOCS':>6} {'CHUNKS':>8} {'UPDATED':>8}"
+    )
     for c in corpora:
         click.echo(
             f"  {c['name']:<20} "
             f"{c['embed_backend']:<10} "
             f"{c['embed_model']:<28} "
             f"{c['doc_count']:>6} "
-            f"{c['chunk_count']:>8}"
+            f"{c['chunk_count']:>8} "
+            f"{_relative_age(c.get('updated_at') or 0):>8}"
         )
-    click.echo(f"  {'':<20} {'':<10} {'TOTAL':<28} {totals['docs']:>6} {totals['chunks']:>8}")
+    click.echo(
+        f"  {'':<20} {'':<10} {'TOTAL':<28} "
+        f"{totals['docs']:>6} {totals['chunks']:>8} {'':>8}"
+    )
 
 
 @cli.command()
