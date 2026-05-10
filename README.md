@@ -31,7 +31,7 @@ The closest equivalents — `txtai`, `chroma`, `LlamaIndex` — are libraries yo
 
 ## Status
 
-Alpha (`v0.6.x`). Hybrid retrieval (BM25 + vector + RRF, BM25-weighted by default), cross-encoder rerank, MCP server, named corpora, incremental indexing + file watcher, embedding cache, model/backend migration, optional bearer-token auth, web UI with confidence-tier coloring + V/K/VK match badges, CLI, and a hermetic pytest suite. Adapters cover plaintext, markdown, PDF, URLs, Discord JSONL, Claude export, and ChatGPT export. The public API (HTTP + CLI flags) is unstable until v1.0 — expect breaking changes within v0.x.
+Alpha (`v0.6.x`). Hybrid retrieval (BM25 + vector + RRF, BM25-weighted by default), cross-encoder rerank, MCP server (stdio + streamable HTTP), named corpora, incremental indexing + file watcher, embedding cache, model/backend migration, optional bearer-token auth, web UI with confidence-tier coloring + V/K/VK match badges, CLI with `vecgrep status` diagnostic, and a hermetic pytest suite. Adapters cover plaintext, markdown, PDF, URLs, Discord JSONL, Claude export, and ChatGPT export. The public API (HTTP + CLI flags) is unstable until v1.0 — expect breaking changes within v0.x.
 
 ## Install
 
@@ -103,6 +103,10 @@ vecgrep corpora import papers.tar.gz --rename papers-from-laptop
 # Manage corpora
 vecgrep corpora list
 vecgrep corpora delete papers
+
+# One-shot diagnostic: daemon, auth, per-corpus chunk counts, last-update age
+vecgrep status
+vecgrep status --json    # for scripting / monitoring
 
 # Launch the web UI on http://127.0.0.1:8765
 vecgrep serve
