@@ -74,6 +74,11 @@ vecgrep search "missile guidance systems" --corpus papers --top 10
 vecgrep search "rate hikes" --mode vector
 vecgrep search "FOMC" --mode bm25
 
+# Watch mode — re-run the same query at a fixed interval, print a diff
+# of source IDs. Pair with `vecgrep watch` while ingesting to confirm
+# new chunks are showing up where you expect.
+vecgrep search "rate hikes" --watch --interval 5
+
 # Cross-encoder reranking on the candidate pool — slower, more accurate
 vecgrep search "what did we decide about rates" --rerank
 
