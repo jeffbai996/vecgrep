@@ -53,7 +53,7 @@ Build order is fixed. See `docs/IDEAS.md` for the long unsorted list.
 
 **v0.3 — connect**
 3. MCP server: stdio transport, expose `search` and `list_corpora`.
-4. Discord JSONL adapter: reads discord-logger output, channel-as-source.
+4. Discord JSONL adapter: reads exported Discord chat logs (DiscordChatExporter format), channel-as-source.
 5. Claude / ChatGPT export adapters (the v2 hook the spec called out).
 
 Anything else (file-watcher, EPUB/DOCX, OCR, single-binary, multi-tenant, query-aware chunking) is **Later** — capture in `docs/IDEAS.md`, don't pull forward.
