@@ -1,7 +1,7 @@
 """Discord JSONL adapter.
 
-Reads exported Discord chat logs (DiscordChatExporter, discord-logger,
-or any one-message-per-JSON-line file). Each .jsonl file becomes one
+Reads exported Discord chat logs (DiscordChatExporter or any
+one-message-per-JSON-line file). Each .jsonl file becomes one
 Document; the channel name is taken from the filename. Messages are
 flattened into a transcript with `author: content` lines so prose-style
 chunkers do something reasonable with it.
