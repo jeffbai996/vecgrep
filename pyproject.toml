@@ -41,7 +41,7 @@ dependencies = [
 openai = ["openai>=1.30"]
 rerank = ["sentence-transformers>=2.7"]
 mcp = ["mcp>=1.2"]
-watch = ["watchfiles>=0.21"]
+watch = ["watchfiles>=1.2.0"]
 dev = ["pytest>=8.0"]
 
 [tool.pytest.ini_options]
