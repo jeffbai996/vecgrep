@@ -38,7 +38,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-openai = ["openai>=1.30"]
+openai = ["openai>=2.37.0"]
 rerank = ["sentence-transformers>=2.7"]
 mcp = ["mcp>=1.2"]
 watch = ["watchfiles>=0.21"]
