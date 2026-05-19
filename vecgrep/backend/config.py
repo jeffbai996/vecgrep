@@ -28,6 +28,12 @@ class Settings:
     # `Authorization: Bearer <token>` header. Useful when you bind to 0.0.0.0
     # for Tailscale / LAN access. Unset (None) = no auth, the default.
     api_token: str | None = None
+    # If set, use Qdrant in server mode at this URL instead of embedded mode.
+    # Embedded mode locks the storage dir to a single process — incompatible
+    # with running `vecgrep serve` and `vecgrep watch` simultaneously. Server
+    # mode shares one daemon across all clients. Recommended for any setup
+    # with concurrent readers/writers. Example: "http://localhost:6333".
+    qdrant_url: str | None = None
 
     @property
     def qdrant_path(self) -> Path:
@@ -71,6 +77,7 @@ def load_settings() -> Settings:
         "VECGREP_API_PORT": "api_port",
         "VECGREP_TOP_K": "default_top_k",
         "VECGREP_API_TOKEN": "api_token",
+        "VECGREP_QDRANT_URL": "qdrant_url",
     }
     for env_key, attr in env_map.items():
         if env_key in os.environ:
