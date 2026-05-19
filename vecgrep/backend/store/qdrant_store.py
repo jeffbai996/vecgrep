@@ -47,9 +47,13 @@ class StoredHit:
 
 
 class QdrantStore:
-    def __init__(self, path: Path | None) -> None:
-        # path=None -> in-memory (ephemeral). path=Path(...) -> on-disk.
-        if path is None:
+    def __init__(self, path: Path | None, url: str | None = None) -> None:
+        # url=str   -> Qdrant server mode (multi-client safe)
+        # path=None -> in-memory (ephemeral)
+        # path=Path -> on-disk embedded (single-process lock)
+        if url:
+            self.client = QdrantClient(url=url)
+        elif path is None:
             self.client = QdrantClient(":memory:")
         else:
             path.mkdir(parents=True, exist_ok=True)

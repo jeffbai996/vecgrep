@@ -104,7 +104,10 @@ class VecgrepService:
         self.settings = settings or get_settings()
         self.ephemeral = ephemeral
         self.registry = CorpusRegistry(self.settings.corpora_file)
-        self.store = QdrantStore(None if ephemeral else self.settings.qdrant_path)
+        self.store = QdrantStore(
+            None if ephemeral else self.settings.qdrant_path,
+            url=None if ephemeral else self.settings.qdrant_url,
+        )
         self.bm25 = BM25Store(None if ephemeral else self.settings.home / "bm25")
         self._backend_cache: dict[str, EmbedBackend] = {}
         # Embedding cache lives on disk except in ephemeral mode. Wrapping
@@ -694,7 +697,10 @@ class VecgrepService:
                     tar.add(child, arcname=child.name)
 
         # Re-open the store so subsequent calls work.
-        self.store = QdrantStore(None if self.ephemeral else self.settings.qdrant_path)
+        self.store = QdrantStore(
+            None if self.ephemeral else self.settings.qdrant_path,
+            url=None if self.ephemeral else self.settings.qdrant_url,
+        )
         return dest
 
     def import_corpus(self, archive: Path, rename: str | None = None) -> Corpus:
@@ -763,7 +769,10 @@ class VecgrepService:
             self.registry.upsert(corpus)
 
         # Re-open store so the new collection is visible.
-        self.store = QdrantStore(None if self.ephemeral else self.settings.qdrant_path)
+        self.store = QdrantStore(
+            None if self.ephemeral else self.settings.qdrant_path,
+            url=None if self.ephemeral else self.settings.qdrant_url,
+        )
         return corpus
 
 
