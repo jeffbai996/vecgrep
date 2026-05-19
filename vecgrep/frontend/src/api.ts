@@ -25,6 +25,17 @@ export type SearchHit = {
   corpus: string;
   metadata: Record<string, unknown>;
   matched_by: string[];
+  // Raw retriever scores — always populated by the server. Used by the
+  // tuning UI to re-derive display % without re-querying.
+  explain?: {
+    vector_cosine?: number;
+    vector_rank?: number;
+    bm25_score?: number;
+    bm25_rank?: number;
+    bm25_max?: number;
+    rrf?: number;
+    rerank_score?: number;
+  };
 };
 
 function _authHeaders(): Record<string, string> {
