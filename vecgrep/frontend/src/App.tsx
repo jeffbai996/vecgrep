@@ -61,15 +61,20 @@ export default function App() {
           <span className="text-zinc-500 text-sm">grep for meaning, not keywords.</span>
         </div>
         <div className="flex items-center gap-4">
-          <a
-            href="https://fragserv.tailab4af9.ts.net:8443/squad/"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-xs font-mono text-zinc-500 hover:text-zinc-200 transition-colors"
-            title="squad-store — durable squad facts and journal"
-          >
-            squad-store ↗
-          </a>
+          {/* Optional companion-app link, only renders if VITE_COMPANION_URL */}
+          {/* is set at build time. Empty by default to keep OSS builds clean   */}
+          {/* (no internal hostnames in source per CLAUDE.md "OSS — no PII").   */}
+          {import.meta.env.VITE_COMPANION_URL && (
+            <a
+              href={import.meta.env.VITE_COMPANION_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs font-mono text-zinc-500 hover:text-zinc-200 transition-colors"
+              title={import.meta.env.VITE_COMPANION_LABEL || "companion app"}
+            >
+              {import.meta.env.VITE_COMPANION_LABEL || "companion"} ↗
+            </a>
+          )}
           <span className="text-xs text-zinc-500 font-mono">
             {corpora.length} corp{corpora.length === 1 ? "us" : "ora"}
           </span>
