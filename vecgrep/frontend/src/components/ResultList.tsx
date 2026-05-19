@@ -1,23 +1,19 @@
 import { SearchHit } from "../api";
+import { pctOf, rerankByTuning, Tuning } from "../tuning";
 
-type Props = { hits: SearchHit[] | null; searching: boolean };
+type Props = { hits: SearchHit[] | null; searching: boolean; tuning: Tuning };
 
-// Confidence tiers — must match bot logic in cc-context discord_handler.py.
-// Pct alone is unreliable: vector embeddings floor around 70-75% on noise,
-// BM25 hits get rescaled into the 60-90% band. Tier on (pct, matched_by)
-// jointly, but tightened so K-alone hits don't carpet the whole list green
-// when the keyword is common — only V+K or a high pct auto-promotes.
+// Confidence tiers, calibrated against the new sigmoid scoring.
+// Under the calibrated map: noise floor sits at ~10-25%, weak relevant
+// 30-60%, clearly relevant 60-80%, strong 80%+. We tier on (pct, matched_by)
+// jointly so a "both retrievers agreed" hit at 70% still reads high.
 type Tier = "high" | "med" | "none";
 
 function confidenceTier(pct: number, matchedBy: string[] | undefined): Tier {
   const set = new Set(matchedBy || []);
-  const hasBm25 = set.has("bm25");
-  const hasVector = set.has("vector");
-  const hasBoth = hasBm25 && hasVector;
-  if (pct >= 85 || hasBoth) return "high";
-  if (pct >= 78 || (hasBm25 && pct >= 70) || (hasVector && pct >= 75)) {
-    return "med";
-  }
+  const hasBoth = set.has("vector") && set.has("bm25");
+  if (pct >= 75 || hasBoth) return "high";
+  if (pct >= 45) return "med";
   return "none";
 }
 
@@ -79,7 +75,7 @@ function MatchBadge({ matchedBy }: { matchedBy: string[] | undefined }) {
   );
 }
 
-export default function ResultList({ hits, searching }: Props) {
+export default function ResultList({ hits, searching, tuning }: Props) {
   if (searching && !hits) {
     return (
       <div className="text-zinc-500 font-mono text-sm">searching...</div>
@@ -95,10 +91,14 @@ export default function ResultList({ hits, searching }: Props) {
   if (hits.length === 0) {
     return <div className="text-zinc-500 font-mono text-sm">no matches.</div>;
   }
+  // Re-rank under user tuning so dragging the bm25-bias slider actually
+  // reorders the list, not just relabels it.
+  const ordered = rerankByTuning(hits, tuning);
   return (
     <div className="space-y-3">
-      {hits.map((h, i) => {
-        const tier = confidenceTier(h.similarity_pct, h.matched_by);
+      {ordered.map((h, i) => {
+        const displayPct = pctOf(h, tuning);
+        const tier = confidenceTier(displayPct, h.matched_by);
         return (
           <article
             key={i}
@@ -119,8 +119,9 @@ export default function ResultList({ hits, searching }: Props) {
                 </span>
                 <span
                   className={`text-sm font-mono font-semibold ${TIER_PCT_CLASS[tier]}`}
+                  title={`raw scores: ${formatRaw(h)}`}
                 >
-                  {h.similarity_pct.toFixed(1)}%
+                  {displayPct.toFixed(1)}%
                 </span>
               </div>
             </header>
@@ -150,4 +151,16 @@ export default function ResultList({ hits, searching }: Props) {
 function trimTo(s: string, n: number, side: "start" | "end") {
   if (s.length <= n) return s;
   return side === "start" ? "... " + s.slice(-n) : s.slice(0, n) + " ...";
+}
+
+function formatRaw(h: SearchHit): string {
+  const e = h.explain;
+  if (!e) return "n/a";
+  const parts: string[] = [];
+  if (typeof e.vector_cosine === "number")
+    parts.push(`cos=${e.vector_cosine.toFixed(3)}`);
+  if (typeof e.bm25_score === "number")
+    parts.push(`bm25=${e.bm25_score.toFixed(2)}`);
+  if (typeof e.rrf === "number") parts.push(`rrf=${e.rrf.toFixed(4)}`);
+  return parts.join(" · ") || "n/a";
 }

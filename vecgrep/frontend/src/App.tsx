@@ -6,6 +6,8 @@ import CorpusList from "./components/CorpusList";
 import ResultList from "./components/ResultList";
 import Legend from "./components/Legend";
 import AboutFooter from "./components/AboutFooter";
+import TuningPanel from "./components/TuningPanel";
+import { loadTuning, saveTuning, Tuning } from "./tuning";
 
 export default function App() {
   const [corpora, setCorpora] = useState<Corpus[]>([]);
@@ -13,6 +15,12 @@ export default function App() {
   const [hits, setHits] = useState<SearchHit[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [tuning, setTuning] = useState<Tuning>(() => loadTuning());
+
+  const updateTuning = (t: Tuning) => {
+    setTuning(t);
+    saveTuning(t);
+  };
 
   const refresh = async () => {
     try {
@@ -87,12 +95,13 @@ export default function App() {
             corpus={selectedCorpus}
             corpusCount={corpora.length}
           />
+          <TuningPanel tuning={tuning} onChange={updateTuning} />
           {error && (
             <div className="text-sm text-red-400 font-mono whitespace-pre-wrap border border-red-800 bg-red-950/40 rounded p-3">
               {error}
             </div>
           )}
-          <ResultList hits={hits} searching={searching} />
+          <ResultList hits={hits} searching={searching} tuning={tuning} />
           <AboutFooter />
         </section>
       </main>
