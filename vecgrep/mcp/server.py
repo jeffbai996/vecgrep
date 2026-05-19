@@ -138,6 +138,8 @@ def build_mcp_server() -> Any:
                     "chunk": r.chunk,
                     "context_before": r.context_before,
                     "context_after": r.context_after,
+                    # Raw retriever scores for downstream re-calibration.
+                    "scores": r.explain or {},
                 }
                 for r in results
             ]
