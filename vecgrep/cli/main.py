@@ -473,11 +473,17 @@ def serve(host: str | None, port: int | None, reload: bool) -> None:
     import uvicorn
 
     s = get_settings()
+    # `timeout_keep_alive` defaults to 5s in uvicorn — long-running index
+    # calls (which can take minutes on large repos) silently get the
+    # connection axed before the registry-write response is delivered.
+    # The server side completes the work but the CLI sees httpx.ReadTimeout
+    # and the registry never records the new corpus. Bump to 15 min.
     uvicorn.run(
         "vecgrep.backend.main:app",
         host=host or s.api_host,
         port=port or s.api_port,
         reload=reload,
+        timeout_keep_alive=900,
     )
 
 
