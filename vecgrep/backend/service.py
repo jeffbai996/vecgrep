@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import math
 import os
 import time
 import uuid
@@ -57,12 +58,20 @@ RRF_K = 60
 # Override via env var VECGREP_BM25_WEIGHT.
 BM25_WEIGHT = float(os.environ.get("VECGREP_BM25_WEIGHT", "1.5"))
 
-# Floor + headroom for displaying BM25-only hit pct. The fused RRF score
-# for a BM25-only hit is ~1/(60+1) ≈ 1.6%, which reads as noise when shown
-# as "1.6%". For display only, we re-scale BM25-only hits within the
-# result set: top BM25 hit -> ~90%, weaker hits taper to 60%. Ranking is
-# unaffected — the underlying RRF score is still authoritative.
-BM25_DISPLAY_FLOOR = 60.0
+# Floor + headroom for displaying BM25-only hit pct.
+#
+# BM25 scores are unbounded positive numbers and corpus-relative, so the raw
+# value can't map directly to a meaningful percentage. We rescale within the
+# result set: the strongest BM25 hit for this query reads at BM25_DISPLAY_TOP,
+# weaker hits taper toward BM25_DISPLAY_FLOOR. The display is "rank-relative
+# confidence", not absolute. Underlying ranking uses raw RRF scores and is
+# unaffected.
+#
+# Calibration matches the cosine sigmoid: floor at 25% (visible but clearly
+# weak), top at 90% (strong but not "certain"). Anything below 25% gets
+# clipped — if BM25 didn't find it strongly, vector probably should be the
+# voice that speaks.
+BM25_DISPLAY_FLOOR = 25.0
 BM25_DISPLAY_TOP = 90.0
 
 # How many candidates each retriever returns before fusion. Larger pool
@@ -375,17 +384,23 @@ class VecgrepService:
             out: list[SearchResult] = []
             for rank, h in enumerate(vector_hits[:top_k]):
                 r = _hit_to_result(h, ["vector"])
-                if explain:
-                    r.explain = {"vector_cosine": h.score, "vector_rank": rank + 1}
+                # Always include raw vector_cosine + rank so the UI can
+                # re-derive display % under user-tuned calibration without
+                # re-querying. Cheap, never sensitive.
+                r.explain = {"vector_cosine": float(h.score), "vector_rank": rank + 1}
                 out.append(r)
             return out
 
         if mode == "bm25":
             out = []
+            max_score = max((s for _, s, _ in bm25_hits), default=0.0)
             for rank, (cid, score, payload) in enumerate(bm25_hits[:top_k]):
-                r = _bm25_to_result(corpus.name, cid, score, payload, ["bm25"])
-                if explain:
-                    r.explain = {"bm25_score": score, "bm25_rank": rank + 1}
+                r = _bm25_to_result(corpus.name, cid, score, payload, ["bm25"], max_score=max_score)
+                r.explain = {
+                    "bm25_score": float(score),
+                    "bm25_rank": rank + 1,
+                    "bm25_max": float(max_score),
+                }
                 out.append(r)
             return out
 
@@ -427,25 +442,40 @@ class VecgrepService:
         for cid, fused_score in fused:
             payload = payloads_by_id[cid]
             matched_by = sources.get(cid, [])
-            # similarity_pct: vector cosine when vector retriever saw it
-            # (truthful semantic distance), else a BM25-relative pct so a
-            # genuine literal-keyword hit doesn't read as "1.6% noise".
-            if "vector" in matched_by:
-                pct = _cosine_to_pct(vector_score_by_id[cid])
-            elif max_bm25 > 0 and cid in bm25_score_by_id:
+            # similarity_pct: pick the most informative signal for display.
+            # When vector saw it, the calibrated cosine pct (after sigmoid)
+            # already reflects semantic relevance. When only BM25 saw it,
+            # use rank-relative scaling so a strong keyword hit doesn't read
+            # as "1.6% noise" (the raw RRF score for a BM25-only hit).
+            # When BOTH retrievers fired, we take the higher of the two —
+            # confirmation across modalities should boost confidence, not
+            # average it down.
+            cos_pct = _cosine_to_pct(vector_score_by_id[cid]) if cid in vector_score_by_id else None
+            bm_pct = None
+            if max_bm25 > 0 and cid in bm25_score_by_id:
                 ratio = bm25_score_by_id[cid] / max_bm25
-                pct = BM25_DISPLAY_FLOOR + (BM25_DISPLAY_TOP - BM25_DISPLAY_FLOOR) * ratio
+                bm_pct = BM25_DISPLAY_FLOOR + (BM25_DISPLAY_TOP - BM25_DISPLAY_FLOOR) * ratio
+            if cos_pct is not None and bm_pct is not None:
+                pct = max(cos_pct, bm_pct)
+            elif cos_pct is not None:
+                pct = cos_pct
+            elif bm_pct is not None:
+                pct = bm_pct
             else:
-                pct = min(100.0, fused_score * 100)
+                # Should not happen — fused candidate must come from at
+                # least one retriever. Defensive fallback at the floor.
+                pct = BM25_DISPLAY_FLOOR
             r = _payload_to_result(payload, fused_score, pct, matched_by)
-            if explain:
-                r.explain = {"rrf": fused_score}
-                if cid in vector_score_by_id:
-                    r.explain["vector_cosine"] = vector_score_by_id[cid]
-                    r.explain["vector_rank"] = vector_rank_by_id[cid]
-                if cid in bm25_score_by_id:
-                    r.explain["bm25_score"] = bm25_score_by_id[cid]
-                    r.explain["bm25_rank"] = bm25_rank_by_id[cid]
+            # Always emit raw scores so the UI can re-derive display % under
+            # user-tuned calibration. rrf is the underlying ranking score.
+            r.explain = {"rrf": float(fused_score)}
+            if cid in vector_score_by_id:
+                r.explain["vector_cosine"] = float(vector_score_by_id[cid])
+                r.explain["vector_rank"] = vector_rank_by_id[cid]
+            if cid in bm25_score_by_id:
+                r.explain["bm25_score"] = float(bm25_score_by_id[cid])
+                r.explain["bm25_rank"] = bm25_rank_by_id[cid]
+                r.explain["bm25_max"] = float(max_bm25)
             out.append(r)
         # Final display sort happens in search() — _search_one returns RRF
         # order so the outer caller can fuse multi-corpus results sensibly.
@@ -885,8 +915,49 @@ def _expand(source: str, adapter) -> list[Document]:
     return list(adapter.load(source))
 
 
-def _cosine_to_pct(score: float) -> float:
-    return max(0.0, min(1.0, (score + 1) / 2)) * 100
+# Cosine-to-percentage calibration.
+#
+# The naive `(cos + 1) / 2 * 100` mapping is misleading for dense embedding
+# models: with `nomic-embed-text` the empirical noise floor sits at cos~0.50
+# (which reads as 75% under the naive map) and meaningful matches start at
+# cos~0.65. Under the naive map the whole user-relevant range (50% → 95%
+# usefulness) is squashed into the top ~20 display points and ~75% of the
+# scale is wasted on noise that the user would never inspect.
+#
+# We map cos → pct via a sigmoid centered on the empirical
+# inflection point so display percentages spread where they matter:
+#
+#   cos 0.40 → ~3%    (well below noise — irrelevant)
+#   cos 0.55 → ~17%   (noise floor for unrelated queries)
+#   cos 0.66 → 50%    (inflection)
+#   cos 0.75 → ~75%   (clearly relevant)
+#   cos 0.85 → ~91%   (strong match)
+#   cos 0.92 → ~97%   (near-duplicate)
+#
+# Defaults are calibrated for `nomic-embed-text` (Ollama). If you swap models
+# you'll likely need to adjust CALIBRATION_CENTER and CALIBRATION_SLOPE — for
+# OpenAI's text-embedding-3-small the noise floor is lower (cos~0.20) and
+# signal range stretches further, so a lower center (~0.40) fits better.
+CALIBRATION_CENTER = 0.66
+CALIBRATION_SLOPE = 12.0
+
+
+def _cosine_to_pct(score: float, center: float | None = None, slope: float | None = None) -> float:
+    """Sigmoid-calibrated cosine → display percentage.
+
+    Parameters override the module defaults for ad-hoc tuning (used by the
+    web-UI tuning page). With no overrides, returns the default calibrated %.
+    """
+    c = CALIBRATION_CENTER if center is None else center
+    s = CALIBRATION_SLOPE if slope is None else slope
+    cos = max(-1.0, min(1.0, score))
+    x = s * (cos - c)
+    # Guard against overflow for extreme x.
+    if x > 60:
+        return 100.0
+    if x < -60:
+        return 0.0
+    return 100.0 / (1.0 + math.exp(-x))
 
 
 def _hit_to_result(h: StoredHit, matched_by: list[str]) -> SearchResult:
@@ -899,11 +970,20 @@ def _bm25_to_result(
     score: float,
     payload: dict,
     matched_by: list[str],
+    max_score: float | None = None,
 ) -> SearchResult:
-    # BM25 scores are unbounded positives. Squash to 0-100 with a soft cap
-    # at score=20 (already a strong match in BM25). Purely cosmetic — the
-    # actual numeric `score` stays raw for callers who care.
-    pct = min(100.0, score / 20 * 100)
+    """BM25 hit → SearchResult with rank-relative display percentage.
+
+    If `max_score` is provided (caller has the full BM25 candidate set),
+    pct = floor + (top - floor) * (score / max_score). Otherwise falls back
+    to a soft cap at score=20 — only meaningful for a single hit in
+    isolation, but at least bounded.
+    """
+    if max_score and max_score > 0:
+        ratio = max(0.0, min(1.0, score / max_score))
+        pct = BM25_DISPLAY_FLOOR + (BM25_DISPLAY_TOP - BM25_DISPLAY_FLOOR) * ratio
+    else:
+        pct = min(BM25_DISPLAY_TOP, score / 20 * BM25_DISPLAY_TOP)
     return _payload_to_result(payload, score, pct, matched_by)
 
 

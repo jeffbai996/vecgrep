@@ -208,3 +208,53 @@ def test_delete_source_removes_only_that_source(svc, make_doc):
     # A is not
     hits = svc.search("cats", "test", top_k=2)
     assert not hits or all(h.source_id != str(a.resolve()) for h in hits)
+
+
+# ============================================================================
+# Cosine-to-percentage calibration tests
+#
+# The sigmoid-calibrated _cosine_to_pct should:
+#   - put unrelated content (cos ~0.5) well below 30% (so users can ignore it)
+#   - put genuine matches (cos ~0.75) well above 60%
+#   - put strong matches (cos ~0.85+) above 85%
+# ============================================================================
+
+
+def test_cosine_to_pct_noise_below_30():
+    from vecgrep.backend.service import _cosine_to_pct
+    # Empirical: nomic-embed-text gives cos=0.50 for unrelated queries.
+    assert _cosine_to_pct(0.50) < 30.0
+    assert _cosine_to_pct(0.45) < 20.0
+    # And outright nothing reads as basically zero.
+    assert _cosine_to_pct(0.0) < 1.0
+
+
+def test_cosine_to_pct_strong_match_above_85():
+    from vecgrep.backend.service import _cosine_to_pct
+    assert _cosine_to_pct(0.85) > 85.0
+    assert _cosine_to_pct(0.92) > 95.0
+
+
+def test_cosine_to_pct_signal_band_meaningful():
+    """Display % should monotonically increase with cosine in the band users
+    actually inspect. The old (cos+1)/2 mapping crushed signal into 70-90%;
+    the new mapping spreads it across 30-95%."""
+    from vecgrep.backend.service import _cosine_to_pct
+    weak = _cosine_to_pct(0.65)
+    mid = _cosine_to_pct(0.75)
+    strong = _cosine_to_pct(0.85)
+    assert weak < mid < strong
+    # And the spread between weak and strong is at least 30 points
+    # (vs the old map, where 0.65→82% and 0.85→92%, a 10-point spread).
+    assert strong - weak > 30, f"expected wide spread, got {strong - weak:.1f}"
+
+
+def test_cosine_to_pct_overrides_apply():
+    """Allow per-call center/slope overrides for the tuning UI."""
+    from vecgrep.backend.service import _cosine_to_pct
+    # Lower the center to 0.5 — now cos=0.5 reads as 50%.
+    assert abs(_cosine_to_pct(0.5, center=0.5) - 50.0) < 0.1
+    # Steeper slope makes the mapping sharper.
+    flat = _cosine_to_pct(0.70, slope=4)
+    steep = _cosine_to_pct(0.70, slope=20)
+    assert steep > flat, "steeper slope should rise faster past the center"
