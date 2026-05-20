@@ -29,6 +29,7 @@ vecgrep/frontend/        React + Tailwind, single page, built into dist/
 - `~/.vecgrep/` is the only persistence location. `--ephemeral` skips it.
 - Qdrant runs in **embedded** mode (`path=...`), no server, no Docker.
 - Errors that the user can fix (Ollama not running, model not pulled) get plain English messages with the exact command to fix.
+- **MCP transport stays read-only.** The MCP server exposes `search`, `list_corpora`, `get_corpus` only — never `index` or `delete`. This is what makes "expose `/mcp` over a public reverse proxy" a safe deployment pattern: a leaked or unauthed public endpoint cannot wipe or poison corpora. Destructive ops stay on the REST routes, which operators are expected to keep behind tailnet / VPN / localhost.
 
 ## Don'ts
 
