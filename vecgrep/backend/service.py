@@ -96,6 +96,9 @@ class SearchResult:
     source_id: str
     corpus: str
     metadata: dict
+    # Deterministic chunk id (uuid5 of corpus|source_id|chunk_index). Used by
+    # the /api/chunk endpoint to fetch expanded context on demand.
+    chunk_id: str
     # Which retrievers placed this result. "vector", "bm25", or both.
     matched_by: list[str]
     # Per-retriever score breakdown — populated when --explain is on.
@@ -487,6 +490,47 @@ class VecgrepService:
         self.store.drop_collection(_collection_for(corpus.name))
         self.bm25.drop(corpus.name)
         self.registry.delete(name)
+
+    def get_chunk_window(
+        self,
+        corpus_name: str,
+        chunk_id: str,
+        window: int,
+    ) -> dict | None:
+        """Return an expanded context window around a chunk.
+
+        `window` is the number of chars on each side. Pass -1 for the full
+        source. Returns None if the chunk can't be found in either store.
+        """
+        corpus = self.registry.get(corpus_name)
+        payload = self.store.get_by_id(_collection_for(corpus.name), chunk_id)
+        if payload is None:
+            # Vector store missed — try BM25 in case this chunk only lives
+            # there (shouldn't happen under normal indexing, but be safe).
+            payload = self.bm25.get_by_id(corpus.name, chunk_id)
+        if payload is None:
+            return None
+        source_text = payload.get("source_text", "") or ""
+        chunk_start = int(payload.get("chunk_start", 0))
+        chunk_end = int(payload.get("chunk_end", 0))
+        if window < 0:
+            before_start = 0
+            after_end = len(source_text)
+        else:
+            before_start = max(0, chunk_start - window)
+            after_end = min(len(source_text), chunk_end + window)
+        return {
+            "corpus": corpus.name,
+            "chunk_id": chunk_id,
+            "source_id": payload.get("source_id", ""),
+            "chunk_start": chunk_start,
+            "chunk_end": chunk_end,
+            "before": source_text[before_start:chunk_start],
+            "chunk": payload.get("text", "") or source_text[chunk_start:chunk_end],
+            "after": source_text[chunk_end:after_end],
+            "source_length": len(source_text),
+            "window": window,
+        }
 
     def delete_source(self, corpus_name: str, source_id: str) -> None:
         corpus = self.registry.get(corpus_name)
@@ -998,6 +1042,10 @@ def _payload_to_result(
     chunk_end = int(payload.get("chunk_end", 0))
     before = source_text[max(0, chunk_start - 400) : chunk_start] if source_text else ""
     after = source_text[chunk_end : chunk_end + 400] if source_text else ""
+    corpus_name = payload.get("corpus", "") or ""
+    source_id = payload.get("source_id", "") or ""
+    chunk_index = int(payload.get("chunk_index", 0))
+    cid = _chunk_id(corpus_name, source_id, chunk_index) if corpus_name and source_id else ""
     return SearchResult(
         score=score,
         similarity_pct=pct,
@@ -1006,8 +1054,9 @@ def _payload_to_result(
         chunk_end=chunk_end,
         context_before=before,
         context_after=after,
-        source_id=payload.get("source_id", ""),
-        corpus=payload.get("corpus", ""),
+        source_id=source_id,
+        corpus=corpus_name,
         metadata=payload.get("metadata", {}) or {},
+        chunk_id=cid,
         matched_by=matched_by,
     )

@@ -24,6 +24,7 @@ export type SearchHit = {
   source_id: string;
   corpus: string;
   metadata: Record<string, unknown>;
+  chunk_id: string;
   matched_by: string[];
   // Raw retriever scores — always populated by the server. Used by the
   // tuning UI to re-derive display % without re-querying.
@@ -95,4 +96,21 @@ export const api = {
       body: JSON.stringify({ query, corpus, top_k, mode, rerank }),
     }),
   config: () => request<Record<string, unknown>>("/api/config"),
+  getChunk: (corpus: string, chunkId: string, window: number | "full" = 2000) =>
+    request<ChunkWindow>(
+      `/api/chunk/${encodeURIComponent(corpus)}/${encodeURIComponent(chunkId)}?window=${window}`
+    ),
+};
+
+export type ChunkWindow = {
+  corpus: string;
+  chunk_id: string;
+  source_id: string;
+  chunk_start: number;
+  chunk_end: number;
+  before: string;
+  chunk: string;
+  after: string;
+  source_length: number;
+  window: number;
 };

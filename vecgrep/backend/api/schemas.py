@@ -35,8 +35,26 @@ class SearchHit(BaseModel):
     source_id: str
     corpus: str
     metadata: dict
+    # Deterministic chunk id — pass to GET /api/chunk/{corpus}/{chunk_id} to
+    # fetch a wider context window.
+    chunk_id: str = ""
     matched_by: list[str] = []
     explain: dict = {}
+
+
+class ChunkWindow(BaseModel):
+    """Expanded context around a chunk. Returned by GET /api/chunk."""
+    corpus: str
+    chunk_id: str
+    source_id: str
+    chunk_start: int
+    chunk_end: int
+    before: str
+    chunk: str
+    after: str
+    source_length: int
+    # Echoes the requested window (in chars) or -1 for full source.
+    window: int
 
 
 class SearchResponse(BaseModel):

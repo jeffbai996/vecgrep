@@ -123,6 +123,24 @@ class QdrantStore:
             )
         return hits
 
+    def get_by_id(self, collection: str, point_id: str) -> dict | None:
+        """Fetch a single point's payload by id. Returns None if missing."""
+        existing = {c.name for c in self.client.get_collections().collections}
+        if collection not in existing:
+            return None
+        try:
+            points = self.client.retrieve(
+                collection_name=collection,
+                ids=[point_id],
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception:
+            return None
+        if not points:
+            return None
+        return points[0].payload or {}
+
     def delete_by_source(self, collection: str, source_id: str) -> None:
         existing = {c.name for c in self.client.get_collections().collections}
         if collection not in existing:

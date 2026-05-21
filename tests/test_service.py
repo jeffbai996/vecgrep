@@ -258,3 +258,47 @@ def test_cosine_to_pct_overrides_apply():
     flat = _cosine_to_pct(0.70, slope=4)
     steep = _cosine_to_pct(0.70, slope=20)
     assert steep > flat, "steeper slope should rise faster past the center"
+
+
+# ============================================================================
+# Chunk-window expansion (powers the click-to-expand UI)
+# ============================================================================
+
+
+def test_get_chunk_window_returns_expanded_context(svc, make_doc):
+    body = "Header. " + ("Filler sentence. " * 200) + "Target sentence here. " + ("Tail. " * 200)
+    p = make_doc("expand.md", body)
+    svc.index(str(p), "test")
+
+    hits = svc.search("Target sentence here", "test", top_k=1)
+    assert hits, "search returned nothing"
+    cid = hits[0].chunk_id
+    assert cid, "search hit should carry a chunk_id"
+
+    # Default window slice — should be wider than the 400-char sidewindow
+    # baked into _payload_to_result.
+    wide = svc.get_chunk_window("test", cid, window=2000)
+    assert wide is not None
+    assert len(wide["before"]) + len(wide["after"]) > 800
+    assert "Target sentence here" in wide["chunk"]
+    assert wide["source_length"] == len(body)
+
+
+def test_get_chunk_window_full_returns_whole_source(svc, make_doc):
+    body = "Alpha. " * 50 + "TARGET. " + "Omega. " * 50
+    p = make_doc("full.md", body)
+    svc.index(str(p), "test")
+
+    hits = svc.search("TARGET", "test", top_k=1)
+    cid = hits[0].chunk_id
+    full = svc.get_chunk_window("test", cid, window=-1)
+    assert full is not None
+    # The whole document should be reconstructible from before + chunk + after
+    assert full["before"] + full["chunk"] + full["after"] == body
+
+
+def test_get_chunk_window_missing_chunk_returns_none(svc, make_doc):
+    p = make_doc("doc.md", "Just some content.")
+    svc.index(str(p), "test")
+    result = svc.get_chunk_window("test", "nonexistent-chunk-id", window=500)
+    assert result is None

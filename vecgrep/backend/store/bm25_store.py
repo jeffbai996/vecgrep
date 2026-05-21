@@ -219,6 +219,14 @@ class BM25Store:
         self._bm25_instances.pop(corpus, None)
         self._persist(corpus)
 
+    def get_by_id(self, corpus: str, cid: str) -> dict | None:
+        """Look up a single chunk payload by cid. Returns None if missing."""
+        idx = self._load(corpus)
+        for i, stored in enumerate(idx.ids):
+            if stored == cid:
+                return idx.payloads[i]
+        return None
+
     def drop(self, corpus: str) -> None:
         self._cache.pop(corpus, None)
         self._bm25_instances.pop(corpus, None)
