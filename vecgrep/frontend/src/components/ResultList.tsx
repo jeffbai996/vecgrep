@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, ChunkWindow, SearchHit } from "../api";
 import { pctOf, rerankByTuning, Tuning } from "../tuning";
 
@@ -37,6 +37,14 @@ const TIER_BORDER_CLASS: Record<Tier, string> = {
   high: "border-emerald-900/60 hover:border-emerald-700",
   med: "border-amber-900/50 hover:border-amber-700",
   none: "border-zinc-800 hover:border-zinc-700",
+};
+
+// Brighter borders for open results — visually anchors the user's eye to
+// what's currently expanded, especially helpful with multiple results open.
+const TIER_BORDER_CLASS_OPEN: Record<Tier, string> = {
+  high: "border-emerald-600/80",
+  med: "border-amber-600/80",
+  none: "border-zinc-600",
 };
 
 const TIER_LABEL: Record<Tier, string> = {
@@ -89,6 +97,24 @@ export default function ResultList({ hits, searching, tuning }: Props) {
   // Expansion state lives at the list level so the same chunk stays open
   // across tuning-driven reorders (which only swap the array, not identity).
   const [expanded, setExpanded] = useState<Record<string, ExpandState>>({});
+
+  // ESC collapses the most recently opened result. Tracking "most recent" by
+  // insertion order in the expanded map.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      setExpanded((s) => {
+        const keys = Object.keys(s);
+        if (!keys.length) return s;
+        const last = keys[keys.length - 1];
+        const next = { ...s };
+        delete next[last];
+        return next;
+      });
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   async function toggleExpand(h: SearchHit) {
     const cur = expanded[h.chunk_id];
@@ -174,10 +200,24 @@ export default function ResultList({ hits, searching, tuning }: Props) {
         return (
           <article
             key={h.chunk_id || i}
-            className={`border rounded p-4 transition-colors ${TIER_BORDER_CLASS[tier]}`}
+            className={`border rounded p-4 transition-colors ${
+              isOpen ? TIER_BORDER_CLASS_OPEN[tier] : TIER_BORDER_CLASS[tier]
+            }`}
           >
             <header className="flex items-baseline justify-between mb-2 gap-3">
               <div className="text-xs font-mono text-zinc-500 truncate flex items-center gap-2 min-w-0">
+                {/* Chevron — visible affordance that the row is clickable.
+                    Rotates 90° on expand so state is unambiguous. */}
+                {h.chunk_id && (
+                  <span
+                    className={`text-zinc-500 select-none transition-transform inline-block w-3 ${
+                      isOpen ? "rotate-90 text-zinc-300" : ""
+                    }`}
+                    aria-hidden="true"
+                  >
+                    ▸
+                  </span>
+                )}
                 <span className="text-zinc-400">{h.corpus}</span>
                 <span className="text-zinc-700">·</span>
                 <span className="truncate">{shortSource(h.source_id)}</span>
@@ -213,11 +253,32 @@ export default function ResultList({ hits, searching, tuning }: Props) {
               }}
               className={`font-mono text-sm leading-relaxed whitespace-pre-wrap -mx-1 px-1 py-0.5 rounded transition-colors ${
                 h.chunk_id ? "cursor-pointer hover:bg-zinc-900/30" : ""
-              }`}
-              title={h.chunk_id ? (isOpen ? "click to collapse" : "click to expand context") : ""}
+              } ${isOpen ? "bg-zinc-900/20" : ""}`}
+              title={h.chunk_id ? (isOpen ? "click to collapse (Esc)" : "click to expand context") : ""}
             >
               {isOpen ? (
-                <ExpandedView exp={exp!} onMore={() => loadFull(h)} />
+                <ExpandedView
+                  exp={exp!}
+                  fallback={
+                    <>
+                      {h.context_before && (
+                        <span className="text-zinc-600">
+                          {trimTo(h.context_before, 200, "start")}
+                        </span>
+                      )}
+                      <mark className="bg-yellow-500/20 text-yellow-100 not-italic">
+                        {h.chunk}
+                      </mark>
+                      {h.context_after && (
+                        <span className="text-zinc-600">
+                          {" "}
+                          {trimTo(h.context_after, 200, "end")}
+                        </span>
+                      )}
+                    </>
+                  }
+                  onMore={() => loadFull(h)}
+                />
               ) : (
                 <>
                   {h.context_before && (
@@ -244,28 +305,68 @@ export default function ResultList({ hits, searching, tuning }: Props) {
   );
 }
 
-function ExpandedView({ exp, onMore }: { exp: ExpandState; onMore: () => void }) {
-  if (exp.loading && !exp.data) {
-    return <span className="text-zinc-500 text-xs">loading context...</span>;
-  }
+function ExpandedView({
+  exp,
+  fallback,
+  onMore,
+}: {
+  exp: ExpandState;
+  // Fallback content (the inline preview from the search hit) is shown while
+  // the wider window is in flight, so the user never sees the chunk disappear.
+  fallback: React.ReactNode;
+  onMore: () => void;
+}) {
+  const markRef = useRef<HTMLElement | null>(null);
+
+  // Once data lands, scroll the highlighted chunk into view inside the
+  // scrollable container. Without this, a chunk at chunk_start=5000 ends up
+  // off-screen after a ±2000 expansion, forcing the user to hunt for it.
+  useEffect(() => {
+    if (!exp.data || !markRef.current) return;
+    markRef.current.scrollIntoView({ block: "center", behavior: "auto" });
+  }, [exp.data]);
+
   if (exp.error) {
-    return <span className="text-red-400 text-xs">error: {exp.error}</span>;
+    return (
+      <div className="text-red-400 text-xs py-1">error: {exp.error}</div>
+    );
+  }
+  if (exp.loading && !exp.data) {
+    // Keep the original preview visible under a "loading more context"
+    // hint so the click feels responsive instead of blanking the result.
+    return (
+      <>
+        <div className="opacity-60">{fallback}</div>
+        <div className="mt-2 text-[10px] font-mono text-zinc-500 flex items-center gap-2">
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-500 animate-pulse" />
+          loading wider context…
+        </div>
+      </>
+    );
   }
   const d = exp.data!;
   const coveredChars = d.before.length + d.chunk.length + d.after.length;
   const hasMore = exp.level !== "full" && coveredChars < d.source_length;
   return (
     <>
-      <div className="max-h-[600px] overflow-y-auto pr-2">
-        {d.before && <span className="text-zinc-500">{d.before}</span>}
-        <mark className="bg-yellow-500/25 text-yellow-100 not-italic">{d.chunk}</mark>
-        {d.after && <span className="text-zinc-500">{d.after}</span>}
-      </div>
-      <div className="mt-2 flex items-center gap-3 text-[10px] font-mono text-zinc-500">
+      <div className="flex items-center justify-between mb-2 text-[10px] font-mono text-zinc-500">
         <span>
           showing {coveredChars.toLocaleString()} / {d.source_length.toLocaleString()} chars
         </span>
-        {hasMore && (
+        <span className="text-zinc-600">click row or Esc to collapse</span>
+      </div>
+      <div className="max-h-[600px] overflow-y-auto pr-2 border-l-2 border-zinc-800 pl-3">
+        {d.before && <span className="text-zinc-500">{d.before}</span>}
+        <mark
+          ref={markRef}
+          className="bg-yellow-500/25 text-yellow-100 not-italic"
+        >
+          {d.chunk}
+        </mark>
+        {d.after && <span className="text-zinc-500">{d.after}</span>}
+      </div>
+      {hasMore && (
+        <div className="mt-2 text-[10px] font-mono">
           <button
             type="button"
             onClick={(e) => {
@@ -273,13 +374,12 @@ function ExpandedView({ exp, onMore }: { exp: ExpandState; onMore: () => void })
               onMore();
             }}
             disabled={exp.loading}
-            className="px-2 py-0.5 border border-zinc-700 rounded hover:border-zinc-500 hover:text-zinc-300 disabled:opacity-50"
+            className="px-2 py-0.5 border border-zinc-700 rounded hover:border-zinc-500 hover:text-zinc-300 text-zinc-500 disabled:opacity-50"
           >
-            {exp.loading ? "loading..." : "load full source"}
+            {exp.loading ? "loading…" : "load full source"}
           </button>
-        )}
-        <span className="text-zinc-700">click anywhere to collapse</span>
-      </div>
+        </div>
+      )}
     </>
   );
 }
