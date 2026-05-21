@@ -1,7 +1,17 @@
-import { SearchHit } from "../api";
+import { useState } from "react";
+import { api, ChunkWindow, SearchHit } from "../api";
 import { pctOf, rerankByTuning, Tuning } from "../tuning";
 
 type Props = { hits: SearchHit[] | null; searching: boolean; tuning: Tuning };
+
+// Per-result expansion state. Keyed by chunk_id so it survives re-renders
+// when the parent list changes order under tuning.
+type ExpandState = {
+  data: ChunkWindow | null;       // null while loading or before first fetch
+  level: "default" | "wide" | "full";
+  loading: boolean;
+  error: string | null;
+};
 
 // Confidence tiers, calibrated against the new sigmoid scoring.
 // Under the calibrated map: noise floor sits at ~10-25%, weak relevant
@@ -76,6 +86,66 @@ function MatchBadge({ matchedBy }: { matchedBy: string[] | undefined }) {
 }
 
 export default function ResultList({ hits, searching, tuning }: Props) {
+  // Expansion state lives at the list level so the same chunk stays open
+  // across tuning-driven reorders (which only swap the array, not identity).
+  const [expanded, setExpanded] = useState<Record<string, ExpandState>>({});
+
+  async function toggleExpand(h: SearchHit) {
+    const cur = expanded[h.chunk_id];
+    if (cur) {
+      setExpanded((e) => {
+        const next = { ...e };
+        delete next[h.chunk_id];
+        return next;
+      });
+      return;
+    }
+    setExpanded((e) => ({
+      ...e,
+      [h.chunk_id]: { data: null, level: "wide", loading: true, error: null },
+    }));
+    try {
+      const data = await api.getChunk(h.corpus, h.chunk_id, 2000);
+      setExpanded((e) => ({
+        ...e,
+        [h.chunk_id]: { data, level: "wide", loading: false, error: null },
+      }));
+    } catch (err) {
+      setExpanded((e) => ({
+        ...e,
+        [h.chunk_id]: {
+          data: null,
+          level: "wide",
+          loading: false,
+          error: err instanceof Error ? err.message : "failed to fetch",
+        },
+      }));
+    }
+  }
+
+  async function loadFull(h: SearchHit) {
+    setExpanded((e) => ({
+      ...e,
+      [h.chunk_id]: { ...(e[h.chunk_id] || { data: null, level: "wide", loading: false, error: null }), loading: true },
+    }));
+    try {
+      const data = await api.getChunk(h.corpus, h.chunk_id, "full");
+      setExpanded((e) => ({
+        ...e,
+        [h.chunk_id]: { data, level: "full", loading: false, error: null },
+      }));
+    } catch (err) {
+      setExpanded((e) => ({
+        ...e,
+        [h.chunk_id]: {
+          ...(e[h.chunk_id] as ExpandState),
+          loading: false,
+          error: err instanceof Error ? err.message : "failed to fetch",
+        },
+      }));
+    }
+  }
+
   if (searching && !hits) {
     return (
       <div className="text-zinc-500 font-mono text-sm">searching...</div>
@@ -99,9 +169,11 @@ export default function ResultList({ hits, searching, tuning }: Props) {
       {ordered.map((h, i) => {
         const displayPct = pctOf(h, tuning);
         const tier = confidenceTier(displayPct, h.matched_by);
+        const exp = h.chunk_id ? expanded[h.chunk_id] : undefined;
+        const isOpen = !!exp;
         return (
           <article
-            key={i}
+            key={h.chunk_id || i}
             className={`border rounded p-4 transition-colors ${TIER_BORDER_CLASS[tier]}`}
           >
             <header className="flex items-baseline justify-between mb-2 gap-3">
@@ -125,26 +197,90 @@ export default function ResultList({ hits, searching, tuning }: Props) {
                 </span>
               </div>
             </header>
-            <div className="font-mono text-sm leading-relaxed whitespace-pre-wrap">
-              {h.context_before && (
-                <span className="text-zinc-600">
-                  {trimTo(h.context_before, 200, "start")}
-                </span>
-              )}
-              <mark className="bg-yellow-500/20 text-yellow-100 not-italic">
-                {h.chunk}
-              </mark>
-              {h.context_after && (
-                <span className="text-zinc-600">
-                  {" "}
-                  {trimTo(h.context_after, 200, "end")}
-                </span>
+            {/* Body — clickable to expand. Keep the existing inline preview
+                until the user opts in; expanded view replaces it. div+role
+                instead of <button> because the expanded view nests its own
+                buttons (nested buttons are invalid HTML). */}
+            <div
+              role={h.chunk_id ? "button" : undefined}
+              tabIndex={h.chunk_id ? 0 : -1}
+              onClick={() => h.chunk_id && toggleExpand(h)}
+              onKeyDown={(e) => {
+                if (h.chunk_id && (e.key === "Enter" || e.key === " ")) {
+                  e.preventDefault();
+                  toggleExpand(h);
+                }
+              }}
+              className={`font-mono text-sm leading-relaxed whitespace-pre-wrap -mx-1 px-1 py-0.5 rounded transition-colors ${
+                h.chunk_id ? "cursor-pointer hover:bg-zinc-900/30" : ""
+              }`}
+              title={h.chunk_id ? (isOpen ? "click to collapse" : "click to expand context") : ""}
+            >
+              {isOpen ? (
+                <ExpandedView exp={exp!} onMore={() => loadFull(h)} />
+              ) : (
+                <>
+                  {h.context_before && (
+                    <span className="text-zinc-600">
+                      {trimTo(h.context_before, 200, "start")}
+                    </span>
+                  )}
+                  <mark className="bg-yellow-500/20 text-yellow-100 not-italic">
+                    {h.chunk}
+                  </mark>
+                  {h.context_after && (
+                    <span className="text-zinc-600">
+                      {" "}
+                      {trimTo(h.context_after, 200, "end")}
+                    </span>
+                  )}
+                </>
               )}
             </div>
           </article>
         );
       })}
     </div>
+  );
+}
+
+function ExpandedView({ exp, onMore }: { exp: ExpandState; onMore: () => void }) {
+  if (exp.loading && !exp.data) {
+    return <span className="text-zinc-500 text-xs">loading context...</span>;
+  }
+  if (exp.error) {
+    return <span className="text-red-400 text-xs">error: {exp.error}</span>;
+  }
+  const d = exp.data!;
+  const coveredChars = d.before.length + d.chunk.length + d.after.length;
+  const hasMore = exp.level !== "full" && coveredChars < d.source_length;
+  return (
+    <>
+      <div className="max-h-[600px] overflow-y-auto pr-2">
+        {d.before && <span className="text-zinc-500">{d.before}</span>}
+        <mark className="bg-yellow-500/25 text-yellow-100 not-italic">{d.chunk}</mark>
+        {d.after && <span className="text-zinc-500">{d.after}</span>}
+      </div>
+      <div className="mt-2 flex items-center gap-3 text-[10px] font-mono text-zinc-500">
+        <span>
+          showing {coveredChars.toLocaleString()} / {d.source_length.toLocaleString()} chars
+        </span>
+        {hasMore && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onMore();
+            }}
+            disabled={exp.loading}
+            className="px-2 py-0.5 border border-zinc-700 rounded hover:border-zinc-500 hover:text-zinc-300 disabled:opacity-50"
+          >
+            {exp.loading ? "loading..." : "load full source"}
+          </button>
+        )}
+        <span className="text-zinc-700">click anywhere to collapse</span>
+      </div>
+    </>
   );
 }
 

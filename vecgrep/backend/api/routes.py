@@ -11,6 +11,7 @@ from ..rerank import RerankerError
 from ..service import VecgrepService
 from ..store import CorpusError
 from .schemas import (
+    ChunkWindow,
     ConfigOut,
     CorpusOut,
     IndexRequest,
@@ -19,6 +20,12 @@ from .schemas import (
     SearchRequest,
     SearchResponse,
 )
+
+
+# Server-side caps on chunk-window expansion. Keeps a leaked unauthed endpoint
+# from being abused to dump entire huge sources via repeated calls.
+_DEFAULT_CHUNK_WINDOW = 2000
+_MAX_CHUNK_WINDOW = 20000
 
 def require_token(authorization: str | None = Header(default=None)) -> None:
     """Bearer-token gate. No-op when settings.api_token is unset."""
@@ -136,9 +143,37 @@ def search(req: SearchRequest) -> SearchResponse:
                 source_id=r.source_id,
                 corpus=r.corpus,
                 metadata=r.metadata,
+                chunk_id=r.chunk_id,
                 matched_by=r.matched_by,
                 explain=r.explain or {},
             )
             for r in results
         ]
     )
+
+
+@router.get("/chunk/{corpus}/{chunk_id}", response_model=ChunkWindow)
+def get_chunk(corpus: str, chunk_id: str, window: str = str(_DEFAULT_CHUNK_WINDOW)) -> ChunkWindow:
+    """Fetch an expanded context window around a chunk.
+
+    `window` is char count per side, or "full" for the whole source. Capped
+    at `_MAX_CHUNK_WINDOW` per side to bound response size.
+    """
+    if window == "full":
+        win = -1
+    else:
+        try:
+            win = int(window)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="window must be an int or 'full'")
+        if win < 0:
+            raise HTTPException(status_code=400, detail="window must be >= 0")
+        win = min(win, _MAX_CHUNK_WINDOW)
+    svc = _service()
+    try:
+        data = svc.get_chunk_window(corpus, chunk_id, win)
+    except CorpusError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"chunk {chunk_id} not found in {corpus}")
+    return ChunkWindow(**data)
