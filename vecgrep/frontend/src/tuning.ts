@@ -23,7 +23,7 @@ export type Tuning = {
 export const DEFAULT_TUNING: Tuning = {
   cosineCenter: 0.66,
   cosineSlope: 12,
-  bm25Top: 90,
+  bm25Top: 100,
   bm25Floor: 25,
   bm25Bias: 0,
 };
