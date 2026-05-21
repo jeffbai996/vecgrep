@@ -145,7 +145,7 @@ docs ──▶ adapters ──▶ chunkers ──┤                      ├─
 - **Qdrant** runs in embedded mode (no server, no Docker) at `~/.vecgrep/qdrant/`. Each named corpus is its own collection.
 - **BM25** index runs alongside Qdrant, persisted as a pickle per corpus. Tokenizer splits identifiers (`sharpe_ratio` → `sharpe`, `ratio`) so code search isn't blind to underscore- or camelCase-style naming.
 - **Hybrid retrieval** is the default. Each retriever returns its top 50 candidates; their ranks are fused via Reciprocal Rank Fusion (`score = Σ w / (60+rank)`). BM25's weight is `1.5` by default — high enough to float exact-keyword hits over the vector noise floor on short queries, low enough to leave long conceptual queries vector-dominated. Override with `VECGREP_BM25_WEIGHT`. Pure-vector or pure-BM25 are available with `--mode vector` / `--mode bm25`.
-- **Match-aware confidence display.** The raw fused RRF score for a BM25-only hit is `~1.6%`, which reads as noise. vecgrep rescales BM25-only display percentages per query (top BM25 hit ≈ 90%, weaker hits taper to 60%) so a literal-keyword match doesn't look like dust. Ranking is unaffected — the underlying RRF score is still authoritative. The web UI surfaces this with V/K/VK badges and tier colors so you can tell at a glance which results are real.
+- **Match-aware confidence display.** The raw fused RRF score for a BM25-only hit is `~1.6%`, which reads as noise. vecgrep rescales BM25-only display percentages per query (top BM25 hit can reach 100%, weaker hits taper to ~25%) so a literal-keyword match doesn't look like dust. Ranking is unaffected — the underlying RRF score is still authoritative. The web UI surfaces this with V/K/VK badges and tier colors so you can tell at a glance which results are real.
 - **Cross-encoder reranker** (`--rerank`, off by default) rescores the candidate pool with `BAAI/bge-reranker-base`. Local, ~30ms for 50 chunks on CPU. Lazy-loaded — the heavy `torch` import only happens when you ask for it.
 
 Each corpus pins the embedding backend and dimension at index time, and refuses to mix models within itself. If you change embedding model, recreate the corpus.
@@ -298,9 +298,10 @@ The plan is short and ordered. Make search good first, connect it to where you a
 
 **v0.7 — search legibility (in progress)**
 - ✅ Weighted RRF — BM25 gets `1.5×` over vector by default so genuine keyword hits float above the vector noise floor (`VECGREP_BM25_WEIGHT` overrides). Fixed the "rare token returns 1.6% noise" problem.
-- ✅ BM25-only display percentages rescaled per query — 60–90% band, ranking unchanged.
+- ✅ BM25-only display percentages rescaled per query — 25–100% band (tunable), ranking unchanged.
 - ✅ Web UI confidence tiers + match-method badges (V / K / VK) — see what's a literal hit, what's semantic, what's both.
 - ✅ In-page primers — index help dropdown, sidebar legend, BM25/vector explainer at the page footer. All `<details>`, default closed.
+- ✅ Click-to-expand chunk context — each search result is clickable to lazy-fetch ±2000 chars around the chunk, with a "load full source" button that returns to the whole document. Backed by `GET /api/chunk/{corpus}/{chunk_id}?window=N`.
 - `uvx vecgrep` verification + docs
 - Plugin API docs (the registries already work, just need an example)
 - Per-source TTL on URLs
