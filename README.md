@@ -301,7 +301,7 @@ The plan is short and ordered. Make search good first, connect it to where you a
 - ✅ BM25-only display percentages rescaled per query — 25–100% band (tunable), ranking unchanged.
 - ✅ Web UI confidence tiers + match-method badges (V / K / VK) — see what's a literal hit, what's semantic, what's both.
 - ✅ In-page primers — index help dropdown, sidebar legend, BM25/vector explainer at the page footer. All `<details>`, default closed.
-- ✅ Click-to-expand chunk context — each search result is clickable to lazy-fetch ±2000 chars around the chunk, with a "load full source" button that returns to the whole document. Backed by `GET /api/chunk/{corpus}/{chunk_id}?window=N`. UI: chevron affordance on each row, rotates on expand; loading state keeps the original preview visible under a pulsing dot; highlighted chunk auto-scrolls into view on open; Esc collapses the most recently opened result.
+- ✅ Click-to-expand chunk context — each search result is clickable to lazy-fetch ±2000 chars around the chunk. Backed by `GET /api/chunk/{corpus}/{chunk_id}?window=N`. UI: chevron affordance on each row, rotates on expand; loading state keeps the original preview visible under a pulsing dot; highlighted chunk auto-scrolls into view on open; Esc collapses the most recently opened result.
 - `uvx vecgrep` verification + docs
 - Plugin API docs (the registries already work, just need an example)
 - Per-source TTL on URLs
