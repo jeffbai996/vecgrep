@@ -8,7 +8,6 @@ type Props = { hits: SearchHit[] | null; searching: boolean; tuning: Tuning };
 // when the parent list changes order under tuning.
 type ExpandState = {
   data: ChunkWindow | null;       // null while loading or before first fetch
-  level: "default" | "wide" | "full";
   loading: boolean;
   error: string | null;
 };
@@ -128,43 +127,19 @@ export default function ResultList({ hits, searching, tuning }: Props) {
     }
     setExpanded((e) => ({
       ...e,
-      [h.chunk_id]: { data: null, level: "wide", loading: true, error: null },
+      [h.chunk_id]: { data: null, loading: true, error: null },
     }));
     try {
       const data = await api.getChunk(h.corpus, h.chunk_id, 2000);
       setExpanded((e) => ({
         ...e,
-        [h.chunk_id]: { data, level: "wide", loading: false, error: null },
+        [h.chunk_id]: { data, loading: false, error: null },
       }));
     } catch (err) {
       setExpanded((e) => ({
         ...e,
         [h.chunk_id]: {
           data: null,
-          level: "wide",
-          loading: false,
-          error: err instanceof Error ? err.message : "failed to fetch",
-        },
-      }));
-    }
-  }
-
-  async function loadFull(h: SearchHit) {
-    setExpanded((e) => ({
-      ...e,
-      [h.chunk_id]: { ...(e[h.chunk_id] || { data: null, level: "wide", loading: false, error: null }), loading: true },
-    }));
-    try {
-      const data = await api.getChunk(h.corpus, h.chunk_id, "full");
-      setExpanded((e) => ({
-        ...e,
-        [h.chunk_id]: { data, level: "full", loading: false, error: null },
-      }));
-    } catch (err) {
-      setExpanded((e) => ({
-        ...e,
-        [h.chunk_id]: {
-          ...(e[h.chunk_id] as ExpandState),
           loading: false,
           error: err instanceof Error ? err.message : "failed to fetch",
         },
@@ -277,7 +252,6 @@ export default function ResultList({ hits, searching, tuning }: Props) {
                       )}
                     </>
                   }
-                  onMore={() => loadFull(h)}
                 />
               ) : (
                 <>
@@ -308,13 +282,11 @@ export default function ResultList({ hits, searching, tuning }: Props) {
 function ExpandedView({
   exp,
   fallback,
-  onMore,
 }: {
   exp: ExpandState;
   // Fallback content (the inline preview from the search hit) is shown while
   // the wider window is in flight, so the user never sees the chunk disappear.
   fallback: React.ReactNode;
-  onMore: () => void;
 }) {
   const markRef = useRef<HTMLElement | null>(null);
 
@@ -332,8 +304,6 @@ function ExpandedView({
     );
   }
   if (exp.loading && !exp.data) {
-    // Keep the original preview visible under a "loading more context"
-    // hint so the click feels responsive instead of blanking the result.
     return (
       <>
         <div className="opacity-60">{fallback}</div>
@@ -346,7 +316,6 @@ function ExpandedView({
   }
   const d = exp.data!;
   const coveredChars = d.before.length + d.chunk.length + d.after.length;
-  const hasMore = exp.level !== "full" && coveredChars < d.source_length;
   return (
     <>
       <div className="flex items-center justify-between mb-2 text-[10px] font-mono text-zinc-500">
@@ -365,21 +334,6 @@ function ExpandedView({
         </mark>
         {d.after && <span className="text-zinc-500">{d.after}</span>}
       </div>
-      {hasMore && (
-        <div className="mt-2 text-[10px] font-mono">
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              onMore();
-            }}
-            disabled={exp.loading}
-            className="px-2 py-0.5 border border-zinc-700 rounded hover:border-zinc-500 hover:text-zinc-300 text-zinc-500 disabled:opacity-50"
-          >
-            {exp.loading ? "loading…" : "load full source"}
-          </button>
-        </div>
-      )}
     </>
   );
 }
