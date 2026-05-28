@@ -76,6 +76,13 @@ class QdrantStore:
         if name in existing:
             self.client.delete_collection(name)
 
+    # Max points per upsert request. We store the full source_text on every
+    # chunk, so a large document's chunks can sum to >256MB — Qdrant's default
+    # request-payload ceiling — and a single all-points upsert 400s. Batching
+    # keeps each request well under the limit. 64 is conservative for sources
+    # up to a few MB; smaller if individual chunks are unusually large.
+    _UPSERT_BATCH = 64
+
     def upsert(
         self,
         collection: str,
@@ -85,12 +92,16 @@ class QdrantStore:
     ) -> int:
         if not vectors:
             return 0
-        points = [
-            qm.PointStruct(id=cid, vector=v, payload=p)
-            for cid, v, p in zip(ids, vectors, payloads)
-        ]
-        self.client.upsert(collection_name=collection, points=points, wait=True)
-        return len(points)
+        total = 0
+        for start in range(0, len(vectors), self._UPSERT_BATCH):
+            end = start + self._UPSERT_BATCH
+            points = [
+                qm.PointStruct(id=cid, vector=v, payload=p)
+                for cid, v, p in zip(ids[start:end], vectors[start:end], payloads[start:end])
+            ]
+            self.client.upsert(collection_name=collection, points=points, wait=True)
+            total += len(points)
+        return total
 
     def search(
         self,
