@@ -14,6 +14,7 @@ from .schemas import (
     ChunkWindow,
     ConfigOut,
     CorpusOut,
+    DecayRequest,
     IndexRequest,
     IndexResponse,
     SearchHit,
@@ -85,6 +86,16 @@ def delete_corpus(name: str) -> dict:
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return {"deleted": name}
+
+
+@router.post("/corpora/{name}/decay", response_model=CorpusOut)
+def set_decay(name: str, req: DecayRequest) -> CorpusOut:
+    svc = _service()
+    try:
+        corpus = svc.set_decay(name, req.half_life_days)
+    except CorpusError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return CorpusOut(**asdict(corpus))
 
 
 @router.delete("/corpora/{name}/source/{id:path}")

@@ -72,6 +72,12 @@ class CorpusOut(BaseModel):
     sources: list[str]
     created_at: float
     updated_at: float
+    decay_half_life_days: float | None = None
+
+
+class DecayRequest(BaseModel):
+    # None / omitted disables decay; a positive number sets the half-life.
+    half_life_days: float | None = None
 
 
 class ConfigOut(BaseModel):

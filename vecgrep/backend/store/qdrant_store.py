@@ -44,6 +44,9 @@ class StoredHit:
     chunk_index: int
     metadata: dict
     corpus: str
+    # Document's own date (epoch seconds) for recency decay; None if undated
+    # or indexed before doc_timestamp existed.
+    doc_timestamp: float | None = None
 
 
 class QdrantStore:
@@ -119,6 +122,7 @@ class QdrantStore:
                     chunk_index=int(p.get("chunk_index", 0)),
                     metadata=p.get("metadata", {}) or {},
                     corpus=p.get("corpus", collection),
+                    doc_timestamp=p.get("doc_timestamp"),
                 )
             )
         return hits

@@ -464,6 +464,36 @@ def corpora_delete(name: str, yes: bool) -> None:
     click.echo(f"deleted: {name}")
 
 
+@corpora.command("decay")
+@click.argument("name")
+@click.option(
+    "--half-life",
+    "half_life",
+    type=float,
+    default=None,
+    help="Half-life in days. A hit one half-life old ranks as half as relevant. "
+    "Omit to DISABLE decay for this corpus.",
+)
+@click.option("--off", is_flag=True, help="Disable recency decay for this corpus.")
+def corpora_decay(name: str, half_life: float | None, off: bool) -> None:
+    """Set or clear a corpus's recency-decay half-life (no re-index needed)."""
+    value = None if off else half_life
+    if _api_alive():
+        c = _post(f"/api/corpora/{name}/decay", {"half_life_days": value})
+        hl = c.get("decay_half_life_days")
+    else:
+        svc = VecgrepService()
+        try:
+            corpus = svc.set_decay(name, value)
+        except CorpusError as e:
+            raise click.ClickException(str(e))
+        hl = corpus.decay_half_life_days
+    if hl:
+        click.echo(f"{name}: recency decay half-life = {hl:g} days")
+    else:
+        click.echo(f"{name}: recency decay disabled")
+
+
 @cli.command()
 @click.option("--host", default=None, help="Override host.")
 @click.option("--port", default=None, type=int, help="Override port.")

@@ -83,6 +83,23 @@ CANDIDATE_POOL = 50
 # regenerates the same IDs.
 _ID_NAMESPACE = uuid.UUID("3a7d9e5f-0c1b-4a2e-9f4d-abcdef000001")
 
+_SECONDS_PER_DAY = 86400.0
+
+
+def _recency_factor(doc_ts: float | None, half_life_days: float | None, now: float) -> float:
+    """Multiplier in (0, 1] applied to a hit's fused score for recency decay.
+
+    `0.5 ** (age_days / half_life)`: a chunk one half-life old scores as if
+    half as relevant, two half-lives as a quarter, etc. Returns 1.0 (no decay)
+    when the corpus has no half-life configured or the chunk has no timestamp —
+    so undated content is never penalized, only de-prioritized relative to
+    dated-and-fresh content. Future-dated chunks (clock skew) clamp to 1.0.
+    """
+    if not half_life_days or half_life_days <= 0 or doc_ts is None:
+        return 1.0
+    age_days = max(0.0, (now - doc_ts) / _SECONDS_PER_DAY)
+    return 0.5 ** (age_days / half_life_days)
+
 
 @dataclass
 class SearchResult:
@@ -448,7 +465,22 @@ class VecgrepService:
             bm25_score_by_id[cid] = score
             bm25_rank_by_id[cid] = rank + 1
 
-        fused = sorted(rrf.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
+        # Recency decay: multiply each candidate's RRF score by its decay
+        # factor BEFORE truncating to top_k, so a fresh chunk just outside the
+        # window can be rescued above a stale one and lexical closeness can't
+        # float stale content to the top. No-op when the corpus has no
+        # half-life or the chunk has no timestamp (factor 1.0).
+        half_life = corpus.decay_half_life_days
+        now = time.time()
+        decay_by_id: dict[str, float] = {}
+        decayed: dict[str, float] = {}
+        for cid, raw in rrf.items():
+            ts = payloads_by_id.get(cid, {}).get("doc_timestamp")
+            factor = _recency_factor(ts, half_life, now)
+            decay_by_id[cid] = factor
+            decayed[cid] = raw * factor
+
+        fused = sorted(decayed.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
         # For BM25-only display: rescale per-query so the top BM25 hit reads
         # at BM25_DISPLAY_TOP (~90%) and weaker BM25 hits taper toward
         # BM25_DISPLAY_FLOOR. The raw fused RRF score is unchanged for ranking.
@@ -483,8 +515,10 @@ class VecgrepService:
                 pct = BM25_DISPLAY_FLOOR
             r = _payload_to_result(payload, fused_score, pct, matched_by)
             # Always emit raw scores so the UI can re-derive display % under
-            # user-tuned calibration. rrf is the underlying ranking score.
-            r.explain = {"rrf": float(fused_score)}
+            # user-tuned calibration. `rrf` is the pre-decay fusion score;
+            # `decay` is the recency multiplier (1.0 when off); the result's
+            # `score` is rrf * decay, i.e. the value that actually ranked it.
+            r.explain = {"rrf": float(rrf[cid]), "decay": float(decay_by_id[cid])}
             if cid in vector_score_by_id:
                 r.explain["vector_cosine"] = float(vector_score_by_id[cid])
                 r.explain["vector_rank"] = vector_rank_by_id[cid]
@@ -503,6 +537,19 @@ class VecgrepService:
         self.store.drop_collection(_collection_for(corpus.name))
         self.bm25.drop(corpus.name)
         self.registry.delete(name)
+
+    def set_decay(self, name: str, half_life_days: float | None) -> Corpus:
+        """Set (or clear, with None) a corpus's recency-decay half-life in days.
+
+        No re-index needed — decay is applied at search time from the
+        per-chunk doc_timestamp already in each payload.
+        """
+        corpus = self.registry.get(name)
+        if half_life_days is not None and half_life_days <= 0:
+            raise CorpusError("half-life must be positive (or omit to disable decay)")
+        corpus.decay_half_life_days = half_life_days
+        self.registry.upsert(corpus)
+        return corpus
 
     def get_chunk_window(
         self,
@@ -888,6 +935,7 @@ def _hit_payload(hit: StoredHit) -> dict:
         "chunk_end": hit.chunk_end,
         "text": hit.chunk_text,
         "metadata": hit.metadata,
+        "doc_timestamp": hit.doc_timestamp,
     }
 
 
