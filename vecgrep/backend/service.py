@@ -351,15 +351,25 @@ class VecgrepService:
         out: list[SearchResult] = []
         for score, original in scored[:top_k]:
             r: SearchResult = original  # type: ignore[assignment]
-            # Replace the score and pct with reranker output. matched_by
-            # gains 'rerank' so the UI can show that this hit was rerank-confirmed.
-            if explain:
-                r.explain = {**(r.explain or {}), "rerank_score": float(score)}
-            r.score = float(score)
-            r.similarity_pct = float(score) * 100
+            # Reranking changes ORDER only. We deliberately keep the original
+            # calibrated cosine similarity_pct (and RRF score) for display.
+            #
+            # Why: the cross-encoder emits raw logits; rerank() sigmoid-squashes
+            # them to 0..1. For a candidate pool where everything is weakly/
+            # uniformly relevant, those logits cluster near 0, so every sigmoid
+            # lands at ~0.5 -> showing score*100 floored EVERY hit at ~50.0%
+            # and destroyed the visible ranking signal. The cosine pct has a
+            # proper calibration (_cosine_to_pct, centered at the empirical
+            # inflection) and spreads where it matters, so it stays the display
+            # number. The reranker score is recorded in explain for inspection
+            # and drives the sort below (scored[] is already sorted desc).
+            r.explain = {**(r.explain or {}), "rerank_score": float(score)}
             if "rerank" not in r.matched_by:
                 r.matched_by = [*r.matched_by, "rerank"]
             out.append(r)
+        # `scored` is sorted by reranker score desc, and we appended in that
+        # order -- so `out` already reflects the reranked ordering. Do NOT
+        # re-sort by similarity_pct here (that would undo the rerank).
         return out
 
     def _search_one(

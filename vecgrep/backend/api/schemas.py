@@ -21,7 +21,7 @@ class SearchRequest(BaseModel):
     corpus: str | None = None
     top_k: int | None = None
     mode: str = "hybrid"
-    rerank: bool = False
+    rerank: bool = True  # squad recall: rerank-on by default (callers may pass false)
     rerank_model: str | None = None
     filters: list[str] = []
     explain: bool = False
