@@ -1,16 +1,27 @@
 from __future__ import annotations
 
+import logging
+import math
+
 import httpx
 
 from .base import EmbedBackend, EmbedBackendError
+
+logger = logging.getLogger(__name__)
 
 # Known dimensions so we don't have to do a probe call to set up the collection.
 # If the user picks an unknown model, we fall back to a one-shot probe.
 _KNOWN_DIMS = {
     "nomic-embed-text": 768,
     "mxbai-embed-large": 1024,
+    "bge-m3": 1024,
     "all-minilm": 384,
 }
+
+
+def _is_finite_vector(vec: list[float]) -> bool:
+    """True only if every component is a finite number (no NaN/inf)."""
+    return bool(vec) and all(math.isfinite(x) for x in vec)
 
 
 class OllamaBackend(EmbedBackend):
@@ -29,10 +40,28 @@ class OllamaBackend(EmbedBackend):
     def embed(self, texts: list[str]) -> list[list[float]]:
         out: list[list[float]] = []
         for t in texts:
+            out.append(self._embed_one_resilient(t))
+        return out
+
+    def _embed_one_resilient(self, text: str) -> list[float]:
+        """Embed one chunk, tolerating per-chunk NaN failures.
+
+        Some models (notably bge-m3) make Ollama 500 with "unsupported value:
+        NaN" on specific inputs, or return a vector containing NaN/inf. A naive
+        loop aborts the whole document on the first bad chunk. Instead we retry
+        once, then fall back to a zero vector so the chunk is still STORED (BM25
+        keeps it keyword-findable) but can never win on cosine similarity —
+        degraded to keyword-only rather than silently dropped or falsely ranked.
+
+        Connection/model-not-found errors still hard-fail: those are
+        whole-backend problems the user must fix, not per-chunk noise.
+        """
+        last_reason = ""
+        for attempt in range(2):
             try:
                 r = self._client.post(
                     f"{self.base_url}/api/embeddings",
-                    json={"model": self.model, "prompt": t},
+                    json={"model": self.model, "prompt": text},
                 )
             except httpx.ConnectError as e:
                 raise EmbedBackendError(
@@ -47,15 +76,31 @@ class OllamaBackend(EmbedBackend):
                     f"Ollama model '{self.model}' is not available. "
                     f"Pull it with `ollama pull {self.model}`."
                 )
-            if r.status_code >= 400:
-                raise EmbedBackendError(
-                    f"Ollama returned {r.status_code}: {r.text[:200]}"
-                )
+
+            # A NaN failure surfaces as a 500 whose body mentions NaN. Treat that
+            # (and any other 5xx) as a transient per-chunk fault: retry, then
+            # fall back. Non-NaN 4xx (bad request) is a real error — raise it.
+            if 400 <= r.status_code < 500:
+                raise EmbedBackendError(f"Ollama returned {r.status_code}: {r.text[:200]}")
+            if r.status_code >= 500:
+                last_reason = f"HTTP {r.status_code}: {r.text[:120]}"
+                continue
 
             data = r.json()
-            if "embedding" not in data:
-                raise EmbedBackendError(
-                    f"Ollama response missing 'embedding' field: {data}"
-                )
-            out.append(data["embedding"])
-        return out
+            vec = data.get("embedding")
+            if vec is None:
+                last_reason = f"response missing 'embedding' field: {str(data)[:120]}"
+                continue
+            if not _is_finite_vector(vec):
+                last_reason = "embedding contained NaN/inf"
+                continue
+            return vec
+
+        logger.warning(
+            "Ollama embed failed for a chunk after retry (%s); using zero vector "
+            "so the chunk stays keyword-searchable but never wins on cosine. "
+            "Chunk head: %r",
+            last_reason,
+            text[:80],
+        )
+        return [0.0] * self.dim
