@@ -116,6 +116,10 @@ def _run_get_corpus(name: str) -> str:
                 "sources": c.sources,
                 "created_at": c.created_at,
                 "updated_at": c.updated_at,
+                "decay_half_life_days": c.decay_half_life_days,
+                # What `filters` the caller can pass to search — surfaced so
+                # filtering by actor/channel/date isn't a guessing game.
+                "filterable": svc.filterable_fields(c.name)["filters"],
             }
             return json.dumps(detail, indent=2)
     return json.dumps({"error": f"corpus not found: {name}"})

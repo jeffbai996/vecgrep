@@ -612,6 +612,42 @@ class VecgrepService:
     def list_corpora(self) -> list[Corpus]:
         return self.registry.list()
 
+    def filterable_fields(self, corpus_name: str, max_values: int = 12) -> dict:
+        """Describe what `filters` a caller can pass for this corpus.
+
+        The `filters` param is otherwise a black box. This scans the corpus's
+        stored payloads and reports the concrete filter expressions available:
+        the always-present `source:` and `corpus:` filters, plus every
+        `meta.<key>` discovered in chunk metadata with up to `max_values`
+        observed sample values each. Lets a caller pre-filter by
+        actor/channel/date before semantic ranking instead of guessing keys.
+        """
+        corpus = self.registry.get(corpus_name)  # raises CorpusError if absent
+        idx = self.bm25._load(corpus.name)
+        meta_values: dict[str, set] = {}
+        for payload in idx.payloads:
+            meta = payload.get("metadata") or {}
+            for k, v in meta.items():
+                if isinstance(v, (str, int, float, bool)):
+                    meta_values.setdefault(k, set())
+                    if len(meta_values[k]) < max_values:
+                        meta_values[k].add(v)
+        has_timestamp = any(p.get("doc_timestamp") is not None for p in idx.payloads)
+        return {
+            "corpus": corpus.name,
+            "filters": {
+                "source": {"form": "source:GLOB", "description": "fnmatch on source_id"},
+                "corpus": {"form": "corpus:NAME", "description": "exact corpus match"},
+                "meta": {
+                    "form": "meta.KEY=VALUE",
+                    "keys": {
+                        k: sorted(str(x) for x in vals) for k, vals in sorted(meta_values.items())
+                    },
+                },
+            },
+            "has_doc_timestamp": has_timestamp,
+        }
+
     # ----- migration ------------------------------------------------------------
     def migrate_corpus(
         self,

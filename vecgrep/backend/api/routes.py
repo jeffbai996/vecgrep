@@ -88,6 +88,16 @@ def delete_corpus(name: str) -> dict:
     return {"deleted": name}
 
 
+@router.get("/corpora/{name}/filters")
+def corpus_filters(name: str) -> dict:
+    """Describe the filter expressions available for this corpus."""
+    svc = _service()
+    try:
+        return svc.filterable_fields(name)
+    except CorpusError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @router.post("/corpora/{name}/decay", response_model=CorpusOut)
 def set_decay(name: str, req: DecayRequest) -> CorpusOut:
     svc = _service()
