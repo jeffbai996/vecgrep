@@ -35,6 +35,12 @@ class Corpus:
     # whose contents haven't changed since the last index. Empty for old
     # corpora — they fall back to "always re-embed" until the next index.
     source_hashes: dict[str, str] = field(default_factory=dict)
+    # Recency-decay half-life in days. When set, a hit's fused score is
+    # multiplied by 0.5 ** (age_days / half_life), so a chunk one half-life
+    # old ranks as if half as relevant. None = no decay (default; preserves
+    # prior behavior). Tune per corpus: fast for chat/journal, slow for
+    # reference, off for static seed material.
+    decay_half_life_days: float | None = None
 
 
 class CorpusRegistry:
