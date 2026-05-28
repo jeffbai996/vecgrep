@@ -55,7 +55,11 @@ class QdrantStore:
         # path=None -> in-memory (ephemeral)
         # path=Path -> on-disk embedded (single-process lock)
         if url:
-            self.client = QdrantClient(url=url)
+            # Generous timeout: wait=True upserts during a large reindex can
+            # block while Qdrant flushes/indexes a batch. The client default is
+            # too short and surfaced as ResponseHandlingException('timed out')
+            # partway through indexing big corpora (e.g. chat transcripts).
+            self.client = QdrantClient(url=url, timeout=120)
         elif path is None:
             self.client = QdrantClient(":memory:")
         else:
