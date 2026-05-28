@@ -23,6 +23,10 @@ class Document:
     source_id: str
     text: str
     metadata: dict = field(default_factory=dict)
+    # Unix epoch seconds for the document's own time (authored/saved date),
+    # when an adapter can determine it. Drives optional recency decay at
+    # search time. None when no date is discoverable.
+    timestamp: float | None = None
 
 
 class Adapter(ABC):

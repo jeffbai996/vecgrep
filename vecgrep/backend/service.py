@@ -259,6 +259,9 @@ class VecgrepService:
                     "chunk_end": c.end,
                     "text": c.text,
                     "metadata": doc.metadata,
+                    # Document's own date (epoch seconds) when discoverable.
+                    # Powers optional recency decay at search time. None is fine.
+                    "doc_timestamp": doc.timestamp,
                 }
                 for c in chunks
             ]

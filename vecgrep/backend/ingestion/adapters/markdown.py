@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterator
 
+from ..dates import extract_timestamp
 from .base import Adapter, AdapterError, Document
 from .registry import register_adapter
 
@@ -33,4 +34,5 @@ class MarkdownAdapter(Adapter):
             source_id=str(p.resolve()),
             text=text,
             metadata={"adapter": self.name, "path": str(p.resolve())},
+            timestamp=extract_timestamp(text, str(p)),
         )
