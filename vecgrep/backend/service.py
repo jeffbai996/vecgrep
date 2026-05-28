@@ -371,18 +371,16 @@ class VecgrepService:
         out: list[SearchResult] = []
         for score, original in scored[:top_k]:
             r: SearchResult = original  # type: ignore[assignment]
-            # Reranking changes ORDER only. We deliberately keep the original
-            # calibrated cosine similarity_pct (and RRF score) for display.
-            #
-            # Why: the cross-encoder emits raw logits; rerank() sigmoid-squashes
-            # them to 0..1. For a candidate pool where everything is weakly/
-            # uniformly relevant, those logits cluster near 0, so every sigmoid
-            # lands at ~0.5 -> showing score*100 floored EVERY hit at ~50.0%
-            # and destroyed the visible ranking signal. The cosine pct has a
-            # proper calibration (_cosine_to_pct, centered at the empirical
-            # inflection) and spreads where it matters, so it stays the display
-            # number. The reranker score is recorded in explain for inspection
-            # and drives the sort below (scored[] is already sorted desc).
+            # The cross-encoder score IS the canonical relevance signal when
+            # reranking is on: it's the single number that best approximates
+            # P(relevant), computed identically for every hit regardless of
+            # which retriever found it. So the displayed pct comes from it via
+            # one calibrated sigmoid (_rerank_to_pct), replacing the per-hit
+            # cosine/BM25 mix. The earlier "everything lands at 50%" problem is
+            # solved by the steep, properly-centered calibration (center 0.57,
+            # slope 35) instead of the naive score*100. Raw rerank score is
+            # kept in explain for inspection; sort order is the rerank order.
+            r.similarity_pct = _rerank_to_pct(float(score))
             r.explain = {**(r.explain or {}), "rerank_score": float(score)}
             if "rerank" not in r.matched_by:
                 r.matched_by = [*r.matched_by, "rerank"]
@@ -1058,6 +1056,33 @@ def _cosine_to_pct(score: float, center: float | None = None, slope: float | Non
     cos = max(-1.0, min(1.0, score))
     x = s * (cos - c)
     # Guard against overflow for extreme x.
+    if x > 60:
+        return 100.0
+    if x < -60:
+        return 0.0
+    return 100.0 / (1.0 + math.exp(-x))
+
+
+# Cross-encoder-reranker → percentage calibration.
+#
+# When reranking is on, the cross-encoder's sigmoid-squashed score (0..1) is the
+# single best proxy for P(relevant) — it's roughly query-independent, unlike raw
+# cosine (whose absolute value drifts per query) or RRF (contaminated by which
+# retrievers fired). So the displayed pct comes straight from it via one sigmoid,
+# the SAME formula for every hit regardless of which retriever surfaced it.
+#
+# Empirically (bge-reranker-base on this corpus): the noise floor sits ~0.50-0.53,
+# genuine-but-weak hits ~0.57, strong hits 0.66-0.73. Center 0.57, slope 35 maps:
+#   0.51 → ~12%   (noise)
+#   0.57 → 50%    (uncertain boundary)
+#   0.66 → ~96%   (strong)
+RERANK_CALIBRATION_CENTER = 0.57
+RERANK_CALIBRATION_SLOPE = 35.0
+
+
+def _rerank_to_pct(prob: float) -> float:
+    """Sigmoid-calibrated cross-encoder score (0..1) → display percentage."""
+    x = RERANK_CALIBRATION_SLOPE * (prob - RERANK_CALIBRATION_CENTER)
     if x > 60:
         return 100.0
     if x < -60:
