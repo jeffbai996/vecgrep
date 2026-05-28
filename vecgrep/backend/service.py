@@ -327,11 +327,10 @@ class VecgrepService:
         if not corpora:
             return []
 
-        # Filtering shrinks the result set after retrieval. Pull a wider pool
-        # when filters are active so we don't end up with empty results just
-        # because the top hits failed the filter.
-        wider = bool(filters) or rerank
-        per_corpus_k = CANDIDATE_POOL if wider else top_k
+        # Pull a wider pool than top_k whenever post-retrieval steps can shrink
+        # the set — filtering, reranking, OR dedup — so we don't return fewer
+        # than top_k results just because the top hits got filtered/collapsed.
+        per_corpus_k = CANDIDATE_POOL
 
         results: list[SearchResult] = []
         for c in corpora:
@@ -339,6 +338,10 @@ class VecgrepService:
 
         if filters:
             results = [r for r in results if _passes_filters(r, filters)]
+
+        # Collapse near-duplicate overlapping chunks from the same source before
+        # truncating, so adjacent sentence-windows don't each eat a top_k slot.
+        results = _dedup_overlapping(results)
 
         if rerank:
             results = self._apply_rerank(query, results, top_k, rerank_model, explain=explain)
@@ -1088,6 +1091,36 @@ def _rerank_to_pct(prob: float) -> float:
     if x < -60:
         return 0.0
     return 100.0 / (1.0 + math.exp(-x))
+
+
+def _dedup_overlapping(results: list[SearchResult], min_overlap: float = 0.5) -> list[SearchResult]:
+    """Drop near-duplicate chunks from the same source with overlapping spans.
+
+    The sentence-window chunker emits overlapping windows (stride < window), so
+    one passage can surface as several hits at different ranks, wasting top_k
+    slots. Two hits collide when they share a (corpus, source_id) and their
+    char ranges overlap by >= `min_overlap` of the shorter span. We keep the
+    higher-scoring hit of each colliding group and preserve input order
+    otherwise (callers sort afterward).
+    """
+    kept: list[SearchResult] = []
+    for r in results:
+        dup_idx = None
+        for i, k in enumerate(kept):
+            if k.corpus != r.corpus or k.source_id != r.source_id:
+                continue
+            lo = max(k.chunk_start, r.chunk_start)
+            hi = min(k.chunk_end, r.chunk_end)
+            overlap = max(0, hi - lo)
+            shorter = min(k.chunk_end - k.chunk_start, r.chunk_end - r.chunk_start)
+            if shorter > 0 and overlap / shorter >= min_overlap:
+                dup_idx = i
+                break
+        if dup_idx is None:
+            kept.append(r)
+        elif r.score > kept[dup_idx].score:
+            kept[dup_idx] = r  # replace with the stronger of the pair
+    return kept
 
 
 def _hit_to_result(h: StoredHit, matched_by: list[str]) -> SearchResult:
