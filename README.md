@@ -31,7 +31,7 @@ The closest equivalents — `txtai`, `chroma`, `LlamaIndex` — are libraries yo
 
 ## Status
 
-Alpha (`v0.6.x`). Hybrid retrieval (BM25 + vector + RRF, BM25-weighted by default), cross-encoder rerank, MCP server (stdio + streamable HTTP), named corpora, incremental indexing + file watcher, embedding cache, model/backend migration, optional bearer-token auth, web UI with confidence-tier coloring + V/K/VK match badges, CLI with `vecgrep status` diagnostic, and a hermetic pytest suite. Adapters cover plaintext, markdown, PDF, URLs, Discord JSONL, Claude export, and ChatGPT export. The public API (HTTP + CLI flags) is unstable until v1.0 — expect breaking changes within v0.x.
+Alpha (`v0.7.x`). Hybrid retrieval (BM25 + vector + RRF, BM25-weighted by default), cross-encoder rerank, optional per-corpus recency decay, MCP server (stdio + streamable HTTP), named corpora, incremental indexing + file watcher, embedding cache, model/backend migration, optional bearer-token auth, web UI with confidence-tier coloring + V/K/VK match badges, CLI with `vecgrep status` diagnostic, and a hermetic pytest suite. Corpora embedded with *different* models can be served side by side — each queries with its own model. Adapters cover plaintext, markdown, PDF, URLs, Discord JSONL, Claude export, and ChatGPT export. The public API (HTTP + CLI flags) is unstable until v1.0 — expect breaking changes within v0.x.
 
 ## Install
 
@@ -95,6 +95,13 @@ vecgrep cache clear --identity ollama:nomic-embed-text
 # Re-embed a corpus to a different backend / model
 vecgrep corpora migrate papers --to-backend openai --to-model text-embedding-3-small
 
+# Recency decay: down-rank stale chunks. Half-life in days; a hit one half-life
+# old ranks as if half as relevant. Good for chat logs / journals; leave off for
+# durable reference. No re-index needed — applied at search time from each
+# chunk's parsed date.
+vecgrep corpora decay chatlogs --half-life 14
+vecgrep corpora decay chatlogs --off
+
 # Search across every corpus you have
 vecgrep search "rate hikes"
 
@@ -135,20 +142,22 @@ Pointing `vecgrep index` at a directory walks it recursively and dispatches each
 
 ```
                           ┌──▶ vector (qdrant) ──┐
-docs ──▶ adapters ──▶ chunkers ──┤                      ├──▶ RRF ──▶ [rerank] ──▶ top-k
+docs ──▶ adapters ──▶ chunkers ──┤                      ├──▶ RRF ──▶ [decay] ──▶ dedup ──▶ [rerank] ──▶ top-k
                           └──▶ bm25 (inverted) ──┘
 ```
 
 - **Adapters** convert source formats to text. They run once per source; chunkers handle slicing.
 - **Chunkers** slice text into overlapping windows. `SentenceWindowChunker` is the default — 3 sentences with 1-sentence overlap. `FixedTokenChunker` (tiktoken-backed) is the alternate for code, logs, anything where sentence boundaries are noisy.
-- **Embed backends** are pluggable. Ollama (`nomic-embed-text`, 768-dim) is the default. OpenAI (`text-embedding-3-small`, 1536-dim) takes over when Ollama is unreachable and `OPENAI_API_KEY` is set.
+- **Embed backends** are pluggable. Ollama (`nomic-embed-text`, 768-dim) is the default; any Ollama embedding model works via `VECGREP_EMBED_MODEL` (e.g. `bge-m3` / `mxbai-embed-large`, both 1024-dim, stronger on paraphrase-heavy queries). OpenAI (`text-embedding-3-small`, 1536-dim) takes over when Ollama is unreachable and `OPENAI_API_KEY` is set. Each corpus pins the model it was built with; corpora on different models can be served at once, each querying with its own.
 - **Qdrant** runs in embedded mode (no server, no Docker) at `~/.vecgrep/qdrant/`. Each named corpus is its own collection.
 - **BM25** index runs alongside Qdrant, persisted as a pickle per corpus. Tokenizer splits identifiers (`sharpe_ratio` → `sharpe`, `ratio`) so code search isn't blind to underscore- or camelCase-style naming.
 - **Hybrid retrieval** is the default. Each retriever returns its top 50 candidates; their ranks are fused via Reciprocal Rank Fusion (`score = Σ w / (60+rank)`). BM25's weight is `1.5` by default — high enough to float exact-keyword hits over the vector noise floor on short queries, low enough to leave long conceptual queries vector-dominated. Override with `VECGREP_BM25_WEIGHT`. Pure-vector or pure-BM25 are available with `--mode vector` / `--mode bm25`.
-- **Match-aware confidence display.** The raw fused RRF score for a BM25-only hit is `~1.6%`, which reads as noise. vecgrep rescales BM25-only display percentages per query (top BM25 hit can reach 100%, weaker hits taper to ~25%) so a literal-keyword match doesn't look like dust. Ranking is unaffected — the underlying RRF score is still authoritative. The web UI surfaces this with V/K/VK badges and tier colors so you can tell at a glance which results are real.
-- **Cross-encoder reranker** (`--rerank`, off by default) rescores the candidate pool with `BAAI/bge-reranker-base`. Local, ~30ms for 50 chunks on CPU. Lazy-loaded — the heavy `torch` import only happens when you ask for it.
+- **Recency decay** (optional, per corpus). Set a half-life in days with `vecgrep corpora decay <name> --half-life N` and a hit's fused score is multiplied by `0.5 ** (age_days / half_life)` — a chunk one half-life old ranks as if half as relevant. Applied *before* the top-k cut, so a fresh chunk can rescue itself above a stale one, and lexical closeness alone can't float a stale chunk to the top. Off by default; undated chunks are never penalized. The date comes from a `doc_timestamp` parsed at index time (frontmatter `date:`/`Saved:` lines, a `YYYY-MM-DD` filename, then file mtime). Tune fast for chat/journal corpora, off for durable reference.
+- **Dedup.** The sentence-window chunker emits overlapping windows, so one passage can surface as several near-identical hits. vecgrep collapses same-source hits whose character ranges overlap before truncating to top-k, keeping the strongest, so the result list isn't padded with the same text at three ranks.
+- **Confidence display.** The displayed `%` is a calibrated relevance estimate, not a raw score. When reranking is on it comes straight from the cross-encoder (the cleanest `P(relevant)` proxy). Otherwise it's a sigmoid over cosine, **calibrated per embedding model** — different models put their noise floor and signal range in different places, so the same `%` means the same thing across corpora. BM25-only hits (which have no cosine) are rescaled rank-relative so a real keyword match doesn't read as the `~1.6%` raw-RRF noise floor. Ranking always uses the underlying fused score. The web UI surfaces V/K/VK badges and tier colors plus a "how search works" panel.
+- **Cross-encoder reranker** (`--rerank`, off by default) rescores the candidate pool with `BAAI/bge-reranker-base`. Lazy-loaded — the heavy `torch` import only happens when you ask for it. It's a real quality win on hard, paraphrase-heavy queries where plain hybrid whiffs, but it adds meaningful latency (order ~100ms+ for a small candidate pool) and on easy literal queries it can be a wash or worse — so it's opt-in, not the default. Reach for it when a hybrid search returns near-misses for something you know is in the corpus.
 
-Each corpus pins the embedding backend and dimension at index time, and refuses to mix models within itself. If you change embedding model, recreate the corpus.
+Each corpus pins the embedding backend, model, and dimension at index time and refuses to mix models *within* a single corpus — but the engine resolves each corpus's query embedding from its own pinned model, so multiple corpora on different models coexist fine. To change the model of an existing corpus, `vecgrep corpora migrate` it (or recreate it).
 
 ## Storage layout
 
@@ -183,7 +192,7 @@ Each corpus pins the embedding backend and dimension at index time, and refuses 
 
 `vecgrep serve` boots the FastAPI server and serves a single-page React UI from the same port. Index forms (with a built-in dropdown explainer for source types), corpus list with delete, search bar with top-k slider, mode toggle (hybrid/vector/bm25), reranker checkbox, and results with surrounding context and the matched chunk highlighted. Confidence is shown as a colored tier (high / soft / weak) tied to which retriever placed the hit (V vector, K keyword, VK both) — so a 1.6% BM25 hit reads as the strong literal-keyword match it actually is, not noise.
 
-Sidebar carries a legend mapping V / K / VK and confidence colors at a glance. The bottom of the page hides a primer explaining vector vs BM25 vs hybrid RRF in plain English — open it once if you're new, ignore it after that. Every action the UI supports has a CLI equivalent.
+Sidebar carries a legend mapping V / K / VK and confidence colors, plus a collapsible **"how search works"** panel explaining hybrid retrieval, what reranking does and its latency tradeoff (why it's opt-in), how to read the calibrated `%`, and recency decay — open it once if you're new, ignore it after that. Every action the UI supports has a CLI equivalent.
 
 ## MCP server
 
@@ -197,7 +206,7 @@ vecgrep mcp
 Tools exposed:
 - `search(query, corpus?, top_k?, mode?, rerank?)` — returns ranked chunks with surrounding context as JSON
 - `list_corpora()` — every corpus and its stats
-- `get_corpus(name)` — one corpus's full metadata including source list
+- `get_corpus(name)` — one corpus's full metadata including source list, recency-decay setting, and the **filter schema**: which `filters` expressions are accepted (`source:`, `corpus:`, and every discovered `meta.KEY` with sample values) so a caller can pre-filter by actor/channel/date before semantic ranking
 
 Then index a corpus once (`vecgrep index ./my-notes --corpus notes`), and the model can call `search("rate hikes", corpus="notes")` instead of asking you to paste documents.
 
@@ -274,7 +283,7 @@ The plan is short and ordered. Make search good first, connect it to where you a
 
 **v0.2 — search quality (in progress)**
 - ✅ Hybrid search (BM25 + vector + RRF), default on. Pure vector misses exact-token matches like CVE numbers, ticker symbols, function names; BM25 nails them.
-- ✅ Cross-encoder reranking (`--rerank`, off by default). Local, ~30ms for 50 chunks on CPU.
+- ✅ Cross-encoder reranking (`--rerank`, off by default). Local; adds latency (see "How it works" for the tradeoff), so opt-in.
 
 **v0.3 — connect it**
 - ✅ MCP server: expose `vecgrep` as a tool to Claude / Cursor / any MCP client. Index a corpus once, let your assistant retrieve from it instead of stuffing context.
@@ -296,16 +305,22 @@ The plan is short and ordered. Make search good first, connect it to where you a
 **v0.6 — quality of life**
 - ✅ Test suite — hermetic pytest, service layer + stores + adapters + cache + migration. Caught three real bugs on first run.
 
-**v0.7 — search legibility (in progress)**
+**v0.7 — search legibility + correctness**
 - ✅ Weighted RRF — BM25 gets `1.5×` over vector by default so genuine keyword hits float above the vector noise floor (`VECGREP_BM25_WEIGHT` overrides). Fixed the "rare token returns 1.6% noise" problem.
 - ✅ BM25-only display percentages rescaled per query — 25–100% band (tunable), ranking unchanged.
 - ✅ Web UI confidence tiers + match-method badges (V / K / VK) — see what's a literal hit, what's semantic, what's both.
-- ✅ In-page primers — index help dropdown, sidebar legend, BM25/vector explainer at the page footer. All `<details>`, default closed.
-- ✅ Click-to-expand chunk context — each search result is clickable to lazy-fetch ±2000 chars around the chunk. Backed by `GET /api/chunk/{corpus}/{chunk_id}?window=N`. UI: chevron affordance on each row, rotates on expand; loading state keeps the original preview visible under a pulsing dot; highlighted chunk auto-scrolls into view on open; Esc collapses the most recently opened result.
+- ✅ In-page primers — index help dropdown, sidebar legend, BM25/vector explainer + "how search works" panel. All `<details>`, default closed.
+- ✅ Click-to-expand chunk context — each search result is clickable to lazy-fetch ±2000 chars around the chunk. Backed by `GET /api/chunk/{corpus}/{chunk_id}?window=N`.
+- ✅ Per-chunk `doc_timestamp` extraction + tunable per-corpus **recency decay** — stale chunks can't outrank fresh ones on wording alone (`vecgrep corpora decay`).
+- ✅ Model-aware confidence calibration — the displayed `%` means the same thing across embedding models; when reranking is on it's the cross-encoder's own score.
+- ✅ Post-retrieval dedup of overlapping same-source chunks.
+- ✅ Mixed-model serving — corpora on different embed models coexist; each queries with its own. (Was a hard-error before.)
+- ✅ Filter schema in `get_corpus` — the accepted `filters` expressions are now discoverable, not a black box.
 - `uvx vecgrep` verification + docs
 - Plugin API docs (the registries already work, just need an example)
 - Per-source TTL on URLs
 - Whole-machine `vecgrep backup` / `restore`
+- Confidence-gated rerank — auto-rerank only when the top hybrid hit is weak, getting rerank's quality rescue without taxing easy queries
 
 **Later**
 Code-aware adapter (tree-sitter), EPUB/DOCX, OCR fallback, RSS feeds, query-aware chunking, query rewriting, single-binary build. See [docs/IDEAS.md](docs/IDEAS.md) for the live list and a "won't do" section explaining what we've explicitly ruled out.
