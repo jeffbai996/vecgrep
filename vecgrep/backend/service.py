@@ -417,7 +417,7 @@ class VecgrepService:
         if mode == "vector":
             out: list[SearchResult] = []
             for rank, h in enumerate(vector_hits[:top_k]):
-                r = _hit_to_result(h, ["vector"])
+                r = _hit_to_result(h, ["vector"], model=corpus.embed_model)
                 # Always include raw vector_cosine + rank so the UI can
                 # re-derive display % under user-tuned calibration without
                 # re-querying. Cheap, never sensitive.
@@ -499,7 +499,11 @@ class VecgrepService:
             # When BOTH retrievers fired, we take the higher of the two —
             # confirmation across modalities should boost confidence, not
             # average it down.
-            cos_pct = _cosine_to_pct(vector_score_by_id[cid]) if cid in vector_score_by_id else None
+            cos_pct = (
+                _cosine_to_pct(vector_score_by_id[cid], model=corpus.embed_model)
+                if cid in vector_score_by_id
+                else None
+            )
             bm_pct = None
             if max_bm25 > 0 and cid in bm25_score_by_id:
                 ratio = bm25_score_by_id[cid] / max_bm25
@@ -1076,22 +1080,50 @@ def _expand(source: str, adapter) -> list[Document]:
 #   cos 0.85 → ~91%   (strong match)
 #   cos 0.92 → ~97%   (near-duplicate)
 #
-# Defaults are calibrated for `nomic-embed-text` (Ollama). If you swap models
-# you'll likely need to adjust CALIBRATION_CENTER and CALIBRATION_SLOPE — for
-# OpenAI's text-embedding-3-small the noise floor is lower (cos~0.20) and
-# signal range stretches further, so a lower center (~0.40) fits better.
+# Calibration is per-embedding-model because each model's cosine distribution
+# differs: where its noise floor sits and where genuine matches start. A center
+# tuned for one model reads pessimistically (or optimistically) on another.
+#
+# nomic-embed-text: noise floor ~0.50, strong matches ~0.65+. (center 0.66)
+# bge-m3:           cosines run LOWER — noise floor ~0.52, strong matches ~0.60-0.66.
+#                   Empirically: gibberish tops ~0.53; real hits 0.60-0.66. So
+#                   center 0.55, slope 25 maps 0.50→~22%, 0.55→50%, 0.62→~85%,
+#                   0.66→~94% — spreading display % across bge-m3's actual range
+#                   instead of squashing everything below 50% (the old 0.66
+#                   center sat ABOVE almost every bge-m3 cosine).
+# Fallback (unknown model): the nomic-ish defaults.
 CALIBRATION_CENTER = 0.66
 CALIBRATION_SLOPE = 12.0
 
+_MODEL_CALIBRATION: dict[str, tuple[float, float]] = {
+    "nomic-embed-text": (0.66, 12.0),
+    "bge-m3": (0.55, 25.0),
+    "mxbai-embed-large": (0.55, 25.0),  # same family/range as bge-m3
+}
 
-def _cosine_to_pct(score: float, center: float | None = None, slope: float | None = None) -> float:
+
+def _calibration_for(model: str | None) -> tuple[float, float]:
+    """(center, slope) for an embed model, falling back to module defaults."""
+    if model and model in _MODEL_CALIBRATION:
+        return _MODEL_CALIBRATION[model]
+    return CALIBRATION_CENTER, CALIBRATION_SLOPE
+
+
+def _cosine_to_pct(
+    score: float,
+    center: float | None = None,
+    slope: float | None = None,
+    model: str | None = None,
+) -> float:
     """Sigmoid-calibrated cosine → display percentage.
 
-    Parameters override the module defaults for ad-hoc tuning (used by the
-    web-UI tuning page). With no overrides, returns the default calibrated %.
+    `model` selects the per-model calibration (center/slope). Explicit `center`
+    /`slope` args override it (used by the web-UI tuning page). With neither,
+    falls back to the module defaults.
     """
-    c = CALIBRATION_CENTER if center is None else center
-    s = CALIBRATION_SLOPE if slope is None else slope
+    mc, ms = _calibration_for(model)
+    c = mc if center is None else center
+    s = ms if slope is None else slope
     cos = max(-1.0, min(1.0, score))
     x = s * (cos - c)
     # Guard against overflow for extreme x.
@@ -1159,8 +1191,10 @@ def _dedup_overlapping(results: list[SearchResult], min_overlap: float = 0.5) ->
     return kept
 
 
-def _hit_to_result(h: StoredHit, matched_by: list[str]) -> SearchResult:
-    return _payload_to_result(_hit_payload(h), h.score, _cosine_to_pct(h.score), matched_by)
+def _hit_to_result(h: StoredHit, matched_by: list[str], model: str | None = None) -> SearchResult:
+    return _payload_to_result(
+        _hit_payload(h), h.score, _cosine_to_pct(h.score, model=model), matched_by
+    )
 
 
 def _bm25_to_result(
