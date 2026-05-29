@@ -9,7 +9,32 @@ loading torch (the cross-encoder is monkeypatched).
 from __future__ import annotations
 
 from vecgrep.backend import service as svc_mod
-from vecgrep.backend.service import _rerank_to_pct
+from vecgrep.backend.service import _calibration_for, _cosine_to_pct, _rerank_to_pct
+
+
+def test_cosine_calibration_is_model_aware() -> None:
+    # bge-m3 cosines run lower; its center must be below nomic's so real bge-m3
+    # hits (~0.60-0.66) don't all read under 50%.
+    nomic_c, _ = _calibration_for("nomic-embed-text")
+    bge_c, _ = _calibration_for("bge-m3")
+    assert bge_c < nomic_c
+    # Unknown model falls back to the module defaults (nomic-ish).
+    assert _calibration_for("some-future-model") == _calibration_for("nomic-embed-text")
+
+
+def test_bge_m3_cosine_reads_sensibly() -> None:
+    # A genuine bge-m3 hit at cos~0.62 should read clearly-relevant (>70%),
+    # whereas under the old nomic center (0.66) it read ~30%.
+    assert _cosine_to_pct(0.62, model="bge-m3") > 70
+    # bge-m3 noise floor (~0.52) should read low.
+    assert _cosine_to_pct(0.52, model="bge-m3") < 35
+    # The same cosine reads LOWER under nomic calibration (sanity: models differ).
+    assert _cosine_to_pct(0.62, model="bge-m3") > _cosine_to_pct(0.62, model="nomic-embed-text")
+
+
+def test_explicit_center_slope_override_wins() -> None:
+    # The web-UI tuning page passes explicit center/slope; those beat the model.
+    assert _cosine_to_pct(0.5, center=0.5, slope=10, model="bge-m3") == 50.0
 
 
 def test_rerank_pct_calibration_shape() -> None:
