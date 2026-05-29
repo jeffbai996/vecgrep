@@ -14,6 +14,7 @@ Examples:
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import sys
 import time
@@ -155,7 +156,15 @@ def cli() -> None:
     is_flag=True,
     help="Re-embed even if content hash matches the previous index.",
 )
-def index(source: str, corpus: str, chunker: str, ephemeral: bool, force: bool) -> None:
+@click.option(
+    "--include",
+    default=None,
+    help="When indexing a directory, only files whose name matches this glob "
+    "(e.g. '*.md' to skip sibling raw files). Applies to directory sources only.",
+)
+def index(
+    source: str, corpus: str, chunker: str, ephemeral: bool, force: bool, include: str | None
+) -> None:
     """Index a file, directory, or URL into a corpus.
 
     Incremental by default: if a source's content hash matches the last
@@ -176,23 +185,23 @@ def index(source: str, corpus: str, chunker: str, ephemeral: bool, force: bool) 
         # persistent state). They're always in-process.
         svc = VecgrepService(ephemeral=True)
         try:
-            out = svc.index(source, corpus, chunker, force=force)
+            out = svc.index(source, corpus, chunker, force=force, include=include)
         except (AdapterError, CorpusError, EmbedBackendError) as e:
             raise click.ClickException(str(e))
         click.echo(_format(out).replace("indexed", "indexed (ephemeral)"))
         return
 
     if _api_alive():
-        out = _post(
-            "/api/index",
-            {"source": source, "corpus": corpus, "chunker": chunker, "force": force},
-        )
+        body = {"source": source, "corpus": corpus, "chunker": chunker, "force": force}
+        if include:
+            body["include"] = include
+        out = _post("/api/index", body)
         click.echo(_format(out))
         return
 
     svc = VecgrepService(ephemeral=False)
     try:
-        out = svc.index(source, corpus, chunker, force=force)
+        out = svc.index(source, corpus, chunker, force=force, include=include)
     except (AdapterError, CorpusError, EmbedBackendError) as e:
         raise click.ClickException(str(e))
     click.echo(_format(out))
@@ -533,7 +542,13 @@ def serve(host: str | None, port: int | None, reload: bool) -> None:
     type=float,
     help="Coalesce events arriving within this window (seconds).",
 )
-def watch(path: str, corpus: str, chunker: str, debounce: float) -> None:
+@click.option(
+    "--include",
+    default=None,
+    help="Only index files whose name matches this glob (e.g. '*.md' to skip "
+    "sibling raw files). Applies to the initial pass and to change events.",
+)
+def watch(path: str, corpus: str, chunker: str, debounce: float, include: str | None) -> None:
     """Watch a directory and re-index on change.
 
     Re-indexes incrementally — only sources whose content hash changed get
@@ -554,9 +569,10 @@ def watch(path: str, corpus: str, chunker: str, debounce: float) -> None:
     if not target.is_dir():
         raise click.ClickException(f"watch target must be a directory: {target}")
 
-    click.echo(f"watching {target} -> corpus '{corpus}' (Ctrl+C to stop)")
+    filt = f" (include: {include})" if include else ""
+    click.echo(f"watching {target} -> corpus '{corpus}'{filt} (Ctrl+C to stop)")
     # Initial pass picks up everything currently on disk.
-    _do_index(str(target), corpus, chunker, force=False)
+    _do_index(str(target), corpus, chunker, force=False, include=include)
 
     try:
         for changes in _watch(str(target), step=int(debounce * 1000)):
@@ -564,11 +580,15 @@ def watch(path: str, corpus: str, chunker: str, debounce: float) -> None:
             paths = sorted({p for _, p in changes})
             click.echo(f"  ! {len(paths)} change(s) [{','.join(sorted(kinds))}] — processing")
             for change_kind, p in changes:
+                # Respect the include glob on per-file events too, so a sibling
+                # raw file changing doesn't get indexed into a markdown-only corpus.
+                if include and not fnmatch.fnmatch(Path(p).name, include):
+                    continue
                 try:
                     if change_kind.name == "deleted":
                         _do_delete_source(p, corpus)
                     else:
-                        _do_index(p, corpus, chunker, force=False)
+                        _do_index(p, corpus, chunker, force=False, include=include)
                 except click.ClickException as e:
                     # Don't kill the watcher on a transient error — log and keep going.
                     click.echo(f"  error: {e.message}", err=True)
@@ -589,13 +609,13 @@ def _do_delete_source(source: str, corpus: str) -> None:
     click.echo(f"  deleted {source}")
 
 
-def _do_index(source: str, corpus: str, chunker: str, force: bool) -> None:
+def _do_index(source: str, corpus: str, chunker: str, force: bool, include: str | None = None) -> None:
     """Shared index path used by `index` and `watch`. Prints, doesn't raise."""
     if _api_alive():
-        out = _post(
-            "/api/index",
-            {"source": source, "corpus": corpus, "chunker": chunker, "force": force},
-        )
+        body = {"source": source, "corpus": corpus, "chunker": chunker, "force": force}
+        if include:
+            body["include"] = include
+        out = _post("/api/index", body)
         msg = f"  indexed {out['docs']} doc(s), {out['chunks']} chunk(s)"
         if out.get("skipped"):
             msg += f", {out['skipped']} unchanged"
@@ -603,7 +623,7 @@ def _do_index(source: str, corpus: str, chunker: str, force: bool) -> None:
         return
     svc = VecgrepService(ephemeral=False)
     try:
-        docs, chunks, skipped = svc.index(source, corpus, chunker, force=force)
+        docs, chunks, skipped = svc.index(source, corpus, chunker, force=force, include=include)
     except (AdapterError, CorpusError, EmbedBackendError) as e:
         raise click.ClickException(str(e))
     msg = f"  indexed {docs} doc(s), {chunks} chunk(s)"

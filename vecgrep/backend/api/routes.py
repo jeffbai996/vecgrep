@@ -122,7 +122,9 @@ def delete_source(name: str, id: str) -> dict:
 def index(req: IndexRequest) -> IndexResponse:
     svc = _service()
     try:
-        docs, chunks, skipped = svc.index(req.source, req.corpus, req.chunker, force=req.force)
+        docs, chunks, skipped = svc.index(
+            req.source, req.corpus, req.chunker, force=req.force, include=req.include
+        )
     except AdapterError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except EmbedBackendError as e:

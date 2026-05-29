@@ -8,6 +8,7 @@ class IndexRequest(BaseModel):
     corpus: str
     chunker: str = "sentence_window"
     force: bool = False
+    include: str | None = None  # filename glob for directory indexing, e.g. "*.md"
 
 
 class IndexResponse(BaseModel):

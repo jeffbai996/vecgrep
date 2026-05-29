@@ -192,6 +192,7 @@ class VecgrepService:
         corpus_name: str,
         chunker_name: str = "sentence_window",
         force: bool = False,
+        include: str | None = None,
     ) -> tuple[int, int, int]:
         """Index a source into a corpus. Returns (docs, chunks, skipped).
 
@@ -200,6 +201,9 @@ class VecgrepService:
         embedding when the content hash hasn't changed. Pass force=True to
         re-embed unconditionally (e.g. after a chunker change you want to
         replay).
+
+        `include` is an optional filename glob applied when `source` is a
+        directory — e.g. `*.md` to index only markdown and skip sibling raws.
         """
         if corpus_name == EPHEMERAL_NAME and not self.ephemeral:
             raise CorpusError("Use --ephemeral to write to the ephemeral corpus.")
@@ -250,7 +254,7 @@ class VecgrepService:
         # the corpus total stays accurate after we replace it.
         chunks_freed = 0
         skipped = 0
-        for doc in _expand(source, adapter):
+        for doc in _expand(source, adapter, include=include):
             chunks = chunker.chunk(doc.text)
             if not chunks:
                 continue
@@ -1045,17 +1049,21 @@ def _count_chunks_for_source(bm25: BM25Store, corpus_name: str, source_id: str) 
     return len(idx.by_source.get(source_id, []))
 
 
-def _expand(source: str, adapter) -> list[Document]:
+def _expand(source: str, adapter, include: str | None = None) -> list[Document]:
     """Adapters yield one or more docs. For directories, walk and re-detect.
 
     A directory path: walk recursively, dispatch each file through detect_adapter
-    so a single index call can mix file types.
+    so a single index call can mix file types. `include` is an optional glob
+    (fnmatch against the filename) to restrict which files are indexed — e.g.
+    `*.md` to index only markdown and skip sibling `.jsonl` raws. None = all.
     """
     p = Path(source) if not source.startswith(("http://", "https://")) else None
     if p and p.is_dir():
         docs: list[Document] = []
         for sub in sorted(p.rglob("*")):
             if not sub.is_file():
+                continue
+            if include and not fnmatch.fnmatch(sub.name, include):
                 continue
             try:
                 sub_adapter_cls = detect_adapter(str(sub))
