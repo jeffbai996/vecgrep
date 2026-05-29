@@ -5,6 +5,7 @@ import IndexPanel from "./components/IndexPanel";
 import CorpusList from "./components/CorpusList";
 import ResultList from "./components/ResultList";
 import Legend from "./components/Legend";
+import HowSearchWorks from "./components/HowSearchWorks";
 import AboutFooter from "./components/AboutFooter";
 import TuningPanel from "./components/TuningPanel";
 import { loadTuning, saveTuning, Tuning } from "./tuning";
@@ -91,6 +92,7 @@ export default function App() {
             onDeleted={refresh}
           />
           <Legend />
+          <HowSearchWorks />
         </aside>
 
         <section className="col-span-12 md:col-span-9 space-y-4">
