@@ -149,26 +149,32 @@ class VecgrepService:
     # ----- backend resolution ---------------------------------------------------
     def _backend_for(self, corpus: Corpus | None) -> EmbedBackend:
         prefer = corpus.embed_backend if corpus else None
-        cache_key = prefer or "auto"
+        # Resolve to the corpus's OWN pinned model, not the global env model.
+        # This is what lets one running service query corpora embedded with
+        # different models — each gets its own backend, keyed by (backend,model).
+        model = corpus.embed_model if corpus else None
+        cache_key = f"{prefer}:{model}" if (prefer and model) else (prefer or "auto")
         if cache_key not in self._backend_cache:
             # Reuse an already-resolved 'auto' backend if it happens to match
-            # the corpus's pinned backend — avoids a redundant live resolve
-            # (and lets tests inject just one mock).
+            # the corpus's pinned backend AND model — avoids a redundant live
+            # resolve (and lets tests inject just one mock).
             auto = self._backend_cache.get("auto")
-            if auto is not None and auto.name == prefer:
+            if auto is not None and auto.name == prefer and (model is None or auto.model == model):
                 self._backend_cache[cache_key] = auto
             else:
-                raw = get_embed_backend(self.settings, prefer=prefer)
+                raw = get_embed_backend(self.settings, prefer=prefer, model=model)
                 self._backend_cache[cache_key] = (
                     CachedBackend(raw, self._embed_cache) if self._embed_cache else raw
                 )
         backend = self._backend_cache[cache_key]
-        if corpus and (backend.model != corpus.embed_model or backend.dim != corpus.dim):
+        # Dim is the only hard invariant left: a model mismatch can't happen now
+        # (we resolved by the corpus's model), but a dim mismatch would mean the
+        # stored vectors are incompatible — recreate is the only fix.
+        if corpus and backend.dim != corpus.dim:
             raise EmbedBackendError(
-                f"Corpus '{corpus.name}' was indexed with "
-                f"{corpus.embed_backend}/{corpus.embed_model} (dim={corpus.dim}), "
-                f"but current backend is {backend.name}/{backend.model} (dim={backend.dim}). "
-                "Either set the matching model or recreate the corpus."
+                f"Corpus '{corpus.name}' has dim={corpus.dim} but backend "
+                f"{backend.name}/{backend.model} produces dim={backend.dim}. "
+                "Recreate the corpus."
             )
         return backend
 
@@ -295,11 +301,12 @@ class VecgrepService:
         corpus.doc_count = len(corpus.sources)
         corpus.chunk_count = corpus.chunk_count - chunks_freed + total_chunks
         corpus.updated_at = time.time()
-        # Always update the in-memory registry so search() can find the corpus
-        # in the same process; only skip the file write when ephemeral.
-        self.registry._corpora[corpus.name] = corpus
-        if not self.ephemeral:
-            self.registry._save()
+        # Persist via upsert (reload-merge-save) so a concurrent writer's other
+        # corpora aren't clobbered. Ephemeral runs only touch the in-memory map.
+        if self.ephemeral:
+            self.registry._corpora[corpus.name] = corpus
+        else:
+            self.registry.upsert(corpus)
 
         # Restore the bypass flag for subsequent calls (other corpora etc.)
         if prev_bypass is not None and hasattr(backend, "bypass"):
@@ -609,9 +616,10 @@ class VecgrepService:
         corpus.doc_count = len(corpus.sources)
         corpus.chunk_count = max(0, corpus.chunk_count - chunks_freed)
         corpus.updated_at = time.time()
-        self.registry._corpora[corpus.name] = corpus
-        if not self.ephemeral:
-            self.registry._save()
+        if self.ephemeral:
+            self.registry._corpora[corpus.name] = corpus
+        else:
+            self.registry.upsert(corpus)
 
     def list_corpora(self) -> list[Corpus]:
         return self.registry.list()

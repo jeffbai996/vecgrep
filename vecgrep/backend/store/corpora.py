@@ -12,6 +12,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 EPHEMERAL_NAME = "__ephemeral__"
+# Internal corpus names that bypass the user-facing name rule (they're never
+# user-supplied — created transiently by migrate).
+_INTERNAL_PREFIX = "__migrate__"
 _VALID_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_\-]{0,63}$")
 
 
@@ -59,6 +62,17 @@ class CorpusRegistry:
         for name, payload in data.items():
             self._corpora[name] = Corpus(**payload)
 
+    def _reload(self) -> None:
+        """Replace in-memory state with the current on-disk state.
+
+        Called right before a mutation so a long-lived process (e.g. the search
+        server) doesn't clobber another writer's changes (e.g. a CLI index) with
+        a stale in-memory copy. This was a real bug: migrate/index writes done
+        by the CLI were silently reverted when the running server next saved.
+        """
+        self._corpora = {}
+        self._load()
+
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {name: asdict(c) for name, c in self._corpora.items()}
@@ -66,7 +80,7 @@ class CorpusRegistry:
 
     @staticmethod
     def validate_name(name: str) -> None:
-        if name == EPHEMERAL_NAME:
+        if name == EPHEMERAL_NAME or name.startswith(_INTERNAL_PREFIX):
             return
         if not _VALID_NAME.match(name):
             raise CorpusError(
@@ -87,10 +101,14 @@ class CorpusRegistry:
 
     def upsert(self, c: Corpus) -> None:
         self.validate_name(c.name)
+        # Merge against fresh disk state so a concurrent writer's other corpora
+        # survive this save (read-modify-write, not blind overwrite).
+        self._reload()
         self._corpora[c.name] = c
         self._save()
 
     def delete(self, name: str) -> None:
+        self._reload()
         if name not in self._corpora:
             raise CorpusError(f"No such corpus: {name}")
         del self._corpora[name]
