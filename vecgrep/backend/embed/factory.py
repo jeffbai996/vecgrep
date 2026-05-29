@@ -22,28 +22,34 @@ def _ollama_alive(base_url: str) -> bool:
         return False
 
 
-def get_embed_backend(settings: Settings, prefer: str | None = None) -> EmbedBackend:
+def get_embed_backend(
+    settings: Settings, prefer: str | None = None, model: str | None = None
+) -> EmbedBackend:
     """Return an embed backend.
 
     `prefer` lets a corpus pin its backend ('ollama' or 'openai').
-    If pinned, we honor it or fail loudly.
-    If unpinned, prefer Ollama, fall back to OpenAI when key is set.
+    `model` lets a corpus pin its exact embed model, overriding the settings
+    default — this is what lets the engine serve corpora embedded with
+    DIFFERENT models simultaneously (each corpus queries with its own model)
+    instead of forcing one global model and erroring on mismatch.
+    If pinned, we honor it or fail loudly. If unpinned, prefer Ollama, fall
+    back to OpenAI when key is set.
     """
     if prefer == "openai":
         if not settings.openai_api_key:
             raise EmbedBackendError(
                 "Corpus is pinned to OpenAI but OPENAI_API_KEY is not set."
             )
-        return OpenAIBackend(settings.openai_api_key, settings.openai_embed_model)
+        return OpenAIBackend(settings.openai_api_key, model or settings.openai_embed_model)
 
     if prefer == "ollama":
-        return OllamaBackend(settings.ollama_url, settings.embed_model)
+        return OllamaBackend(settings.ollama_url, model or settings.embed_model)
 
     if _ollama_alive(settings.ollama_url):
-        return OllamaBackend(settings.ollama_url, settings.embed_model)
+        return OllamaBackend(settings.ollama_url, model or settings.embed_model)
 
     if settings.openai_api_key:
-        return OpenAIBackend(settings.openai_api_key, settings.openai_embed_model)
+        return OpenAIBackend(settings.openai_api_key, model or settings.openai_embed_model)
 
     raise EmbedBackendError(
         f"Ollama not reachable at {settings.ollama_url} and OPENAI_API_KEY is not set. "
