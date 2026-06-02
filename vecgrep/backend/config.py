@@ -18,7 +18,7 @@ def _home() -> Path:
 class Settings:
     home: Path = field(default_factory=_home)
     ollama_url: str = "http://localhost:11434"
-    embed_model: str = "nomic-embed-text"
+    embed_model: str = "bge-m3"
     openai_api_key: str | None = None
     openai_embed_model: str = "text-embedding-3-small"
     api_host: str = "127.0.0.1"
