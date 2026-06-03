@@ -46,7 +46,7 @@ pip install "vecgrep[mcp]"         # also: MCP server for Claude Desktop / Curso
 You also need [Ollama](https://ollama.com) running locally for the default embedding backend:
 
 ```bash
-ollama pull nomic-embed-text
+ollama pull bge-m3
 ollama serve
 ```
 
@@ -90,7 +90,7 @@ vecgrep search "rate hikes" --explain
 
 # Inspect / clear the embedding cache
 vecgrep cache stats
-vecgrep cache clear --identity ollama:nomic-embed-text
+vecgrep cache clear --identity ollama:bge-m3
 
 # Re-embed a corpus to a different backend / model
 vecgrep corpora migrate papers --to-backend openai --to-model text-embedding-3-small
@@ -148,7 +148,7 @@ docs ──▶ adapters ──▶ chunkers ──┤                      ├─
 
 - **Adapters** convert source formats to text. They run once per source; chunkers handle slicing.
 - **Chunkers** slice text into overlapping windows. `SentenceWindowChunker` is the default — 3 sentences with 1-sentence overlap. `FixedTokenChunker` (tiktoken-backed) is the alternate for code, logs, anything where sentence boundaries are noisy.
-- **Embed backends** are pluggable. Ollama (`nomic-embed-text`, 768-dim) is the default; any Ollama embedding model works via `VECGREP_EMBED_MODEL` (e.g. `bge-m3` / `mxbai-embed-large`, both 1024-dim, stronger on paraphrase-heavy queries). OpenAI (`text-embedding-3-small`, 1536-dim) takes over when Ollama is unreachable and `OPENAI_API_KEY` is set. Each corpus pins the model it was built with; corpora on different models can be served at once, each querying with its own.
+- **Embed backends** are pluggable. Ollama (`bge-m3`, 1024-dim) is the default — strong on paraphrase-heavy and multilingual queries. Any other Ollama embedding model works via `VECGREP_EMBED_MODEL` (e.g. `nomic-embed-text`, 768-dim, lighter/faster; `mxbai-embed-large`, 1024-dim). OpenAI (`text-embedding-3-small`, 1536-dim) takes over when Ollama is unreachable and `OPENAI_API_KEY` is set. Each corpus pins the model it was built with; corpora on different models can be served at once, each querying with its own.
 - **Qdrant** runs in embedded mode (no server, no Docker) at `~/.vecgrep/qdrant/`. Each named corpus is its own collection.
 - **BM25** index runs alongside Qdrant, persisted as a pickle per corpus. Tokenizer splits identifiers (`sharpe_ratio` → `sharpe`, `ratio`) so code search isn't blind to underscore- or camelCase-style naming.
 - **Hybrid retrieval** is the default. Each retriever returns its top 50 candidates; their ranks are fused via Reciprocal Rank Fusion (`score = Σ w / (60+rank)`). BM25's weight is `1.5` by default — high enough to float exact-keyword hits over the vector noise floor on short queries, low enough to leave long conceptual queries vector-dominated. Override with `VECGREP_BM25_WEIGHT`. Pure-vector or pure-BM25 are available with `--mode vector` / `--mode bm25`.
@@ -179,7 +179,7 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 |---|---|---|
 | `VECGREP_HOME` | `~/.vecgrep` | Storage root |
 | `VECGREP_OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint |
-| `VECGREP_EMBED_MODEL` | `nomic-embed-text` | Ollama model |
+| `VECGREP_EMBED_MODEL` | `bge-m3` | Ollama model |
 | `VECGREP_OPENAI_EMBED_MODEL` | `text-embedding-3-small` | OpenAI model |
 | `OPENAI_API_KEY` | unset | If set, used as fallback when Ollama is down |
 | `VECGREP_API_HOST` | `127.0.0.1` | API bind host |
