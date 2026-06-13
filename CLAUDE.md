@@ -61,9 +61,11 @@ Anything else (file-watcher, EPUB/DOCX, OCR, single-binary, multi-tenant, query-
 
 ## Embedding dimensions reference
 
-| Model | Dim |
-|---|---|
-| `nomic-embed-text` (Ollama) | 768 |
-| `text-embedding-3-small` (OpenAI) | 1536 |
+| Model | Dim |  |
+|---|---|---|
+| `bge-m3` (Ollama) | 1024 | **default** |
+| `nomic-embed-text` (Ollama) | 768 | lighter/faster alt |
+| `mxbai-embed-large` (Ollama) | 1024 | alt |
+| `text-embedding-3-small` (OpenAI) | 1536 | fallback when Ollama unreachable |
 
 Each corpus pins the embedding model + dim it was created with. Mixing models within a corpus is rejected.
