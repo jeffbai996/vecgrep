@@ -26,19 +26,20 @@ export default function AboutFooter() {
               vector (semantic)
             </div>
             <p className="text-zinc-300">
-              embeds your query and every chunk into a 768-dim vector with
-              <span className="text-zinc-100"> nomic-embed-text</span> (or
-              OpenAI&apos;s <span className="text-zinc-100">text-embedding-3-small</span>),
-              then ranks by cosine similarity.
+              embeds your query and every chunk into a 1024-dim vector with
+              <span className="text-zinc-100"> bge-m3</span> by default (or a
+              lighter <span className="text-zinc-100">nomic-embed-text</span>, or
+              OpenAI&apos;s <span className="text-zinc-100">text-embedding-3-small</span>
+              as a fallback), then ranks by cosine similarity.
             </p>
             <p className="text-zinc-400 text-xs mt-2">
               good at: paraphrase, concept-match, &ldquo;the idea is similar even
               though the words are different.&rdquo;
             </p>
             <p className="text-zinc-500 text-xs mt-1">
-              weakness: floors at ~70&ndash;75% similarity for any English query
-              (it always finds <em>something</em> close to your sentence).
-              short rare-word queries can drown in noise.
+              weakness: has a noise floor for any English query &mdash; it always
+              finds <em>something</em> close to your sentence, so short rare-word
+              queries can drown in noise (calibration spreads the real range out).
             </p>
           </div>
 
