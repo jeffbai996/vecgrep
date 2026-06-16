@@ -903,7 +903,9 @@ class VecgrepService:
         with tempfile.TemporaryDirectory() as tmp:
             staging = Path(tmp)
             with tarfile.open(archive, "r:gz") as tar:
-                tar.extractall(staging)
+                # SECURITY: 'data' filter blocks path-traversal (../, absolute
+                # paths, device/symlink entries) from an attacker-authored tarball.
+                tar.extractall(staging, filter="data")
 
             meta_path = staging / "corpus.json"
             if not meta_path.is_file():
@@ -934,11 +936,12 @@ class VecgrepService:
                     dest_collection_dir.parent.mkdir(parents=True, exist_ok=True)
                     _copytree(src_collection_dir, dest_collection_dir)
 
-            bm25_src = staging / "bm25.pkl"
-            if bm25_src.is_file():
-                bm25_dir = self.settings.home / "bm25"
-                bm25_dir.mkdir(parents=True, exist_ok=True)
-                (bm25_dir / f"{target_name}.pkl").write_bytes(bm25_src.read_bytes())
+            # SECURITY: do NOT import the tarball's bm25.pkl — loading an
+            # attacker-supplied pickle is arbitrary code execution. The BM25
+            # index is rebuilt from the imported documents on the next index
+            # (bm25_store load is a no-op when the .pkl is absent), so skipping
+            # the untrusted pickle is safe and closes the RCE vector.
+            pass
 
             corpus = Corpus(
                 name=target_name,
