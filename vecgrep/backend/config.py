@@ -89,13 +89,6 @@ def load_settings() -> Settings:
     return s
 
 
-def save_settings(s: Settings) -> None:
-    s.ensure_dirs()
-    payload = {k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(s).items()}
-    payload.pop("home", None)
-    s.config_file.write_text(json.dumps(payload, indent=2))
-
-
 _settings: Settings | None = None
 
 
