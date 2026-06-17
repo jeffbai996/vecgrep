@@ -174,24 +174,3 @@ class QdrantStore:
             wait=True,
         )
 
-    def list_sources(self, collection: str) -> list[str]:
-        existing = {c.name for c in self.client.get_collections().collections}
-        if collection not in existing:
-            return []
-        seen: set[str] = set()
-        offset: int | str | None = None
-        while True:
-            batch, offset = self.client.scroll(
-                collection_name=collection,
-                with_payload=True,
-                limit=512,
-                offset=offset,
-            )
-            for point in batch:
-                if point.payload:
-                    sid = point.payload.get("source_id")
-                    if sid:
-                        seen.add(sid)
-            if offset is None:
-                break
-        return sorted(seen)
