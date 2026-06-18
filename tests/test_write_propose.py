@@ -42,7 +42,6 @@ def test_rendered_doc_carries_schema_frontmatter(tmp_path):
     assert "status: active" in r
     assert "origin: human" in r
     assert "source_kind: decision" in r
-    assert "version: 1" in r
     assert "tags: [a, b]" in r
     assert "body text here" in r
 
@@ -56,22 +55,20 @@ def test_origin_defaults_to_bot_suggested(tmp_path):
 def test_proposal_has_stable_id_for_confirm(tmp_path):
     pr = P.propose("note", "x", tmp_path)
     assert pr.proposal_id  # a confirm step must be able to cite this
-    assert pr.is_update is False
-    assert pr.diff == ""
+    assert pr.is_edit is False
 
 
-# --- updates: new version + diff, still no write ---
+# --- edits: target an existing id, overwrite on confirm, still no write here ---
 
-def test_update_bumps_version_and_diffs(tmp_path):
+def test_edit_targets_existing_id_writes_nothing(tmp_path):
     (tmp_path / "note-007.md").write_text(
-        "---\nid: note-007\nversion: 1\nstatus: active\n---\nold body\n")
-    pr = P.propose("note", "new body", tmp_path, update_id="note-007")
-    assert pr.is_update is True
+        "---\nid: note-007\nstatus: active\n---\nold body\n")
+    pr = P.propose("note", "new body", tmp_path, edit_id="note-007")
+    assert pr.is_edit is True
     assert pr.doc_id == "note-007"
-    assert "version: 2" in pr.rendered
-    assert pr.diff  # non-empty unified diff
-    assert "old body" in pr.diff and "new body" in pr.diff
-    # still wrote nothing
+    assert pr.target_path == str(tmp_path / "note-007.md")
+    assert "new body" in pr.rendered
+    # propose writes nothing — the file is untouched until confirm.
     assert (tmp_path / "note-007.md").read_text().splitlines()[-1] == "old body"
 
 

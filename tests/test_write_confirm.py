@@ -67,9 +67,8 @@ def test_confirm_writes_the_file(corpus_dir, store):
     assert res.ok is True
 
 
-def test_confirm_is_append_only_never_overwrites(corpus_dir, store):
-    # A file already at the target path must NOT be clobbered — confirm refuses
-    # to overwrite (append-only is structural; updates go through versioning).
+def test_new_write_refuses_to_clobber_existing_id(corpus_dir, store):
+    # A NEW entry (not an edit) must never silently overwrite an existing doc id.
     pr = P.propose("notes", "first", corpus_dir, meta={"origin": "human"})
     store.put(pr)
     Path(pr.target_path).write_text("PRE-EXISTING — must not be lost")
@@ -77,6 +76,28 @@ def test_confirm_is_append_only_never_overwrites(corpus_dir, store):
     with pytest.raises(C.ConfirmError):
         C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir)
     assert "PRE-EXISTING" in Path(pr.target_path).read_text()
+
+
+def test_edit_overwrites_in_place(corpus_dir, store):
+    # An EDIT targets an existing id on purpose and overwrites it (simple, no
+    # versioning). Seed a doc, then edit it.
+    (corpus_dir / "notes-001.md").write_text("---\nid: notes-001\nstatus: active\n---\nold\n")
+    pr = P.propose("notes", "new content", corpus_dir, edit_id="notes-001",
+                   meta={"origin": "human"})
+    store.put(pr)
+    svc = _FakeService(); svc._last_written = pr.target_path
+    res = C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir)
+    assert res.ok is True
+    body = (corpus_dir / "notes-001.md").read_text()
+    assert "new content" in body and "old" not in body
+
+
+def test_edit_of_missing_target_rejected(corpus_dir, store):
+    pr = P.propose("notes", "x", corpus_dir, edit_id="notes-999", meta={"origin": "human"})
+    store.put(pr)
+    svc = _FakeService()
+    with pytest.raises(C.ConfirmError):
+        C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir)
 
 
 def test_confirm_reembeds_the_written_file(corpus_dir, store):

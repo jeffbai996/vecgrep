@@ -1,14 +1,15 @@
-"""Propose + preview (write-tool phase 2). Writes NOTHING.
+"""Propose a write — a new entry or an edit. Writes NOTHING.
 
-A Proposal is the rendered file the write tool WOULD create, plus the assigned
-id, target path, and a diff if it updates an existing doc. Confirming a proposal
-(a later phase, human-gated) is what actually writes. This module is pure +
-read-only: it reads the corpus dir to pick the next id / diff against an existing
-file, but never writes.
+A Proposal is the rendered file the write tool WOULD create (new) or replace
+(edit), plus the assigned/target id and path. Confirming it (confirm.py,
+human-gated) is what writes. Pure + read-only here: reads the corpus dir to
+pick the next id or to render an edit-preview, never writes.
+
+Deliberately simple: write entries, edit entries (overwrite), behind a gate.
+No versioning / supersede / archive — an edit overwrites in place.
 """
 from __future__ import annotations
 
-import difflib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,12 +31,11 @@ class ProposalError(ValueError):
 class Proposal:
     """A pending, un-written proposal. The confirm step references proposal_id."""
     proposal_id: str          # stable handle a human confirm must cite
-    doc_id: str               # e.g. note-001 (assigned) or note-007 (update target)
+    doc_id: str               # e.g. note-001 (new) or note-007 (edit target)
     corpus: str
     target_path: str          # where the file WOULD be written
     rendered: str             # the full file content (frontmatter + body)
-    is_update: bool
-    diff: str                 # unified diff vs the existing file ("" for new)
+    is_edit: bool             # True = overwrite an existing doc; False = new
     meta: dict = field(default_factory=dict)
 
 
@@ -48,10 +48,7 @@ def _slug_prefix(corpus: str) -> str:
 
 
 def next_doc_id(corpus_dir: Path, corpus: str) -> str:
-    """Next sequential id for a corpus dir: <prefix>-NNN, scanning existing files.
-
-    Append-only id allocation: max existing numeric suffix + 1, zero-padded to 3.
-    """
+    """Next sequential id for a corpus dir: <prefix>-NNN (max existing + 1)."""
     prefix = _slug_prefix(corpus)
     highest = 0
     if corpus_dir.exists():
@@ -63,12 +60,10 @@ def next_doc_id(corpus_dir: Path, corpus: str) -> str:
 
 
 def render_doc(doc_id: str, content: str, meta: dict) -> str:
-    """Render a doc as YAML-frontmatter + body. Deterministic key order so a
-    diff between versions is stable and readable."""
+    """Render a doc as YAML-frontmatter + body, deterministic key order."""
     order = [
-        "id", "version", "status", "created_at", "updated_at",
-        "origin", "confirmed_by", "confirmed_at", "tier",
-        "corpus", "supersedes", "superseded_by", "source_kind", "tags",
+        "id", "status", "created_at", "origin", "confirmed_by", "confirmed_at",
+        "tier", "corpus", "source_kind", "tags",
     ]
     fm = {**meta, "id": doc_id}
     lines = ["---"]
@@ -76,10 +71,8 @@ def render_doc(doc_id: str, content: str, meta: dict) -> str:
         if k not in fm or fm[k] is None:
             continue
         v = fm[k]
-        if isinstance(v, (list, tuple)):
-            rendered = "[" + ", ".join(str(x) for x in v) + "]"
-        else:
-            rendered = str(v)
+        rendered = ("[" + ", ".join(str(x) for x in v) + "]"
+                    if isinstance(v, (list, tuple)) else str(v))
         lines.append(f"{k}: {rendered}")
     lines.append("---")
     lines.append("")
@@ -89,15 +82,13 @@ def render_doc(doc_id: str, content: str, meta: dict) -> str:
 
 
 def _validate_meta(meta: dict) -> None:
-    origin = meta.get("origin", "bot-suggested")
-    if origin not in ORIGINS:
-        raise ProposalError(f"origin must be one of {ORIGINS}, got {origin!r}")
-    tier = meta.get("tier", "normal")
-    if tier not in TIERS:
-        raise ProposalError(f"tier must be one of {TIERS}, got {tier!r}")
+    if meta.get("origin", "bot-suggested") not in ORIGINS:
+        raise ProposalError(f"origin must be one of {ORIGINS}")
+    if meta.get("tier", "normal") not in TIERS:
+        raise ProposalError(f"tier must be one of {TIERS}")
     sk = meta.get("source_kind")
     if sk is not None and sk not in SOURCE_KINDS:
-        raise ProposalError(f"source_kind must be one of {SOURCE_KINDS}, got {sk!r}")
+        raise ProposalError(f"source_kind must be one of {SOURCE_KINDS}")
 
 
 def propose(
@@ -105,14 +96,13 @@ def propose(
     content: str,
     corpus_dir: Path,
     meta: dict | None = None,
-    update_id: str | None = None,
+    edit_id: str | None = None,
     proposal_id: str | None = None,
 ) -> Proposal:
     """Build a Proposal. WRITES NOTHING.
 
-    - New doc: assigns the next sequential id under corpus_dir.
-    - Update: target update_id; renders as the next version and diffs against
-      the existing file so the human can see what changes before confirming.
+    - New entry: assigns the next sequential id under corpus_dir.
+    - Edit: targets edit_id and overwrites it on confirm (no versioning).
     """
     if not content or not content.strip():
         raise ProposalError("content is empty")
@@ -123,40 +113,15 @@ def propose(
     meta.setdefault("corpus", corpus)
     _validate_meta(meta)
 
-    is_update = update_id is not None
-    if is_update:
-        doc_id = update_id
-        existing_path = corpus_dir / f"{doc_id}.md"
-        old = existing_path.read_text() if existing_path.exists() else ""
-        prev_ver = 0
-        if old:
-            m = re.search(r"^version:\s*(\d+)", old, re.MULTILINE)
-            prev_ver = int(m.group(1)) if m else 1
-        meta["version"] = prev_ver + 1
-        meta.setdefault("supersedes", f"{doc_id}-v{prev_ver}" if prev_ver else None)
-    else:
-        doc_id = next_doc_id(corpus_dir, corpus)
-        meta["version"] = 1
-        old = ""
-
+    is_edit = edit_id is not None
+    doc_id = edit_id if is_edit else next_doc_id(corpus_dir, corpus)
     rendered = render_doc(doc_id, content, meta)
-    target_path = str(corpus_dir / f"{doc_id}.md")
-    diff = ""
-    if is_update and old:
-        diff = "".join(difflib.unified_diff(
-            old.splitlines(keepends=True),
-            rendered.splitlines(keepends=True),
-            fromfile=f"{doc_id} (current)",
-            tofile=f"{doc_id} (proposed v{meta['version']})",
-        ))
-
     return Proposal(
         proposal_id=proposal_id or f"prop-{doc_id}",
         doc_id=doc_id,
         corpus=corpus,
-        target_path=target_path,
+        target_path=str(corpus_dir / f"{doc_id}.md"),
         rendered=rendered,
-        is_update=is_update,
-        diff=diff,
+        is_edit=is_edit,
         meta=meta,
     )

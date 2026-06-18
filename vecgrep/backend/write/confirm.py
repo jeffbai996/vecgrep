@@ -1,19 +1,16 @@
-"""Confirm gate + append-only write + re-embed + verify (write-tool phase 3).
+"""Confirm gate + write + re-embed + verify.
 
 A proposal (from propose()) is persisted in a ProposalStore. confirm() looks it
-up by id — an unknown/stale id is rejected (the gate) — then runs the write
-pipeline:
+up by id — an unknown/stale id is rejected (the gate) — then:
 
-  1. WRITE, append-only. Refuses to overwrite an existing file path; a real edit
-     goes through versioning (a later phase) which writes a NEW file + supersede.
-     "Destructive overwrite" is structurally not a code path here.
+  1. WRITE the file. A NEW entry won't clobber an existing id; an EDIT overwrites
+     its target in place (simple, no versioning).
   2. RE-EMBED just the written file (incremental index), not a full rebuild.
-  3. VERIFY the new doc is retrievable; if not, return ok=False with a flag
-     rather than silently leaving a written-but-unsearchable file.
+  3. VERIFY the doc is retrievable; if not, return ok=False with a flag rather
+     than silently leaving a written-but-unsearchable file.
 
 Identity-of-confirmer enforcement (human-only authorization; bots may propose
-but never confirm) is the wall, built + adversarially tested in a later phase.
-This phase delivers the pipeline + the no-overwrite + verify guarantees.
+but never confirm) + the no-read->write-loop bar is the wall (confirm_gate.py).
 """
 from __future__ import annotations
 
@@ -99,12 +96,17 @@ def confirm(
         )
 
     target = Path(proposal.target_path)
-    # Append-only: never clobber an existing file. (Edits are versioned writes
-    # to a NEW path in a later phase — there is no overwrite code path.)
-    if target.exists() and not proposal.is_update:
+    # A NEW entry must not silently clobber an existing doc id (that'd be an
+    # accidental overwrite, not an edit). An EDIT targets an existing id on
+    # purpose and overwrites it in place — simple, no versioning.
+    if target.exists() and not proposal.is_edit:
         raise ConfirmError(
-            f"Refusing to overwrite existing file {target} — writes are "
-            "append-only; an edit must go through versioning."
+            f"{proposal.doc_id} already exists — use an edit (edit_id=...) to "
+            f"change it, not a new write."
+        )
+    if not target.exists() and proposal.is_edit:
+        raise ConfirmError(
+            f"Edit target {proposal.doc_id} does not exist."
         )
 
     corpus_dir = Path(corpus_dir)
