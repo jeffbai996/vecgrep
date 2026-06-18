@@ -18,7 +18,13 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from .proposal import Proposal
+from .proposal import Proposal, render_doc
+
+
+def _body_of(rendered: str) -> str:
+    """Extract the body below the YAML frontmatter of a rendered doc."""
+    parts = rendered.split("---", 2)
+    return parts[2].strip() if len(parts) >= 3 else rendered.strip()
 
 
 class ConfirmError(RuntimeError):
@@ -85,9 +91,26 @@ def confirm(
     svc,
     corpus: str,
     corpus_dir: Path,
+    confirmed_by: str | None = None,
+    protected_ack: str | None = None,
 ) -> ConfirmResult:
-    """Run the gated write pipeline for a pending proposal. Raises ConfirmError
-    if the proposal is unknown (the gate) or the write would overwrite."""
+    """Run the gated write pipeline for a pending proposal.
+
+    THE WALL: a write requires a human confirmer identity (`confirmed_by`).
+    A bot may PROPOSE (origin=bot-suggested) but can never authorize its own
+    write — only a human confirm turns a proposal into a write. No human
+    identity → no write, regardless of the proposal's origin. (The read->write
+    bar is enforced one step earlier: propose() only accepts origin in
+    {human, bot-suggested}; ingested/retrieved content can't even become a
+    proposal.) The confirmer is recorded on the written doc for audit.
+    """
+    confirmer = (confirmed_by or "").strip()
+    if not confirmer:
+        raise ConfirmError(
+            "A write requires a human confirmer identity (confirmed_by). Bots "
+            "may propose but never authorize — no confirmer, no write."
+        )
+
     proposal = store.get(proposal_id)
     if proposal is None:
         raise ConfirmError(
@@ -109,9 +132,27 @@ def confirm(
             f"Edit target {proposal.doc_id} does not exist."
         )
 
+    # Protected tier: stronger confirm. Fires if the proposal is protected OR
+    # the doc being edited is protected ON DISK (so a bot can't strip protection
+    # by omitting the tier in an edit). The confirmer must re-state the exact
+    # doc id — deliberate intent, not a fat-finger or a slipped bot suggestion.
+    is_protected = proposal.meta.get("tier") == "protected" or (
+        proposal.is_edit and target.exists()
+        and "tier: protected" in target.read_text()
+    )
+    if is_protected and (protected_ack or "").strip() != proposal.doc_id:
+        raise ConfirmError(
+            f"{proposal.doc_id} is protected — re-state its exact id as "
+            f"protected_ack to confirm (got {protected_ack!r})."
+        )
+
     corpus_dir = Path(corpus_dir)
     corpus_dir.mkdir(parents=True, exist_ok=True)
-    target.write_text(proposal.rendered)
+    # Stamp the confirmer into the doc at WRITE time (it isn't known at propose
+    # time) so the on-disk record carries who authorized it — audit provenance.
+    final_meta = {**proposal.meta, "confirmed_by": confirmer}
+    rendered = render_doc(proposal.doc_id, _body_of(proposal.rendered), final_meta)
+    target.write_text(rendered)
 
     # Re-embed just this file (incremental), then verify retrievability.
     try:

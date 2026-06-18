@@ -52,7 +52,7 @@ class _FakeService:
 def test_confirm_requires_known_proposal(corpus_dir, store):
     svc = _FakeService()
     with pytest.raises(C.ConfirmError):
-        C.confirm("prop-does-not-exist", store, svc, "notes", corpus_dir)
+        C.confirm("prop-does-not-exist", store, svc, "notes", corpus_dir, confirmed_by="owner")
 
 
 def test_confirm_writes_the_file(corpus_dir, store):
@@ -60,7 +60,7 @@ def test_confirm_writes_the_file(corpus_dir, store):
     store.put(pr)
     svc = _FakeService()
     svc._last_written = pr.target_path
-    res = C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir)
+    res = C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir, confirmed_by="owner")
     written = Path(pr.target_path)
     assert written.exists()
     assert "a real note" in written.read_text()
@@ -74,7 +74,7 @@ def test_new_write_refuses_to_clobber_existing_id(corpus_dir, store):
     Path(pr.target_path).write_text("PRE-EXISTING — must not be lost")
     svc = _FakeService()
     with pytest.raises(C.ConfirmError):
-        C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir)
+        C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir, confirmed_by="owner")
     assert "PRE-EXISTING" in Path(pr.target_path).read_text()
 
 
@@ -86,7 +86,7 @@ def test_edit_overwrites_in_place(corpus_dir, store):
                    meta={"origin": "human"})
     store.put(pr)
     svc = _FakeService(); svc._last_written = pr.target_path
-    res = C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir)
+    res = C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir, confirmed_by="owner")
     assert res.ok is True
     body = (corpus_dir / "notes-001.md").read_text()
     assert "new content" in body and "old" not in body
@@ -97,7 +97,7 @@ def test_edit_of_missing_target_rejected(corpus_dir, store):
     store.put(pr)
     svc = _FakeService()
     with pytest.raises(C.ConfirmError):
-        C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir)
+        C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir, confirmed_by="owner")
 
 
 def test_confirm_reembeds_the_written_file(corpus_dir, store):
@@ -105,7 +105,7 @@ def test_confirm_reembeds_the_written_file(corpus_dir, store):
     store.put(pr)
     svc = _FakeService()
     svc._last_written = pr.target_path
-    C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir)
+    C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir, confirmed_by="owner")
     assert svc.indexed == [(pr.target_path, "notes")]  # re-embedded exactly the new file
 
 
@@ -114,7 +114,7 @@ def test_confirm_flags_when_verify_fails(corpus_dir, store):
     pr = P.propose("notes", "ghost note", corpus_dir, meta={"origin": "human"})
     store.put(pr)
     svc = _FakeService(found=False)
-    res = C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir)
+    res = C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir, confirmed_by="owner")
     assert res.ok is False
     assert "verif" in res.message.lower()
     assert Path(pr.target_path).exists()  # the file was still written
@@ -126,9 +126,9 @@ def test_confirm_consumes_the_proposal(corpus_dir, store):
     store.put(pr)
     svc = _FakeService()
     svc._last_written = pr.target_path
-    C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir)
+    C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir, confirmed_by="owner")
     with pytest.raises(C.ConfirmError):
-        C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir)
+        C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir, confirmed_by="owner")
 
 
 def test_proposal_store_roundtrip(store, corpus_dir):
