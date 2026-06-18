@@ -329,6 +329,7 @@ class VecgrepService:
         rerank_model: str | None = None,
         filters: list[str] | None = None,
         explain: bool = False,
+        include_superseded: bool = False,
     ) -> list[SearchResult]:
         top_k = top_k or self.settings.default_top_k
         if corpus_name:
@@ -347,8 +348,17 @@ class VecgrepService:
         for c in corpora:
             results.extend(self._search_one(c, query, per_corpus_k, mode, explain=explain))
 
+        # Default to active-only retrieval (write-tool status schema): a
+        # superseded version never surfaces as current truth. Caller opts out
+        # with include_superseded=True (audit trail) or by passing its own
+        # meta.status= filter explicitly. Legacy chunks (no status) stay visible
+        # via default_active back-compat in _passes_filters.
+        filters = list(filters or [])
+        has_explicit_status = any(f.startswith("meta.status=") for f in filters)
+        if not include_superseded and not has_explicit_status:
+            filters.append("meta.status=active")
         if filters:
-            results = [r for r in results if _passes_filters(r, filters)]
+            results = [r for r in results if _passes_filters(r, filters, default_active=True)]
 
         # Collapse near-duplicate overlapping chunks from the same source before
         # truncating, so adjacent sentence-windows don't each eat a top_k slot.
@@ -1017,7 +1027,9 @@ def _copytree(src: Path, dst: Path) -> None:
     shutil.copytree(src, dst, dirs_exist_ok=True)
 
 
-def _passes_filters(result: SearchResult, filters: list[str]) -> bool:
+def _passes_filters(
+    result: SearchResult, filters: list[str], default_active: bool = False
+) -> bool:
     """Apply --filter expressions. Supported forms:
 
         source:GLOB      — fnmatch against result.source_id
@@ -1025,8 +1037,20 @@ def _passes_filters(result: SearchResult, filters: list[str]) -> bool:
         meta.KEY=VALUE   — exact metadata field match (string compare)
 
     All filters AND together. A malformed filter is silently ignored.
+
+    default_active: back-compat for the write-tool status schema. When True, a
+    `meta.status=active` filter also passes a chunk that has NO status field at
+    all (legacy chunks indexed before the schema existed) — so the default
+    "show only active" retrieval doesn't make every pre-schema chunk vanish.
+    Only relaxes the status=active case; every other filter stays strict.
     """
     for f in filters:
+        if default_active and f == "meta.status=active":
+            # Legacy chunk (no status key) counts as active; an explicit
+            # non-active status still fails.
+            if str(result.metadata.get("status", "active")) != "active":
+                return False
+            continue
         if ":" not in f and "=" not in f:
             continue
         if f.startswith("source:"):
