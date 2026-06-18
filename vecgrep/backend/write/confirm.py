@@ -18,6 +18,7 @@ This phase delivers the pipeline + the no-overwrite + verify guarantees.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -67,6 +68,32 @@ class ProposalStore:
         self._path(proposal_id).unlink(missing_ok=True)
 
 
+def _version_of(text: str) -> int:
+    """Parse `version: N` from a rendered doc's frontmatter; default 1."""
+    m = re.search(r"^version:\s*(\d+)", text, re.MULTILINE)
+    return int(m.group(1)) if m else 1
+
+
+def _mark_superseded(text: str, superseded_by: str, new_version) -> str:
+    """Return the doc text with status flipped to superseded + a forward
+    pointer added (so the frozen archive records what replaced it and when)."""
+    # status: active -> superseded (insert if absent).
+    if re.search(r"^status:\s*", text, re.MULTILINE):
+        text = re.sub(r"^status:\s*.*$", "status: superseded", text, count=1,
+                      flags=re.MULTILINE)
+    else:
+        text = re.sub(r"^---\s*$", "---\nstatus: superseded", text, count=1,
+                      flags=re.MULTILINE)
+    # Add superseded_by pointer just after the status line (idempotent-ish).
+    pointer = f"superseded_by: {superseded_by}-v{new_version}" if new_version else \
+              f"superseded_by: {superseded_by}"
+    if "superseded_by:" not in text:
+        text = re.sub(r"^status:\s*superseded$",
+                      f"status: superseded\n{pointer}", text, count=1,
+                      flags=re.MULTILINE)
+    return text
+
+
 def _verify_searchable(svc, corpus: str, doc_id: str, content: str) -> bool:
     """Confirm the just-written doc is retrievable. Best-effort: query with a
     slice of the content and check the new doc_id shows up in the results."""
@@ -99,21 +126,39 @@ def confirm(
         )
 
     target = Path(proposal.target_path)
-    # Append-only: never clobber an existing file. (Edits are versioned writes
-    # to a NEW path in a later phase — there is no overwrite code path.)
+    corpus_dir = Path(corpus_dir)
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+
+    # Append-only: never clobber an existing file on a NEW write.
     if target.exists() and not proposal.is_update:
         raise ConfirmError(
             f"Refusing to overwrite existing file {target} — writes are "
             "append-only; an edit must go through versioning."
         )
 
-    corpus_dir = Path(corpus_dir)
-    corpus_dir.mkdir(parents=True, exist_ok=True)
+    archived_paths: list[Path] = []
+    if proposal.is_update and target.exists():
+        # Supersede, don't destroy: freeze the CURRENT live content to a
+        # versioned archive ({doc_id}-vN.md) with status flipped to superseded
+        # + a forward pointer, THEN advance the live file to the new version.
+        # The original is preserved on disk (audit trail); the live path always
+        # holds the active/current version.
+        old_text = target.read_text()
+        prev_ver = _version_of(old_text)
+        archive = corpus_dir / f"{proposal.doc_id}-v{prev_ver}.md"
+        archived = _mark_superseded(old_text, superseded_by=proposal.doc_id,
+                                    new_version=proposal.meta.get("version"))
+        archive.write_text(archived)
+        archived_paths.append(archive)
+
     target.write_text(proposal.rendered)
 
-    # Re-embed just this file (incremental), then verify retrievability.
+    # Re-embed the new live file AND any archived version (so the index reflects
+    # the status flip — the superseded archive must drop out of active search).
     try:
         svc.index(str(target), corpus)
+        for ap in archived_paths:
+            svc.index(str(ap), corpus)
     except Exception as e:
         # The file is on disk (truth); flag the embed failure rather than
         # pretending success. A re-index later recovers it.
