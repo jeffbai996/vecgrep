@@ -18,6 +18,11 @@ def _home() -> Path:
 class Settings:
     home: Path = field(default_factory=_home)
     ollama_url: str = "http://localhost:11434"
+    # Optional second Ollama endpoint. When set, embed-backend selection probes
+    # ollama_url first and transparently falls back to this one if the primary
+    # is unreachable, before considering OpenAI. Lets a deployment run a primary
+    # (e.g. a GPU box) with a local-host fallback. Unset (None) = no fallback.
+    ollama_fallback_url: str | None = None
     embed_model: str = "bge-m3"
     openai_api_key: str | None = None
     openai_embed_model: str = "text-embedding-3-small"
@@ -70,6 +75,7 @@ def load_settings() -> Settings:
 
     env_map = {
         "VECGREP_OLLAMA_URL": "ollama_url",
+        "VECGREP_OLLAMA_FALLBACK_URL": "ollama_fallback_url",
         "VECGREP_EMBED_MODEL": "embed_model",
         "OPENAI_API_KEY": "openai_api_key",
         "VECGREP_OPENAI_EMBED_MODEL": "openai_embed_model",

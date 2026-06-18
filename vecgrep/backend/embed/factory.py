@@ -48,11 +48,21 @@ def get_embed_backend(
     if _ollama_alive(settings.ollama_url):
         return OllamaBackend(settings.ollama_url, model or settings.embed_model)
 
+    # Primary Ollama down — try a second Ollama (if configured) before OpenAI.
+    # Same model/dim as primary, so vectors stay corpus-compatible. Only probed
+    # here, after the primary failed, so a healthy primary costs no extra probe.
+    fallback = settings.ollama_fallback_url
+    if fallback and _ollama_alive(fallback):
+        return OllamaBackend(fallback, model or settings.embed_model)
+
     if settings.openai_api_key:
         return OpenAIBackend(settings.openai_api_key, model or settings.openai_embed_model)
 
+    fallback_hint = (
+        f" (fallback {fallback} also unreachable)" if fallback else ""
+    )
     raise EmbedBackendError(
-        f"Ollama not reachable at {settings.ollama_url} and OPENAI_API_KEY is not set. "
-        f"Either start Ollama (`ollama serve` and `ollama pull {settings.embed_model}`) "
-        "or export OPENAI_API_KEY to use OpenAI as a fallback."
+        f"Ollama not reachable at {settings.ollama_url}{fallback_hint} and "
+        f"OPENAI_API_KEY is not set. Either start Ollama (`ollama serve` and "
+        f"`ollama pull {settings.embed_model}`) or export OPENAI_API_KEY."
     )
