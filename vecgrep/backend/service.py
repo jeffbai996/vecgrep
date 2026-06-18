@@ -178,6 +178,34 @@ class VecgrepService:
             )
         return backend
 
+    def _cache_key_for(self, corpus: Corpus | None) -> str:
+        prefer = corpus.embed_backend if corpus else None
+        model = corpus.embed_model if corpus else None
+        return f"{prefer}:{model}" if (prefer and model) else (prefer or "auto")
+
+    def _embed_query_with_failover(self, corpus: Corpus | None, query: str) -> list[float]:
+        """Embed a query, recovering from a backend that died mid-session.
+
+        The resolved backend is cached for the life of the service. If its
+        embedder dies (the primary Ollama goes down while we're running), the
+        cached object keeps raising. Catch that once, EVICT the stale cache
+        entry, and re-resolve via get_embed_backend — which re-runs the
+        primary→fallback probe, so a downed primary transparently fails over to
+        the secondary Ollama without a service restart. One retry only (a dead
+        re-resolve re-raises rather than looping)."""
+        backend = self._backend_for(corpus)
+        try:
+            return backend.embed_one(query)
+        except EmbedBackendError:
+            # Drop the dead backend so _backend_for re-resolves from scratch
+            # (re-probing primary→fallback). Clearing 'auto' too forces a true
+            # re-resolve rather than reusing the same dead object.
+            key = self._cache_key_for(corpus)
+            self._backend_cache.pop(key, None)
+            self._backend_cache.pop("auto", None)
+            backend = self._backend_for(corpus)
+            return backend.embed_one(query)
+
     # ----- chunkers -------------------------------------------------------------
     @staticmethod
     def chunker(name: str) -> Chunker:
@@ -428,8 +456,10 @@ class VecgrepService:
         bm25_hits: list[tuple[str, float, dict]] = []
 
         if mode in ("hybrid", "vector"):
-            backend = self._backend_for(corpus)
-            qv = backend.embed_one(query)
+            # Use the failover-aware embed so a backend that died mid-session
+            # (primary Ollama down) re-resolves to the fallback instead of
+            # raising forever on a stale cached backend.
+            qv = self._embed_query_with_failover(corpus, query)
             vector_hits = self.store.search(collection, qv, top_k=CANDIDATE_POOL)
 
         if mode in ("hybrid", "bm25"):
