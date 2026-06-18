@@ -30,8 +30,21 @@ class OllamaBackend(EmbedBackend):
     def __init__(self, base_url: str, model: str, timeout: float = 60.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self._client = httpx.Client(timeout=timeout)
+        # Phase-split timeout: a SHORT connect timeout so an unreachable host
+        # (asleep / no service) fails over fast instead of hanging the full
+        # read budget, but a LONG read timeout so a slow-but-alive embed (big
+        # batch, cold model load) still completes. Without this, a dead primary
+        # behind a primary->fallback chain stalls every embed up to `timeout`
+        # before failover triggers.
+        self._client = self._make_client(read=timeout)
         self.dim = _KNOWN_DIMS.get(model) or self._probe_dim()
+
+    @staticmethod
+    def _make_client(connect: float = 2.0, read: float = 60.0) -> httpx.Client:
+        """httpx client with a fast connect + generous read timeout."""
+        return httpx.Client(
+            timeout=httpx.Timeout(read, connect=connect)
+        )
 
     def _probe_dim(self) -> int:
         vec = self.embed_one("probe")
