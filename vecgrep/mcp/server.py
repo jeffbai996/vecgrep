@@ -231,8 +231,12 @@ def build_mcp_server() -> Any:
 # HTTP transport — FastMCP with json_response + stateless_http
 # ---------------------------------------------------------------------------
 
-def build_http_app() -> Any:
+def build_http_app(oauth_issuer_url: str | None = None) -> Any:
     """Build a Starlette ASGI app for the MCP HTTP endpoint.
+
+    oauth_issuer_url: when set, enable the embedded OAuth 2.1 auth server on this
+    endpoint (FastMCP mounts the auth routes + bearer middleware). When None, no
+    OAuth — the endpoint is network-trusted by the deployment.
 
     Uses FastMCP instead of the raw StreamableHTTPSessionManager so that:
 
@@ -256,7 +260,25 @@ def build_http_app() -> Any:
     from mcp.server.fastmcp import FastMCP
     from mcp.server.fastmcp.server import TransportSecuritySettings
 
-    fmcp = FastMCP("vecgrep")
+    # OAuth: when an issuer URL is configured, run the embedded auth server.
+    # FastMCP, given `auth` + `auth_server_provider`, auto-mounts /authorize,
+    # /token, /.well-known and gates the MCP endpoint with bearer middleware.
+    # Off (issuer None) → no auth here; /mcp is network-trusted (the parent app
+    # reaches it over localhost/tailnet, or via the OAuth-less secret path).
+    fmcp_kwargs: dict = {}
+    if oauth_issuer_url:
+        from mcp.server.auth.settings import AuthSettings
+        from pydantic import AnyHttpUrl
+        from ..backend.auth.provider import VecgrepOAuthProvider
+        issuer = AnyHttpUrl(oauth_issuer_url)
+        fmcp_kwargs["auth"] = AuthSettings(
+            issuer_url=issuer,
+            resource_server_url=issuer,
+            required_scopes=["read"],
+        )
+        fmcp_kwargs["auth_server_provider"] = VecgrepOAuthProvider()
+
+    fmcp = FastMCP("vecgrep", **fmcp_kwargs)
     fmcp.settings.json_response = True
     fmcp.settings.stateless_http = True
     # Register at '/' so the parent app's prefix-stripping (_BearerGatedASGI

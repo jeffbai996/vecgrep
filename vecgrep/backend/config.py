@@ -33,6 +33,15 @@ class Settings:
     # `Authorization: Bearer <token>` header. Useful when you bind to 0.0.0.0
     # for Tailscale / LAN access. Unset (None) = no auth, the default.
     api_token: str | None = None
+    # OAuth on the /mcp endpoint. When oauth_enabled, vecgrep runs an embedded
+    # OAuth 2.1 authorization server (the SDK mounts /authorize, /token,
+    # /.well-known and gates /mcp with bearer-token middleware) — so a client
+    # that speaks OAuth (claude.ai) can authenticate. oauth_issuer_url is the
+    # public base URL the MCP endpoint is reachable at (deployment-specific, set
+    # via env — never hardcode). Internal callers reach /api over localhost/
+    # tailnet with no token (network-trust); OAuth gates only the public /mcp.
+    oauth_enabled: bool = False
+    oauth_issuer_url: str | None = None
     # If set, use Qdrant in server mode at this URL instead of embedded mode.
     # Embedded mode locks the storage dir to a single process — incompatible
     # with running `vecgrep serve` and `vecgrep watch` simultaneously. Server
@@ -84,12 +93,16 @@ def load_settings() -> Settings:
         "VECGREP_TOP_K": "default_top_k",
         "VECGREP_API_TOKEN": "api_token",
         "VECGREP_QDRANT_URL": "qdrant_url",
+        "VECGREP_OAUTH_ENABLED": "oauth_enabled",
+        "VECGREP_OAUTH_ISSUER_URL": "oauth_issuer_url",
     }
     for env_key, attr in env_map.items():
         if env_key in os.environ:
             val = os.environ[env_key]
             if attr in {"api_port", "default_top_k"}:
                 val = int(val)
+            elif attr == "oauth_enabled":
+                val = val.strip().lower() in ("1", "true", "yes", "on")
             setattr(s, attr, val)
 
     return s

@@ -33,8 +33,13 @@ def _try_build_mcp_http_app() -> Any | None:
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("MCP HTTP endpoint disabled: %s", e)
         return None
+    from .config import get_settings
+    s = get_settings()
+    issuer = s.oauth_issuer_url if s.oauth_enabled else None
+    if s.oauth_enabled and not issuer:
+        logger.warning("VECGREP_OAUTH_ENABLED set but no issuer URL; OAuth off.")
     try:
-        return build_http_app()
+        return build_http_app(oauth_issuer_url=issuer)
     except RuntimeError as e:
         # build_http_app raises RuntimeError when the mcp extra is missing
         # (the helpful "pip install vecgrep[mcp]" message).
@@ -42,21 +47,19 @@ def _try_build_mcp_http_app() -> Any | None:
         return None
 
 
-class _BearerGatedASGI:
-    """Wrap an ASGI app so HTTP requests must pass `require_token` first.
+class _McpPathRewriteASGI:
+    """Rewrite the `/mcp` request path to `/` before delegating to the MCP
+    sub-app (whose router expects `/`, where build_http_app registered the
+    streamable HTTP handler).
 
-    Implemented as a class (not a function) because Starlette's Route
-    treats functions as `func(request)` handlers — only class-instance
-    callables are recognised as raw ASGI. We can't reuse FastAPI's
-    Depends machinery here — the wrapped MCP app owns its own routing
-    — so we re-implement the bearer check at the ASGI layer, delegating
-    to the same require_token function the REST routes use.
+    Auth is NOT done here anymore. When OAuth is enabled, FastMCP's own bearer
+    middleware (inside the sub-app) gates the endpoint. When OAuth is off, /mcp
+    is network-trusted — the deployment reaches it over localhost/tailnet or via
+    an unguessable funnel path. (The old static-token check lived here; it was
+    retired in favor of OAuth-on-/mcp + network-trust-on-/api.)
 
-    The wrapped app is a Starlette sub-app whose own router expects
-    path `/` (that's where `build_http_app` registered the streamable
-    HTTP handler). Since the parent FastAPI matched on `/mcp` (or
-    `/mcp/`), we rewrite scope.path to `/` before delegating so the
-    sub-app's router actually matches.
+    Class-not-function because Starlette only treats class-instance callables as
+    raw ASGI; a function is treated as a `func(request)` handler.
     """
 
     def __init__(self, asgi_app: Callable[..., Any]) -> None:
@@ -64,29 +67,10 @@ class _BearerGatedASGI:
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
-            # Lifespan / websocket events go through unchanged.
             await self._app(scope, receive, send)
             return
-
-        auth_header: str | None = None
-        for name, value in scope.get("headers", []):
-            if name == b"authorization":
-                auth_header = value.decode("latin-1")
-                break
-
-        try:
-            require_token(authorization=auth_header)
-        except HTTPException as exc:
-            response = JSONResponse(
-                status_code=exc.status_code,
-                content={"detail": exc.detail},
-            )
-            await response(scope, receive, send)
-            return
-
-        # Strip the /mcp prefix so the sub-app's `/` route matches.
-        # Copy scope to avoid mutating shared state across the request
-        # lifecycle (Starlette caches scope for some middleware).
+        # Strip the /mcp prefix so the sub-app's `/` route matches. Copy scope to
+        # avoid mutating shared state across the request lifecycle.
         sub_scope = dict(scope)
         sub_scope["path"] = "/"
         sub_scope["raw_path"] = b"/"
@@ -129,7 +113,7 @@ def create_app() -> FastAPI:
         # falling through to the SPA's GET-only catch-all. Explicit Routes
         # for both the slash and slashless forms keep MCP clients happy
         # regardless of how they normalise their URLs.
-        gated = _BearerGatedASGI(mcp_http_app)
+        gated = _McpPathRewriteASGI(mcp_http_app)
         app.router.routes.append(
             Route("/mcp", endpoint=gated, methods=["GET", "POST", "DELETE"])
         )
