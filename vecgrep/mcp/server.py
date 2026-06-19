@@ -125,6 +125,51 @@ def _run_get_corpus(name: str) -> str:
     return json.dumps({"error": f"corpus not found: {name}"})
 
 
+def _write_dir(corpus: str):
+    from ..backend.config import get_settings
+    return get_settings().home / "write" / corpus
+
+
+def _pending_store():
+    from ..backend.config import get_settings
+    from ..backend.write import confirm as _C
+    return _C.ProposalStore(get_settings().home / "write" / "_pending")
+
+
+def _run_propose(corpus: str, content: str, edit_id: str | None = None,
+                 source_kind: str | None = None, tags: list[str] | None = None,
+                 origin: str = "bot-suggested") -> str:
+    """PROPOSE an entry (or edit) — WRITES NOTHING. Stores a pending proposal a
+    human confirms later (`vecgrep confirm <id>`).
+
+    This is the MCP-facing path: an agent (claude.ai) ingests untrusted content,
+    so a direct write would be a prompt-injection → memory-poisoning vector. A
+    proposal is inert until a human reviews + confirms it off-protocol. origin
+    is 'bot-suggested' here (the wall: bots propose, humans authorize). Returns
+    JSON {proposal_id, doc_id, is_edit, preview} or {error}."""
+    from ..backend.write import proposal as _P
+
+    corpus_dir = _write_dir(corpus)
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    meta = {"origin": origin}
+    if source_kind:
+        meta["source_kind"] = source_kind
+    if tags:
+        meta["tags"] = list(tags)
+    try:
+        pr = _P.propose(corpus, content, corpus_dir, meta=meta, edit_id=edit_id)
+    except _P.ProposalError as e:
+        return json.dumps({"error": str(e)})
+    _pending_store().put(pr)
+    return json.dumps({
+        "proposal_id": pr.proposal_id, "doc_id": pr.doc_id,
+        "is_edit": pr.is_edit, "corpus": corpus,
+        "status": "pending — a human must run `vecgrep confirm "
+                  f"{pr.proposal_id}` to write it",
+        "preview": pr.rendered[:500],
+    })
+
+
 # ---------------------------------------------------------------------------
 # stdio transport — low-level Server (well-tested, leave as-is)
 # ---------------------------------------------------------------------------
@@ -308,6 +353,38 @@ def build_http_app() -> Any:
     def get_corpus(name: str) -> str:
         """name: corpus name (from list_corpora)."""
         return _run_get_corpus(name)
+
+    @fmcp.tool(
+        description=(
+            "PROPOSE a new entry for a corpus. Writes NOTHING — creates a pending "
+            "proposal a human reviews + confirms before it's saved. Use for "
+            "durable notes/facts/decisions worth recalling later. Returns the "
+            "proposal_id; tell the user to confirm it."
+        )
+    )
+    def propose_write(corpus: str, content: str,
+                      source_kind: str | None = None,
+                      tags: list[str] | None = None) -> str:
+        """corpus: target. content: entry text. source_kind: insight|fact|
+        correction|journal|decision. tags: optional. Returns the pending
+        proposal (nothing is written until a human confirms)."""
+        return _run_propose(corpus, content, None, source_kind, tags)
+
+    @fmcp.tool(
+        description=(
+            "PROPOSE an edit to an existing entry (by id, e.g. notes-007). Writes "
+            "NOTHING — creates a pending proposal a human confirms before it "
+            "overwrites. Returns the proposal_id."
+        )
+    )
+    def propose_edit(doc_id: str, content: str, corpus: str | None = None,
+                     source_kind: str | None = None,
+                     tags: list[str] | None = None) -> str:
+        """doc_id: existing id. content: new text. corpus: inferred from id
+        prefix if omitted. Proposal only — a human must confirm."""
+        if corpus is None:
+            corpus = doc_id.rsplit("-", 1)[0] if "-" in doc_id else doc_id
+        return _run_propose(corpus, content, doc_id, source_kind, tags)
 
     return fmcp.streamable_http_app()
 

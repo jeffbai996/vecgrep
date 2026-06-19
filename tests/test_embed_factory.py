@@ -72,13 +72,26 @@ def test_no_fallback_url_preserves_old_behavior(monkeypatch):
     assert factory.get_embed_backend(s) is sentinel
 
 
-def test_prefer_ollama_still_uses_primary_url(monkeypatch):
-    # An explicit prefer='ollama' pin uses the primary url directly (no probe).
+def test_prefer_ollama_uses_primary_when_alive(monkeypatch):
+    # A corpus pinned prefer='ollama' uses the primary when it's alive.
     s = _settings(ollama_url="http://primary:11434",
                   ollama_fallback_url="http://fallback:11434")
+    monkeypatch.setattr(factory, "_ollama_alive", lambda url: True)
     b = factory.get_embed_backend(s, prefer="ollama")
     assert isinstance(b, OllamaBackend)
     assert b.base_url == "http://primary:11434"
+
+
+def test_prefer_ollama_FAILS_OVER_when_primary_dead(monkeypatch):
+    # The bug: a pinned prefer='ollama' corpus used the primary url blindly,
+    # bypassing the failover — so a dead primary never fell over. It MUST honor
+    # the same primary->fallback probe as the unpinned path.
+    s = _settings(ollama_url="http://primary:11434",
+                  ollama_fallback_url="http://fallback:11434")
+    monkeypatch.setattr(factory, "_ollama_alive", lambda url: url == "http://fallback:11434")
+    b = factory.get_embed_backend(s, prefer="ollama")
+    assert isinstance(b, OllamaBackend)
+    assert b.base_url == "http://fallback:11434"
 
 
 def test_fallback_only_probed_when_primary_dead(monkeypatch):
