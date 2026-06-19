@@ -8,16 +8,17 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.routing import Route
+from starlette.requests import Request
+from starlette.routing import Mount
 
 from .. import __version__
-from .api.routes import public_router, require_token, router
+from .api.routes import public_router, router
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
@@ -45,36 +46,6 @@ def _try_build_mcp_http_app() -> Any | None:
         # (the helpful "pip install vecgrep[mcp]" message).
         logger.warning("MCP HTTP endpoint disabled: %s", e)
         return None
-
-
-class _McpPathRewriteASGI:
-    """Rewrite the `/mcp` request path to `/` before delegating to the MCP
-    sub-app (whose router expects `/`, where build_http_app registered the
-    streamable HTTP handler).
-
-    Auth is NOT done here anymore. When OAuth is enabled, FastMCP's own bearer
-    middleware (inside the sub-app) gates the endpoint. When OAuth is off, /mcp
-    is network-trusted — the deployment reaches it over localhost/tailnet or via
-    an unguessable funnel path. (The old static-token check lived here; it was
-    retired in favor of OAuth-on-/mcp + network-trust-on-/api.)
-
-    Class-not-function because Starlette only treats class-instance callables as
-    raw ASGI; a function is treated as a `func(request)` handler.
-    """
-
-    def __init__(self, asgi_app: Callable[..., Any]) -> None:
-        self._app = asgi_app
-
-    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
-        if scope["type"] != "http":
-            await self._app(scope, receive, send)
-            return
-        # Strip the /mcp prefix so the sub-app's `/` route matches. Copy scope to
-        # avoid mutating shared state across the request lifecycle.
-        sub_scope = dict(scope)
-        sub_scope["path"] = "/"
-        sub_scope["raw_path"] = b"/"
-        await self._app(sub_scope, receive, send)
 
 
 def create_app() -> FastAPI:
@@ -108,18 +79,20 @@ def create_app() -> FastAPI:
     app.include_router(router)
 
     if mcp_http_app is not None:
-        # Register before the SPA fallback below so it wins routing.
-        # Mount at /mcp would 405 on `POST /mcp` (no trailing slash) by
-        # falling through to the SPA's GET-only catch-all. Explicit Routes
-        # for both the slash and slashless forms keep MCP clients happy
-        # regardless of how they normalise their URLs.
-        gated = _McpPathRewriteASGI(mcp_http_app)
-        app.router.routes.append(
-            Route("/mcp", endpoint=gated, methods=["GET", "POST", "DELETE"])
-        )
-        app.router.routes.append(
-            Route("/mcp/", endpoint=gated, methods=["GET", "POST", "DELETE"])
-        )
+        # Mount the MCP sub-app under /mcp so ALL its sub-paths resolve — not
+        # just the streamable handler at '/', but the OAuth routes the SDK adds
+        # when auth is on (/authorize, /token, /.well-known/...). A path-rewriter
+        # that forced everything to '/' (the old single-handler hack) would make
+        # those auth routes unreachable. Mount preserves sub-paths: /mcp/ -> the
+        # sub-app's '/' (MCP handler), /mcp/authorize -> its '/authorize', etc.
+        app.router.routes.append(Mount("/mcp", app=mcp_http_app))
+        # Mount only matches /mcp/<something>; a slashless `POST /mcp` (some MCP
+        # clients send it) would fall through to the SPA catch-all. Redirect it
+        # to /mcp/ so the sub-app's root handler picks it up.
+        @app.api_route("/mcp", methods=["GET", "POST", "DELETE"])
+        async def _mcp_slashless(request: Request) -> Any:
+            from starlette.responses import RedirectResponse
+            return RedirectResponse(url="/mcp/", status_code=307)
     else:
         logger.warning("vecgrep[mcp] extra not installed; /mcp endpoint not mounted")
 
