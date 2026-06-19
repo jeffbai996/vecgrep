@@ -74,6 +74,17 @@ def test_pending_empty_when_none(home):
     assert "No pending" in r.output
 
 
+def test_default_propose_corpus_is_claude_ai(home):
+    """An agent that doesn't name a corpus proposes into 'claude-ai' — a
+    dedicated corpus for agent contributions, kept apart from human/ingested
+    corpora."""
+    from vecgrep.mcp import server as S
+    assert S.DEFAULT_PROPOSE_CORPUS == "claude-ai"
+    r = json.loads(S._run_propose(S.DEFAULT_PROPOSE_CORPUS, "an agent fact"))
+    assert r["corpus"] == "claude-ai"
+    assert r["doc_id"].startswith("claudeai-")  # slug prefix, sanitized
+
+
 def test_discard_removes_proposal_without_writing(home):
     from click.testing import CliRunner
     from vecgrep.cli.main import cli

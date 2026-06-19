@@ -125,6 +125,14 @@ def _run_get_corpus(name: str) -> str:
     return json.dumps({"error": f"corpus not found: {name}"})
 
 
+# Where an agent's proposals land when it doesn't name a corpus. A dedicated
+# corpus for agent-contributed entries keeps them separate from human-authored
+# and ingested corpora. Override with VECGREP_DEFAULT_PROPOSE_CORPUS.
+import os as _os
+DEFAULT_PROPOSE_CORPUS = _os.environ.get(
+    "VECGREP_DEFAULT_PROPOSE_CORPUS", "claude-ai")
+
+
 def _write_dir(corpus: str):
     from ..backend.config import get_settings
     return get_settings().home / "write" / corpus
@@ -395,13 +403,15 @@ def build_http_app() -> Any:
             "proposal_id; tell the user to confirm it."
         )
     )
-    def propose_write(corpus: str, content: str,
+    def propose_write(content: str, corpus: str | None = None,
                       source_kind: str | None = None,
                       tags: list[str] | None = None) -> str:
-        """corpus: target. content: entry text. source_kind: insight|fact|
-        correction|journal|decision. tags: optional. Returns the pending
-        proposal (nothing is written until a human confirms)."""
-        return _run_propose(corpus, content, None, source_kind, tags)
+        """content: entry text. corpus: target (default the agent's own
+        'claude-ai' corpus). source_kind: insight|fact|correction|journal|
+        decision. tags: optional. Returns the pending proposal (nothing is
+        written until a human confirms)."""
+        return _run_propose(corpus or DEFAULT_PROPOSE_CORPUS, content, None,
+                            source_kind, tags)
 
     @fmcp.tool(
         description=(
