@@ -828,5 +828,76 @@ def config(json_out: bool) -> None:
         click.echo(f"{k:<20} {v}")
 
 
+def _write_dir(corpus: str):
+    """Per-corpus dir where write-tool markdown docs live (files-are-truth)."""
+    return get_settings().home / "write" / corpus
+
+
+def _do_write(corpus: str, content: str, edit_id: str | None,
+              source_kind: str | None, tags: tuple[str, ...]) -> None:
+    """Shared propose→confirm for the write/edit CLI. The CLI caller is the
+    human, so confirmed_by = the local user (the wall's human-confirm). origin
+    is 'human' for the same reason."""
+    import getpass
+    from ..backend.write import proposal as _P
+    from ..backend.write import confirm as _C
+
+    corpus_dir = _write_dir(corpus)
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    meta = {"origin": "human"}
+    if source_kind:
+        meta["source_kind"] = source_kind
+    if tags:
+        meta["tags"] = list(tags)
+    try:
+        pr = _P.propose(corpus, content, corpus_dir, meta=meta, edit_id=edit_id)
+    except _P.ProposalError as e:
+        raise click.ClickException(str(e))
+
+    store = _C.ProposalStore(get_settings().home / "write" / "_pending")
+    store.put(pr)
+    svc = VecgrepService(ephemeral=False)
+    try:
+        res = _C.confirm(pr.proposal_id, store, svc, corpus, corpus_dir,
+                         confirmed_by=getpass.getuser(),
+                         protected_ack=pr.doc_id)  # CLI user IS the human; auto-ack
+    except _C.ConfirmError as e:
+        raise click.ClickException(str(e))
+    status = "✓" if res.ok else "⚠"
+    click.echo(f"{status} {pr.doc_id} → {res.path}")
+    if not res.ok:
+        click.echo(f"  {res.message}")
+
+
+@cli.command()
+@click.argument("corpus")
+@click.argument("content")
+@click.option("--source-kind", type=click.Choice(
+    ["insight", "fact", "correction", "journal", "decision"]),
+    default=None, help="What kind of entry this is (powers filtered retrieval).")
+@click.option("--tag", "tags", multiple=True, help="Tag (repeatable).")
+def write(corpus: str, content: str, source_kind: str | None, tags: tuple[str, ...]) -> None:
+    """Write a NEW entry into a corpus (proposes + confirms in one step — you're
+    the human). Assigns the next id, writes the markdown doc, indexes it."""
+    _do_write(corpus, content, None, source_kind, tags)
+
+
+@cli.command()
+@click.argument("doc_id")
+@click.argument("content")
+@click.option("--corpus", default=None, help="Corpus (default: inferred from doc_id prefix).")
+@click.option("--source-kind", type=click.Choice(
+    ["insight", "fact", "correction", "journal", "decision"]), default=None)
+@click.option("--tag", "tags", multiple=True)
+def edit(doc_id: str, content: str, corpus: str | None,
+         source_kind: str | None, tags: tuple[str, ...]) -> None:
+    """Overwrite an existing entry by id (e.g. notes-007). Corpus is inferred
+    from the id prefix unless --corpus is given."""
+    if corpus is None:
+        # doc_id is '<prefix>-NNN'; prefix maps to the corpus dir name.
+        corpus = doc_id.rsplit("-", 1)[0] if "-" in doc_id else doc_id
+    _do_write(corpus, content, doc_id, source_kind, tags)
+
+
 if __name__ == "__main__":
     cli()
