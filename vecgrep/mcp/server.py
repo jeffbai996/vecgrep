@@ -161,13 +161,46 @@ def _run_propose(corpus: str, content: str, edit_id: str | None = None,
     except _P.ProposalError as e:
         return json.dumps({"error": str(e)})
     _pending_store().put(pr)
-    return json.dumps({
+    result = {
         "proposal_id": pr.proposal_id, "doc_id": pr.doc_id,
         "is_edit": pr.is_edit, "corpus": corpus,
         "status": "pending — a human must run `vecgrep confirm "
                   f"{pr.proposal_id}` to write it",
         "preview": pr.rendered[:500],
+    }
+    _fire_propose_hook(pr)
+    return json.dumps(result)
+
+
+def _fire_propose_hook(pr) -> None:
+    """Optionally notify an external command that a proposal was created.
+
+    If VECGREP_PROPOSE_HOOK is set, run it with the proposal JSON on stdin so a
+    deployment can surface pending proposals out-of-band (a Discord card, a
+    desktop notification, etc.) without vecgrep itself knowing anything about
+    those channels — it stays generic. Strictly best-effort: the proposal is
+    already safely stored, so a missing/failing hook must never break propose.
+    """
+    import os
+    hook = os.environ.get("VECGREP_PROPOSE_HOOK", "").strip()
+    if not hook:
+        return
+    import subprocess
+    payload = json.dumps({
+        "proposal_id": pr.proposal_id, "doc_id": pr.doc_id,
+        "corpus": pr.corpus, "is_edit": pr.is_edit,
+        "target_path": pr.target_path, "preview": pr.rendered[:1000],
+        "meta": pr.meta,
     })
+    try:
+        subprocess.run(
+            hook, shell=True, input=payload, text=True,
+            timeout=10, capture_output=True,
+        )
+    except Exception:
+        # Notification is a nicety; the write path's correctness does not
+        # depend on it. Swallow everything.
+        pass
 
 
 # ---------------------------------------------------------------------------

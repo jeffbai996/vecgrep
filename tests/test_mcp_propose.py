@@ -72,3 +72,28 @@ def test_pending_empty_when_none(home):
     r = CliRunner().invoke(cli, ["pending"])
     assert r.exit_code == 0
     assert "No pending" in r.output
+
+
+def test_propose_hook_fires_with_payload(home, tmp_path, monkeypatch):
+    """VECGREP_PROPOSE_HOOK runs with the proposal JSON on stdin so a deployment
+    can post a Discord card / notification out-of-band."""
+    from vecgrep.mcp import server as S
+    out = tmp_path / "hook_saw.json"
+    # A tiny shell hook that copies stdin to a file we can inspect.
+    monkeypatch.setenv("VECGREP_PROPOSE_HOOK", f"cat > {out}")
+    S._run_propose("notes", "card me", source_kind="fact")
+    assert out.exists(), "hook should have run"
+    seen = json.loads(out.read_text())
+    assert seen["proposal_id"].startswith("prop-notes-001-")
+    assert seen["corpus"] == "notes"
+    assert "card me" in seen["preview"]
+
+
+def test_propose_hook_failure_does_not_break_propose(home, monkeypatch):
+    """A missing/failing hook must never break the propose — the proposal is
+    already stored; notification is best-effort."""
+    from vecgrep.mcp import server as S
+    monkeypatch.setenv("VECGREP_PROPOSE_HOOK", "this-command-does-not-exist-xyz")
+    r = json.loads(S._run_propose("notes", "still works"))
+    assert r["proposal_id"]  # propose succeeded despite the broken hook
+    assert glob.glob(f"{os.environ['VECGREP_HOME']}/write/_pending/*.json")
