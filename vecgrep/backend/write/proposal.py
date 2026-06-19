@@ -11,6 +11,7 @@ No versioning / supersede / archive — an edit overwrites in place.
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -114,13 +115,45 @@ def propose(
     _validate_meta(meta)
 
     is_edit = edit_id is not None
-    doc_id = edit_id if is_edit else next_doc_id(corpus_dir, corpus)
+    if is_edit:
+        # An edit_id becomes a filename and a path component, so it must be a
+        # plain doc-id (prefix-NNN) and nothing else. Without this check an
+        # edit_id like "../outside" would resolve target_path outside
+        # corpus_dir, letting confirm() read+overwrite an arbitrary file —
+        # the corpus boundary is the whole point of the gate.
+        if not _ID_RE.match(edit_id):
+            raise ProposalError(
+                f"edit_id {edit_id!r} is not a valid doc id (expected "
+                f"prefix-NNN, e.g. note-007) — path separators and '..' are "
+                f"rejected so an edit can't escape the corpus directory."
+            )
+        doc_id = edit_id
+    else:
+        doc_id = next_doc_id(corpus_dir, corpus)
+
+    # Belt-and-suspenders: the resolved target must stay under corpus_dir even
+    # if doc_id ever slips past _ID_RE. A new entry's id is generated, but we
+    # confine both paths the same way so the invariant holds regardless of how
+    # doc_id was produced.
+    base = corpus_dir.resolve()
+    target = (corpus_dir / f"{doc_id}.md").resolve()
+    if base not in target.parents:
+        raise ProposalError(
+            f"refusing target {target} outside corpus dir {base}"
+        )
+
     rendered = render_doc(doc_id, content, meta)
+    # proposal_id MUST be unique per proposal. Deriving it only from doc_id
+    # collided: two un-confirmed new entries on the same corpus both pick the
+    # same next doc_id, so the second proposal's file overwrote the first in
+    # the store — a human could then confirm id X and write content Y they
+    # never reviewed. A uuid nonce makes every proposal its own handle.
+    pid = proposal_id or f"prop-{doc_id}-{uuid.uuid4().hex[:8]}"
     return Proposal(
-        proposal_id=proposal_id or f"prop-{doc_id}",
+        proposal_id=pid,
         doc_id=doc_id,
         corpus=corpus,
-        target_path=str(corpus_dir / f"{doc_id}.md"),
+        target_path=str(target),
         rendered=rendered,
         is_edit=is_edit,
         meta=meta,
