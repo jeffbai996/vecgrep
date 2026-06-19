@@ -8,14 +8,13 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.requests import Request
-from starlette.routing import Mount
+from starlette.routing import Mount, Route
 
 from .. import __version__
 from .api.routes import public_router, router
@@ -46,6 +45,26 @@ def _try_build_mcp_http_app() -> Any | None:
         # (the helpful "pip install vecgrep[mcp]" message).
         logger.warning("MCP HTTP endpoint disabled: %s", e)
         return None
+
+
+class _McpBareDelegate:
+    """Raw-ASGI endpoint for the slashless `/mcp`: rewrite the path to `/` and
+    hand the request to the MCP sub-app's root handler. Used ONLY for bare
+    `/mcp` (Mount handles `/mcp/...`). Avoids a funnel-breaking redirect.
+
+    Class-not-function: Starlette treats a function endpoint as `func(request)`,
+    only a class instance as a raw ASGI `(scope, receive, send)` callable.
+    """
+
+    def __init__(self, asgi_app: Callable[..., Any]) -> None:
+        self._app = asgi_app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] == "http":
+            scope = dict(scope)
+            scope["path"] = "/"
+            scope["raw_path"] = b"/"
+        await self._app(scope, receive, send)
 
 
 def create_app() -> FastAPI:
@@ -86,13 +105,16 @@ def create_app() -> FastAPI:
         # those auth routes unreachable. Mount preserves sub-paths: /mcp/ -> the
         # sub-app's '/' (MCP handler), /mcp/authorize -> its '/authorize', etc.
         app.router.routes.append(Mount("/mcp", app=mcp_http_app))
-        # Mount only matches /mcp/<something>; a slashless `POST /mcp` (some MCP
-        # clients send it) would fall through to the SPA catch-all. Redirect it
-        # to /mcp/ so the sub-app's root handler picks it up.
-        @app.api_route("/mcp", methods=["GET", "POST", "DELETE"])
-        async def _mcp_slashless(request: Request) -> Any:
-            from starlette.responses import RedirectResponse
-            return RedirectResponse(url="/mcp/", status_code=307)
+        # Mount matches /mcp/<something> but NOT bare /mcp. A redirect to /mcp/
+        # breaks behind the Tailscale Funnel (absolute-from-root, drops the
+        # funnel's path prefix → claude.ai loops on 307s). Instead delegate the
+        # bare-/mcp request straight into the sub-app's root ('/') by ASGI,
+        # rewriting the path in-process — no redirect, funnel-safe. Class
+        # instance because Starlette only treats those as raw ASGI endpoints.
+        app.router.routes.append(
+            Route("/mcp", endpoint=_McpBareDelegate(mcp_http_app),
+                  methods=["GET", "POST", "DELETE"])
+        )
     else:
         logger.warning("vecgrep[mcp] extra not installed; /mcp endpoint not mounted")
 

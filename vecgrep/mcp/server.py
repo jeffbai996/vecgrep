@@ -267,7 +267,7 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
     # reaches it over localhost/tailnet, or via the OAuth-less secret path).
     fmcp_kwargs: dict = {}
     if oauth_issuer_url:
-        from mcp.server.auth.settings import AuthSettings
+        from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
         from pydantic import AnyHttpUrl
         from ..backend.auth.provider import VecgrepOAuthProvider
         issuer = AnyHttpUrl(oauth_issuer_url)
@@ -275,6 +275,15 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
             issuer_url=issuer,
             resource_server_url=issuer,
             required_scopes=["read"],
+            # Dynamic Client Registration (RFC 7591): claude.ai self-registers
+            # rather than needing a pre-shared client_id. Without this the
+            # well-known advertises no registration_endpoint and the client is
+            # stuck asking for a client_id it can't get.
+            client_registration_options=ClientRegistrationOptions(
+                enabled=True,
+                valid_scopes=["read", "propose"],
+                default_scopes=["read"],
+            ),
         )
         fmcp_kwargs["auth_server_provider"] = VecgrepOAuthProvider()
 
