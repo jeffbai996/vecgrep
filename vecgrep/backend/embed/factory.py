@@ -22,6 +22,21 @@ def _ollama_alive(base_url: str) -> bool:
         return False
 
 
+def _resolve_ollama(settings, model: str | None):
+    """Primary Ollama if alive, else the configured fallback Ollama if alive,
+    else None. Shared by the pinned-ollama and the unpinned/auto paths so a
+    corpus pin can never bypass failover. Same model/dim either way, so vectors
+    stay corpus-compatible. The fallback is only probed after the primary fails,
+    so a healthy primary costs exactly one probe."""
+    chosen = model or settings.embed_model
+    if _ollama_alive(settings.ollama_url):
+        return OllamaBackend(settings.ollama_url, chosen)
+    fallback = settings.ollama_fallback_url
+    if fallback and _ollama_alive(fallback):
+        return OllamaBackend(fallback, chosen)
+    return None
+
+
 def get_embed_backend(
     settings: Settings, prefer: str | None = None, model: str | None = None
 ) -> EmbedBackend:
@@ -42,24 +57,31 @@ def get_embed_backend(
             )
         return OpenAIBackend(settings.openai_api_key, model or settings.openai_embed_model)
 
+    # Pinned to ollama: still honor primary->fallback. (A corpus pin must NOT
+    # bypass failover — that was the bug where a pinned corpus used the dead
+    # primary url blindly and never fell over.) Pinned means "don't use OpenAI",
+    # so a dead primary + no live fallback raises rather than silently switching
+    # embed models (which would break vector compatibility for that corpus).
     if prefer == "ollama":
-        return OllamaBackend(settings.ollama_url, model or settings.embed_model)
+        ob = _resolve_ollama(settings, model)
+        if ob is not None:
+            return ob
+        raise EmbedBackendError(
+            f"Corpus pinned to Ollama but neither primary ({settings.ollama_url}) "
+            f"nor fallback ({settings.ollama_fallback_url}) is reachable."
+        )
 
-    if _ollama_alive(settings.ollama_url):
-        return OllamaBackend(settings.ollama_url, model or settings.embed_model)
+    ob = _resolve_ollama(settings, model)
+    if ob is not None:
+        return ob
 
-    # Primary Ollama down — try a second Ollama (if configured) before OpenAI.
-    # Same model/dim as primary, so vectors stay corpus-compatible. Only probed
-    # here, after the primary failed, so a healthy primary costs no extra probe.
-    fallback = settings.ollama_fallback_url
-    if fallback and _ollama_alive(fallback):
-        return OllamaBackend(fallback, model or settings.embed_model)
-
+    # Both Ollama endpoints down — fall to OpenAI if a key is set.
     if settings.openai_api_key:
         return OpenAIBackend(settings.openai_api_key, model or settings.openai_embed_model)
 
     fallback_hint = (
-        f" (fallback {fallback} also unreachable)" if fallback else ""
+        f" (fallback {settings.ollama_fallback_url} also unreachable)"
+        if settings.ollama_fallback_url else ""
     )
     raise EmbedBackendError(
         f"Ollama not reachable at {settings.ollama_url}{fallback_hint} and "
