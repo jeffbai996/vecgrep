@@ -74,6 +74,26 @@ def test_pending_empty_when_none(home):
     assert "No pending" in r.output
 
 
+def test_discard_removes_proposal_without_writing(home):
+    from click.testing import CliRunner
+    from vecgrep.cli.main import cli
+    from vecgrep.mcp import server as S
+
+    r = json.loads(S._run_propose("notes", "discard me"))
+    pid = r["proposal_id"]
+    runner = CliRunner()
+    d = runner.invoke(cli, ["discard", pid])
+    assert d.exit_code == 0, d.output
+    assert "discarded" in d.output
+    h = os.environ["VECGREP_HOME"]
+    # nothing written, pending cleared
+    assert not glob.glob(f"{h}/write/notes/notes-001.md")
+    assert not glob.glob(f"{h}/write/_pending/*.json")
+    # discarding again fails (already gone)
+    d2 = runner.invoke(cli, ["discard", pid])
+    assert d2.exit_code != 0
+
+
 def test_propose_hook_fires_with_payload(home, tmp_path, monkeypatch):
     """VECGREP_PROPOSE_HOOK runs with the proposal JSON on stdin so a deployment
     can post a Discord card / notification out-of-band."""
