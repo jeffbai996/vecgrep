@@ -949,5 +949,22 @@ def confirm(proposal_id: str, ack: str | None) -> None:
         click.echo(f"  {res.message}")
 
 
+@cli.command()
+@click.argument("proposal_id")
+def discard(proposal_id: str) -> None:
+    """Discard a pending write proposal without writing it (the reject path —
+    bots propose, you decline). Removes the pending proposal; nothing is
+    written or indexed."""
+    from ..backend.write import confirm as _C
+
+    store = _C.ProposalStore(get_settings().home / "write" / "_pending")
+    pr = store.get(proposal_id)
+    if pr is None:
+        raise click.ClickException(f"No pending proposal {proposal_id!r} "
+                                   "(see `vecgrep pending`).")
+    store.delete(proposal_id)
+    click.echo(f"✗ discarded {proposal_id} ({pr.doc_id})")
+
+
 if __name__ == "__main__":
     cli()

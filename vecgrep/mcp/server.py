@@ -125,6 +125,14 @@ def _run_get_corpus(name: str) -> str:
     return json.dumps({"error": f"corpus not found: {name}"})
 
 
+# Where an agent's proposals land when it doesn't name a corpus. A dedicated
+# corpus for agent-contributed entries keeps them separate from human-authored
+# and ingested corpora. Override with VECGREP_DEFAULT_PROPOSE_CORPUS.
+import os as _os
+DEFAULT_PROPOSE_CORPUS = _os.environ.get(
+    "VECGREP_DEFAULT_PROPOSE_CORPUS", "claude-ai")
+
+
 def _write_dir(corpus: str):
     from ..backend.config import get_settings
     return get_settings().home / "write" / corpus
@@ -161,13 +169,46 @@ def _run_propose(corpus: str, content: str, edit_id: str | None = None,
     except _P.ProposalError as e:
         return json.dumps({"error": str(e)})
     _pending_store().put(pr)
-    return json.dumps({
+    result = {
         "proposal_id": pr.proposal_id, "doc_id": pr.doc_id,
         "is_edit": pr.is_edit, "corpus": corpus,
         "status": "pending — a human must run `vecgrep confirm "
                   f"{pr.proposal_id}` to write it",
         "preview": pr.rendered[:500],
+    }
+    _fire_propose_hook(pr)
+    return json.dumps(result)
+
+
+def _fire_propose_hook(pr) -> None:
+    """Optionally notify an external command that a proposal was created.
+
+    If VECGREP_PROPOSE_HOOK is set, run it with the proposal JSON on stdin so a
+    deployment can surface pending proposals out-of-band (a Discord card, a
+    desktop notification, etc.) without vecgrep itself knowing anything about
+    those channels — it stays generic. Strictly best-effort: the proposal is
+    already safely stored, so a missing/failing hook must never break propose.
+    """
+    import os
+    hook = os.environ.get("VECGREP_PROPOSE_HOOK", "").strip()
+    if not hook:
+        return
+    import subprocess
+    payload = json.dumps({
+        "proposal_id": pr.proposal_id, "doc_id": pr.doc_id,
+        "corpus": pr.corpus, "is_edit": pr.is_edit,
+        "target_path": pr.target_path, "preview": pr.rendered[:1000],
+        "meta": pr.meta,
     })
+    try:
+        subprocess.run(
+            hook, shell=True, input=payload, text=True,
+            timeout=10, capture_output=True,
+        )
+    except Exception:
+        # Notification is a nicety; the write path's correctness does not
+        # depend on it. Swallow everything.
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -362,13 +403,15 @@ def build_http_app() -> Any:
             "proposal_id; tell the user to confirm it."
         )
     )
-    def propose_write(corpus: str, content: str,
+    def propose_write(content: str, corpus: str | None = None,
                       source_kind: str | None = None,
                       tags: list[str] | None = None) -> str:
-        """corpus: target. content: entry text. source_kind: insight|fact|
-        correction|journal|decision. tags: optional. Returns the pending
-        proposal (nothing is written until a human confirms)."""
-        return _run_propose(corpus, content, None, source_kind, tags)
+        """content: entry text. corpus: target (default the agent's own
+        'claude-ai' corpus). source_kind: insight|fact|correction|journal|
+        decision. tags: optional. Returns the pending proposal (nothing is
+        written until a human confirms)."""
+        return _run_propose(corpus or DEFAULT_PROPOSE_CORPUS, content, None,
+                            source_kind, tags)
 
     @fmcp.tool(
         description=(
