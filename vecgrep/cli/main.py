@@ -899,5 +899,55 @@ def edit(doc_id: str, content: str, corpus: str | None,
     _do_write(corpus, content, doc_id, source_kind, tags)
 
 
+@cli.command()
+def pending() -> None:
+    """List pending write proposals awaiting confirmation (from MCP propose_*)."""
+    import glob
+    pdir = get_settings().home / "write" / "_pending"
+    files = sorted(glob.glob(str(pdir / "*.json")))
+    if not files:
+        click.echo("No pending proposals.")
+        return
+    for f in files:
+        try:
+            d = json.loads(Path(f).read_text())
+        except Exception:
+            continue
+        kind = "edit" if d.get("is_edit") else "new"
+        click.echo(f"{d.get('proposal_id')}  [{kind}] {d.get('doc_id')} "
+                   f"({d.get('corpus')})  origin={d.get('meta', {}).get('origin', '?')}")
+
+
+@cli.command()
+@click.argument("proposal_id")
+@click.option("--ack", default=None,
+              help="For protected-tier docs: re-state the exact doc id to confirm.")
+def confirm(proposal_id: str, ack: str | None) -> None:
+    """Confirm a pending write proposal (the human authorization step). This is
+    what turns an MCP-proposed entry into an actual write — bots propose, you
+    confirm."""
+    import getpass
+    from ..backend.write import confirm as _C
+    from ..backend.write.proposal import _slug_prefix  # noqa: F401 (kept for parity)
+
+    store = _C.ProposalStore(get_settings().home / "write" / "_pending")
+    pr = store.get(proposal_id)
+    if pr is None:
+        raise click.ClickException(f"No pending proposal {proposal_id!r} "
+                                   "(see `vecgrep pending`).")
+    corpus = pr.corpus
+    corpus_dir = get_settings().home / "write" / corpus
+    try:
+        res = _C.confirm(proposal_id, store, VecgrepService(ephemeral=False),
+                         corpus, corpus_dir, confirmed_by=getpass.getuser(),
+                         protected_ack=ack or pr.doc_id)
+    except _C.ConfirmError as e:
+        raise click.ClickException(str(e))
+    status = "✓" if res.ok else "⚠"
+    click.echo(f"{status} {res.doc_id} → {res.path}")
+    if not res.ok:
+        click.echo(f"  {res.message}")
+
+
 if __name__ == "__main__":
     cli()
