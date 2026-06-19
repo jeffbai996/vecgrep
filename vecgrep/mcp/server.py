@@ -231,6 +231,75 @@ def build_mcp_server() -> Any:
 # HTTP transport — FastMCP with json_response + stateless_http
 # ---------------------------------------------------------------------------
 
+# ── OAuth helpers ───────────────────────────────────────────────────────────
+# The MCP endpoint lives at <root>/mcp, but OAuth/RFC put discovery .well-known
+# at the ORIGIN ROOT. So the auth-SERVER issuer is the root (well-known +
+# /authorize + /token + /register land at root, where the SPA-free funnel root
+# serves them), while the protected RESOURCE is <root>/mcp (the thing being
+# guarded). One shared provider instance backs both the /mcp bearer gate (via
+# the sub-app's AuthSettings) and the root discovery routes (mounted by main.py)
+# so tokens issued at root validate on /mcp.
+
+_PROVIDER = None  # singleton — same token store for the gate + the root routes
+
+
+def _shared_provider():
+    global _PROVIDER
+    if _PROVIDER is None:
+        from ..backend.auth.provider import VecgrepOAuthProvider
+        _PROVIDER = VecgrepOAuthProvider()
+    return _PROVIDER
+
+
+def _oauth_issuer(issuer_url: str):
+    """Auth-server issuer = the ORIGIN ROOT (strip any /mcp path)."""
+    from pydantic import AnyHttpUrl
+    from urllib.parse import urlsplit
+    p = urlsplit(issuer_url)
+    return AnyHttpUrl(f"{p.scheme}://{p.netloc}")
+
+
+def _oauth_resource(issuer_url: str):
+    """Protected resource = the MCP endpoint itself (<root>/mcp)."""
+    from pydantic import AnyHttpUrl
+    from urllib.parse import urlsplit
+    p = urlsplit(issuer_url)
+    return AnyHttpUrl(f"{p.scheme}://{p.netloc}/mcp")
+
+
+def _oauth_client_reg():
+    """Dynamic Client Registration (RFC 7591): claude.ai self-registers instead
+    of needing a pre-shared client_id."""
+    from mcp.server.auth.settings import ClientRegistrationOptions
+    return ClientRegistrationOptions(
+        enabled=True, valid_scopes=["read", "propose"], default_scopes=["read"],
+    )
+
+
+def build_oauth_root_routes(oauth_issuer_url: str) -> list:
+    """Return the OAuth discovery + auth routes to mount at the PARENT app ROOT
+    (ahead of the SPA catch-all). These serve the .well-known JSON, /authorize,
+    /token, /register at the origin root where the SDK advertises them and where
+    claude.ai looks. Shares the provider with the /mcp bearer gate."""
+    _require_mcp()
+    from mcp.server.auth.routes import (
+        create_auth_routes, create_protected_resource_routes,
+    )
+    issuer = _oauth_issuer(oauth_issuer_url)
+    resource = _oauth_resource(oauth_issuer_url)
+    routes = create_auth_routes(
+        provider=_shared_provider(),
+        issuer_url=issuer,
+        client_registration_options=_oauth_client_reg(),
+    )
+    routes += create_protected_resource_routes(
+        resource_url=resource,
+        authorization_servers=[issuer],
+        scopes_supported=["read", "propose"],
+    )
+    return routes
+
+
 def build_http_app(oauth_issuer_url: str | None = None) -> Any:
     """Build a Starlette ASGI app for the MCP HTTP endpoint.
 
@@ -267,25 +336,14 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
     # reaches it over localhost/tailnet, or via the OAuth-less secret path).
     fmcp_kwargs: dict = {}
     if oauth_issuer_url:
-        from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
-        from pydantic import AnyHttpUrl
-        from ..backend.auth.provider import VecgrepOAuthProvider
-        issuer = AnyHttpUrl(oauth_issuer_url)
+        from mcp.server.auth.settings import AuthSettings
         fmcp_kwargs["auth"] = AuthSettings(
-            issuer_url=issuer,
-            resource_server_url=issuer,
+            issuer_url=_oauth_issuer(oauth_issuer_url),
+            resource_server_url=_oauth_resource(oauth_issuer_url),
             required_scopes=["read"],
-            # Dynamic Client Registration (RFC 7591): claude.ai self-registers
-            # rather than needing a pre-shared client_id. Without this the
-            # well-known advertises no registration_endpoint and the client is
-            # stuck asking for a client_id it can't get.
-            client_registration_options=ClientRegistrationOptions(
-                enabled=True,
-                valid_scopes=["read", "propose"],
-                default_scopes=["read"],
-            ),
+            client_registration_options=_oauth_client_reg(),
         )
-        fmcp_kwargs["auth_server_provider"] = VecgrepOAuthProvider()
+        fmcp_kwargs["auth_server_provider"] = _shared_provider()
 
     fmcp = FastMCP("vecgrep", **fmcp_kwargs)
     fmcp.settings.json_response = True

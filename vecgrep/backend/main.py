@@ -118,6 +118,19 @@ def create_app() -> FastAPI:
     else:
         logger.warning("vecgrep[mcp] extra not installed; /mcp endpoint not mounted")
 
+    # OAuth discovery + auth routes at the ROOT, BEFORE the SPA catch-all below.
+    # The SDK advertises .well-known/oauth-* at the origin root; without these
+    # here the SPA fallback would answer them with HTML and break discovery.
+    from .config import get_settings as _gs
+    _s = _gs()
+    if mcp_http_app is not None and _s.oauth_enabled and _s.oauth_issuer_url:
+        try:
+            from ..mcp.server import build_oauth_root_routes
+            for _r in build_oauth_root_routes(_s.oauth_issuer_url):
+                app.router.routes.append(_r)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("OAuth root routes not mounted: %s", e)
+
     if FRONTEND_DIR.is_dir():
         app.mount(
             "/assets",
