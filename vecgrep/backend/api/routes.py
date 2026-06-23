@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -33,9 +34,15 @@ def require_token(authorization: str | None = Header(default=None)) -> None:
     expected = get_settings().api_token
     if not expected:
         return
+    # Strip the CONFIGURED token too, not just the client's. A trailing newline
+    # from an env or file read (extremely common) otherwise mismatches every
+    # valid request — locking you out of your own server with a 403 that's hard
+    # to diagnose. compare_digest keeps the check constant-time.
+    expected = expected.strip()
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
-    if authorization[len("Bearer ") :].strip() != expected:
+    provided = authorization[len("Bearer ") :].strip()
+    if not hmac.compare_digest(provided, expected):
         raise HTTPException(status_code=403, detail="Invalid bearer token")
 
 
