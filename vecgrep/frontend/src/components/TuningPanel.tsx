@@ -83,7 +83,7 @@ export default function TuningPanel({ tuning, onChange }: Props) {
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="w-full px-3 py-2 flex items-center justify-between text-xs font-mono text-zinc-500 hover:text-zinc-300 transition-colors"
+        className="w-full px-3 py-2 flex items-center justify-between text-xs font-mono text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/40 rounded transition-colors"
         title="adjust how raw retriever scores map to display percentages"
       >
         <span className="flex items-center gap-2">

@@ -149,7 +149,22 @@ export default function ResultList({ hits, searching, tuning }: Props) {
 
   if (searching && !hits) {
     return (
-      <div className="text-zinc-500 font-mono text-sm">searching...</div>
+      <div className="space-y-3" aria-busy="true" aria-label="searching">
+        {[0, 1, 2].map((i) => (
+          <div
+            key={i}
+            className="border border-zinc-800 rounded p-3 animate-pulse"
+          >
+            <div className="flex items-center gap-2 mb-2">
+              <div className="h-3 w-10 bg-zinc-800 rounded" />
+              <div className="h-3 w-32 bg-zinc-800/70 rounded" />
+            </div>
+            <div className="h-3 w-full bg-zinc-800/60 rounded mb-1.5" />
+            <div className="h-3 w-11/12 bg-zinc-800/60 rounded mb-1.5" />
+            <div className="h-3 w-4/6 bg-zinc-800/50 rounded" />
+          </div>
+        ))}
+      </div>
     );
   }
   if (hits === null) {
@@ -226,7 +241,7 @@ export default function ResultList({ hits, searching, tuning }: Props) {
                   toggleExpand(h);
                 }
               }}
-              className={`font-mono text-sm leading-relaxed whitespace-pre-wrap -mx-1 px-1 py-0.5 rounded transition-colors ${
+              className={`font-mono text-sm leading-relaxed whitespace-pre-wrap break-words -mx-1 px-1 py-0.5 rounded transition-colors ${
                 h.chunk_id ? "cursor-pointer hover:bg-zinc-900/30" : ""
               } ${isOpen ? "bg-zinc-900/20" : ""}`}
               title={h.chunk_id ? (isOpen ? "click to collapse (Esc)" : "click to expand context") : ""}
@@ -324,7 +339,7 @@ function ExpandedView({
         </span>
         <span className="text-zinc-600">click row or Esc to collapse</span>
       </div>
-      <div className="max-h-[600px] overflow-y-auto pr-2 border-l-2 border-zinc-800 pl-3">
+      <div className="max-h-[600px] overflow-y-auto pr-2 border-l-2 border-zinc-800 pl-3 whitespace-pre-wrap break-words">
         {d.before && <span className="text-zinc-500">{d.before}</span>}
         <mark
           ref={markRef}
