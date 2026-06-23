@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -29,6 +30,21 @@ CREATE TABLE IF NOT EXISTS embed_cache (
 );
 """
 
+# Row cap so the cache can't grow without bound. Each (text, model) entry is a
+# JSON-encoded vector — ~21 KB for a 1024-dim model — so 50k rows holds the DB
+# near ~1 GB. That's far more than any live working set (a few thousand chunks),
+# so the FIFO eviction below only ever sheds stale orphans: old chunk texts left
+# behind when a source file changes and re-chunks, which never hit cache again.
+# Set VECGREP_EMBED_CACHE_MAX_ROWS <= 0 to disable the cap.
+DEFAULT_MAX_ROWS = 50_000
+
+
+def _max_rows() -> int:
+    try:
+        return int(os.environ.get("VECGREP_EMBED_CACHE_MAX_ROWS", DEFAULT_MAX_ROWS))
+    except ValueError:
+        return DEFAULT_MAX_ROWS
+
 
 class EmbedCache:
     def __init__(self, db_path: Path) -> None:
@@ -39,6 +55,8 @@ class EmbedCache:
         self._conn.execute(_SCHEMA)
         self._conn.commit()
         self._lock = threading.Lock()
+        # Resolved once per instance so tests can set the env before construction.
+        self._max_rows = _max_rows()
 
     @staticmethod
     def _sha(text: str) -> str:
@@ -77,7 +95,27 @@ class EmbedCache:
                 "VALUES (?, ?, ?)",
                 rows,
             )
+            self._evict_over_cap_locked()
             self._conn.commit()
+
+    def _evict_over_cap_locked(self) -> None:
+        """Drop the oldest rows if over the cap. Caller must hold self._lock.
+
+        Oldest = lowest rowid = earliest inserted (FIFO). sqlite reuses the
+        freed pages for subsequent inserts, so the file stabilizes near the cap
+        instead of growing forever. No VACUUM needed.
+        """
+        if self._max_rows <= 0:
+            return
+        (count,) = self._conn.execute("SELECT COUNT(*) FROM embed_cache").fetchone()
+        overage = count - self._max_rows
+        if overage <= 0:
+            return
+        self._conn.execute(
+            "DELETE FROM embed_cache WHERE rowid IN "
+            "(SELECT rowid FROM embed_cache ORDER BY rowid ASC LIMIT ?)",
+            (overage,),
+        )
 
     def stats(self) -> dict:
         with self._lock:
