@@ -187,6 +187,8 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 | `VECGREP_API_TOKEN` | unset | If set, `/api/*` requires `Authorization: Bearer <token>` (health stays public) |
 | `VECGREP_TOP_K` | `5` | Default `--top` value |
 | `VECGREP_BM25_WEIGHT` | `1.5` | Weight on BM25 contribution to RRF fusion. >1 boosts literal-keyword matches over semantic noise on short queries. Set to `1.0` for pure RRF, higher for keyword-leaning ranking. |
+| `VECGREP_BM25_COVERAGE_MODE` | `penalty` | How BM25 treats docs that match only some query tokens. `penalty` keeps them but demotes the score by `(matched/total)²`; `filter` drops anything below a coverage threshold (higher precision, but can zero out the BM25 half of a multi-token query). |
+| `VECGREP_EMBED_CACHE_MAX_ROWS` | `50000` | Row cap on the sqlite embedding cache (~1 GB at a 1024-dim model). Oldest entries are evicted first once over the cap. Set `<= 0` to disable the cap. |
 
 ## Web UI
 
@@ -298,7 +300,7 @@ The plan is short and ordered. Make search good first, connect it to where you a
 
 **v0.5 — power features**
 - ✅ `--explain` — per-retriever score breakdown (cosine, BM25, RRF, rerank)
-- ✅ Embedding cache — sqlite-backed `(model, sha256(text)) → vector` cache, free re-indexes
+- ✅ Embedding cache — sqlite-backed `(model, sha256(text)) → vector` cache, free re-indexes. Row-capped (oldest evicted first) so it can't grow without bound.
 - ✅ `vecgrep corpora migrate` — re-embed a corpus to a new backend / model in place
 - ✅ Bearer-token auth for `/api/*` — set `VECGREP_API_TOKEN` to lock down a remote-bound server
 
@@ -314,6 +316,7 @@ The plan is short and ordered. Make search good first, connect it to where you a
 - ✅ Per-chunk `doc_timestamp` extraction + tunable per-corpus **recency decay** — stale chunks can't outrank fresh ones on wording alone (`vecgrep corpora decay`).
 - ✅ Model-aware confidence calibration — the displayed `%` means the same thing across embedding models; when reranking is on it's the cross-encoder's own score.
 - ✅ Post-retrieval dedup of overlapping same-source chunks.
+- ✅ BM25 partial-coverage **penalty** mode (default) — docs matching only some query tokens are kept but demoted `(matched/total)²`, instead of hard-dropped. An A/B on real corpora showed the old `filter` default returning zero hits on reasonable multi-token queries; `filter` is still available via `VECGREP_BM25_COVERAGE_MODE`.
 - ✅ Mixed-model serving — corpora on different embed models coexist; each queries with its own. (Was a hard-error before.)
 - ✅ Filter schema in `get_corpus` — the accepted `filters` expressions are now discoverable, not a black box.
 - `uvx vecgrep` verification + docs
