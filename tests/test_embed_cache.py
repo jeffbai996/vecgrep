@@ -82,3 +82,31 @@ def test_clear_drops_entries(tmp_path):
 
     cache.clear()
     assert cache.stats() == {}
+
+
+def test_cap_evicts_oldest_rows(tmp_path, monkeypatch):
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "5")
+    cache = EmbedCache(tmp_path / "embed.db")
+
+    old = [f"old-{i}" for i in range(5)]
+    new = [f"new-{i}" for i in range(5)]
+
+    # First batch fills exactly to the cap — nothing evicted.
+    cache.put_many("id", old, [[float(i)] for i in range(5)])
+    assert sum(cache.stats().values()) == 5
+
+    # Second batch pushes over — the 5 oldest (first batch) get dropped.
+    cache.put_many("id", new, [[float(i)] for i in range(5)])
+    assert sum(cache.stats().values()) == 5
+
+    # Oldest gone, newest survive.
+    assert cache.get_many("id", old) == {}
+    assert len(cache.get_many("id", new)) == 5
+
+
+def test_cap_disabled_when_nonpositive(tmp_path, monkeypatch):
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "0")
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts = [f"t{i}" for i in range(20)]
+    cache.put_many("id", texts, [[float(i)] for i in range(20)])
+    assert sum(cache.stats().values()) == 20
