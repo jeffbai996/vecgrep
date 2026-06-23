@@ -23,7 +23,12 @@ from .ingestion.adapters import (
     Document,
     detect_adapter,
 )
-from .ingestion.chunkers import Chunker, FixedTokenChunker, SentenceWindowChunker
+from .ingestion.chunkers import (
+    Chunker,
+    FixedTokenChunker,
+    MarkdownSectionChunker,
+    SentenceWindowChunker,
+)
 from .store import (
     BM25Store,
     Corpus,
@@ -38,6 +43,7 @@ from .store import (
 CHUNKERS: dict[str, type[Chunker]] = {
     "sentence_window": SentenceWindowChunker,
     "fixed_token": FixedTokenChunker,
+    "markdown_section": MarkdownSectionChunker,
 }
 
 SearchMode = Literal["hybrid", "vector", "bm25"]

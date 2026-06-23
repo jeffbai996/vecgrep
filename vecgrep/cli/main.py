@@ -147,7 +147,7 @@ def cli() -> None:
 @click.option(
     "--chunker",
     default="sentence_window",
-    type=click.Choice(["sentence_window", "fixed_token"]),
+    type=click.Choice(["sentence_window", "fixed_token", "markdown_section"]),
     show_default=True,
 )
 @click.option("--ephemeral", is_flag=True, help="Don't persist to disk.")
@@ -532,7 +532,7 @@ def serve(host: str | None, port: int | None, reload: bool) -> None:
 @click.option(
     "--chunker",
     default="sentence_window",
-    type=click.Choice(["sentence_window", "fixed_token"]),
+    type=click.Choice(["sentence_window", "fixed_token", "markdown_section"]),
     show_default=True,
 )
 @click.option(
