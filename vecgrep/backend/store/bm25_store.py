@@ -35,19 +35,27 @@ BM25_SHORT_QUERY_COVERAGE = 1.0
 BM25_LONG_QUERY_COVERAGE = 0.5
 
 # Coverage mode controls how partial-coverage docs are handled.
-#  - "filter" (default): hard rejection below the threshold. Safe but loses
+#  - "penalty" (default): keep partial-coverage docs but multiply their BM25
+#    score by (K/N) ** PENALTY_EXPONENT, where K is the number of distinct
+#    query tokens the doc matches and N is the total. Zero-overlap docs are
+#    still excluded — no point keeping pure noise.
+#  - "filter": hard rejection below the threshold. Higher precision, but loses
 #    legitimate signal when a topic is split across chunks (e.g. "glucose"
-#    appears in one chunk, "monitoring" in the neighbour, neither alone).
-#  - "penalty": keep partial-coverage docs but multiply their BM25 score by
-#    (K/N) ** PENALTY_EXPONENT, where K is the number of distinct query
-#    tokens the doc matches and N is the total. Zero-overlap docs are still
-#    excluded — no point keeping pure noise.
+#    appears in one chunk, "monitoring" in the neighbour, neither alone) — and
+#    can drop *every* hit on a multi-token query when no single chunk clears
+#    the coverage bar, silently zeroing the BM25 half of a hybrid search.
+# Default is penalty: a dogfood A/B on real corpora showed filter returning
+# zero hits on reasonable multi-token queries, while penalty recovered the
+# relevant chunks and (via the exponent below) correctly demoted them beneath
+# full-coverage hits. Override per-call via env var; the safety hatch fully
+# disables coverage handling entirely.
+#
 # The exponent defaults to 2.0: linear (exp=1) is too gentle — a
 # single-token match at 0.5 coverage only loses half its score, which often
 # isn't enough to demote a high-IDF partial match below a genuine
 # full-coverage hit. Quadratic gives 0.25 at 0.5 coverage, which empirically
 # is firm enough to flip the order on the cases that motivated this fix.
-BM25_COVERAGE_MODE_DEFAULT = "filter"
+BM25_COVERAGE_MODE_DEFAULT = "penalty"
 BM25_COVERAGE_PENALTY_EXPONENT = 2.0
 
 

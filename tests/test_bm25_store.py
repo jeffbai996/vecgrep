@@ -88,13 +88,15 @@ def test_drop_removes_pickle(tmp_path):
     assert not pkl.exists()
 
 
-def test_short_query_requires_full_coverage():
+def test_short_query_requires_full_coverage(monkeypatch: pytest.MonkeyPatch):
     """2-token query against partial-match doc should not return that doc.
 
+    Filter mode is now opt-in (penalty is the default), so pin it explicitly.
     Reproduces the 'glucose monitoring' floods-the-corpus bug: doc with
     only 'monitoring' (and no 'glucose') used to score on its IDF alone
     and beat genuine vector hits in the fused ranking.
     """
+    monkeypatch.setenv("VECGREP_BM25_COVERAGE_MODE", "filter")
     store = BM25Store(None)
     store.upsert(
         "t",
@@ -128,8 +130,13 @@ def test_disable_coverage_filter_via_env(monkeypatch: pytest.MonkeyPatch):
     assert ids == ["a", "b"], f"both docs should return when filter is off, got {ids}"
 
 
-def test_long_query_partial_match_meets_threshold():
-    """5-token query: 50% threshold = need 3 distinct tokens. Doc with 3/5 wins."""
+def test_long_query_partial_match_meets_threshold(monkeypatch: pytest.MonkeyPatch):
+    """5-token query under filter mode: 50% threshold = need 3 distinct tokens.
+
+    Doc with 3/5 survives, doc with 1/5 is dropped. Filter is opt-in now, so
+    set it explicitly.
+    """
+    monkeypatch.setenv("VECGREP_BM25_COVERAGE_MODE", "filter")
     store = BM25Store(None)
     store.upsert(
         "t",
@@ -148,13 +155,15 @@ def test_long_query_partial_match_meets_threshold():
     assert "b" not in ids, f"doc covering 1/5 tokens should be filtered, got {ids}"
 
 
-def test_fallback_path_respects_coverage():
+def test_fallback_path_respects_coverage(monkeypatch: pytest.MonkeyPatch):
     """Fallback path (all BM25 scores zero) must also enforce coverage.
 
-    Forced by inserting only one doc — single-doc corpus zeroes all IDF,
-    so BM25Okapi.get_scores returns zeros and the token-overlap fallback
-    fires. Without gating, the fallback would re-introduce the bug.
+    Filter mode (opt-in now) gates the fallback too. Forced by inserting only
+    one doc — single-doc corpus zeroes all IDF, so BM25Okapi.get_scores returns
+    zeros and the token-overlap fallback fires. Without gating, the fallback
+    would re-introduce the bug.
     """
+    monkeypatch.setenv("VECGREP_BM25_COVERAGE_MODE", "filter")
     store = BM25Store(None)
     store.upsert(
         "t",
@@ -166,26 +175,33 @@ def test_fallback_path_respects_coverage():
     assert hits == [], f"partial-coverage doc must not surface via fallback, got {hits}"
 
 
-def test_filter_mode_is_default():
-    """No env var set -> filter behavior (hard rejection of partial coverage).
+def test_penalty_mode_is_default():
+    """No env var set -> penalty behavior (partial coverage kept but demoted).
 
-    Belt-and-suspenders alongside `test_short_query_requires_full_coverage`:
-    pin the contract that the default mode is filter, even after the penalty
-    mode lands. If a future change flips the default, this test fails first.
+    Pins the contract that the default mode is penalty. A dogfood A/B showed
+    filter silently zeroing the BM25 half on reasonable multi-token queries,
+    so the default flipped from filter to penalty. If a future change flips it
+    back, this test fails first. The partial-match doc must surface (recovered
+    signal) but rank beneath the full-coverage doc (correct demotion).
     """
     store = BM25Store(None)
     store.upsert(
         "t",
-        ids=["a", "b"],
+        # Filler docs keep IDF non-zero so both query tokens stay discriminative.
+        ids=["a", "b", "f1", "f2", "f3"],
         texts=[
-            "ibkr terminal monitoring server",  # only "monitoring"
-            "glucose monitoring CGM continuous",  # both
+            "glucose monitoring CGM continuous reading",  # 2/2 -> full coverage
+            "ibkr terminal monitoring server logs",  # 1/2 -> partial, demoted
+            "totally unrelated filler one",
+            "totally unrelated filler two",
+            "totally unrelated filler three",
         ],
-        payloads=[{"source_id": "1"}, {"source_id": "2"}],
+        payloads=[{"source_id": str(i)} for i in range(5)],
     )
     hits = store.search("t", "glucose monitoring", top_k=5)
     ids = [h[0] for h in hits]
-    assert ids == ["b"], f"default (filter) mode should drop partial, got {ids}"
+    assert "a" in ids and "b" in ids, f"penalty default should keep partial, got {ids}"
+    assert ids.index("a") < ids.index("b"), f"full-coverage doc should rank first, got {ids}"
 
 
 def test_penalty_mode_keeps_partial_match_with_demoted_score(monkeypatch: pytest.MonkeyPatch):
