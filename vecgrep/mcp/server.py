@@ -133,6 +133,31 @@ DEFAULT_PROPOSE_CORPUS = _os.environ.get(
     "VECGREP_DEFAULT_PROPOSE_CORPUS", "claude-ai")
 
 
+def _allowed_propose_corpora() -> set[str]:
+    """The corpora an agent is permitted to propose into. DEFAULT-DENY: only the
+    dedicated propose corpus is allowed unless the operator explicitly widens the
+    set via VECGREP_PROPOSE_ALLOWED_CORPORA (comma-separated). This is the wall
+    that keeps an agent -- or a prompt injection in the untrusted content it
+    ingested -- from landing a proposal in a shared/human corpus that a confirm
+    would then publish. The default corpus is always allowed."""
+    raw = _os.environ.get("VECGREP_PROPOSE_ALLOWED_CORPORA", "").strip()
+    allowed = {c.strip() for c in raw.split(",") if c.strip()}
+    allowed.add(DEFAULT_PROPOSE_CORPUS)
+    return allowed
+
+
+# Cap on a single proposal's content. Without it an oversized blob is accepted,
+# then OOMs/times-out the embed at confirm time AFTER the file is already on disk
+# (a ghost entry). Reject it up front. Override with VECGREP_MAX_PROPOSAL_BYTES.
+MAX_PROPOSAL_CONTENT_BYTES = int(
+    _os.environ.get("VECGREP_MAX_PROPOSAL_BYTES", str(1_000_000)))
+
+# How much of the rendered proposal to echo back for review. Long enough to see
+# the whole of a normal entry (the old 500 cap hid the body of anything real).
+PROPOSE_PREVIEW_CHARS = int(
+    _os.environ.get("VECGREP_PROPOSE_PREVIEW_CHARS", str(4000)))
+
+
 def _write_dir(corpus: str):
     from ..backend.config import get_settings
     return get_settings().home / "write" / corpus
@@ -157,6 +182,22 @@ def _run_propose(corpus: str, content: str, edit_id: str | None = None,
     JSON {proposal_id, doc_id, is_edit, preview} or {error}."""
     from ..backend.write import proposal as _P
 
+    # Enforce the wall at the TOOL boundary, BEFORE creating any directory or
+    # pending proposal: the corpus must be agent-writable, and the content must
+    # be within the size cap. A rejected proposal leaves nothing on disk.
+    allowed = _allowed_propose_corpora()
+    if corpus not in allowed:
+        return json.dumps({"error": (
+            f"corpus {corpus!r} is not agent-writable (default-deny). "
+            f"Allowed: {sorted(allowed)}. An operator widens this with "
+            f"VECGREP_PROPOSE_ALLOWED_CORPORA. This guard keeps an agent from "
+            f"landing a proposal in a shared corpus.")})
+    n_bytes = len(content.encode("utf-8"))
+    if n_bytes > MAX_PROPOSAL_CONTENT_BYTES:
+        return json.dumps({"error": (
+            f"content is {n_bytes} bytes, over the {MAX_PROPOSAL_CONTENT_BYTES}"
+            f"-byte proposal cap. Split it into smaller entries.")})
+
     corpus_dir = _write_dir(corpus)
     corpus_dir.mkdir(parents=True, exist_ok=True)
     meta = {"origin": origin}
@@ -174,7 +215,8 @@ def _run_propose(corpus: str, content: str, edit_id: str | None = None,
         "is_edit": pr.is_edit, "corpus": corpus,
         "status": "pending — a human must run `vecgrep confirm "
                   f"{pr.proposal_id}` to write it",
-        "preview": pr.rendered[:500],
+        "preview": (pr.rendered if len(pr.rendered) <= PROPOSE_PREVIEW_CHARS
+                    else pr.rendered[:PROPOSE_PREVIEW_CHARS] + "\n... (truncated)"),
     }
     _fire_propose_hook(pr)
     return json.dumps(result)
