@@ -84,6 +84,17 @@ BM25_DISPLAY_TOP = 90.0
 # = better recall, marginal cost. 50 is a good default for small corpora.
 CANDIDATE_POOL = 50
 
+# Vector noise floor. The vector retriever returns a full top-50 even when
+# nothing matches semantically -- those sub-noise hits then flood RRF. Drop any
+# vector hit whose cosine sits MARGIN below the model's calibration center,
+# before fusion. The margin is deliberately gentle (0.10): for bge-m3
+# (center 0.55) that floors at ~0.45, which displays around 8% -- clearly junk,
+# nothing a user would want -- while leaving the real signal band untouched.
+# Raise VECGREP_COSINE_FLOOR_MARGIN to filter harder, set it high (>=1) to
+# disable. (Conservative on purpose: a too-aggressive floor hides weak-but-real
+# hits; the calibration + optional rerank already de-emphasize them.)
+COSINE_FLOOR_MARGIN = float(os.environ.get("VECGREP_COSINE_FLOOR_MARGIN", "0.10"))
+
 # Stable namespace for chunk IDs. Lets BM25 and Qdrant reference the same
 # chunks deterministically — re-indexing a source with the same content
 # regenerates the same IDs.
@@ -467,6 +478,11 @@ class VecgrepService:
             # raising forever on a stale cached backend.
             qv = self._embed_query_with_failover(corpus, query)
             vector_hits = self.store.search(collection, qv, top_k=CANDIDATE_POOL)
+            # Drop sub-noise vector hits before they reach fusion (see
+            # COSINE_FLOOR_MARGIN). Gentle by default; keeps the real signal band.
+            floor = _cosine_floor(corpus.embed_model)
+            if floor > 0.0:
+                vector_hits = [h for h in vector_hits if h.score >= floor]
 
         if mode in ("hybrid", "bm25"):
             bm25_hits = self.bm25.search(corpus.name, query, top_k=CANDIDATE_POOL)
@@ -1186,6 +1202,13 @@ def _calibration_for(model: str | None) -> tuple[float, float]:
     if model and model in _MODEL_CALIBRATION:
         return _MODEL_CALIBRATION[model]
     return CALIBRATION_CENTER, CALIBRATION_SLOPE
+
+
+def _cosine_floor(model: str | None) -> float:
+    """The minimum cosine a vector hit must clear to enter fusion: the model's
+    calibration center minus COSINE_FLOOR_MARGIN. <=0 means no floor."""
+    center, _ = _calibration_for(model)
+    return max(0.0, center - COSINE_FLOOR_MARGIN)
 
 
 def _cosine_to_pct(
