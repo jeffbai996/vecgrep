@@ -28,6 +28,11 @@ export default function Legend() {
           <Badge tone="violet">VK</Badge>
           <span className="text-zinc-400">both retrievers</span>
         </div>
+        <p className="text-[10px] text-zinc-500 leading-relaxed pt-0.5">
+          with <span className="text-zinc-400">rerank</span> on, hits also carry
+          a <span className="text-zinc-400">rerank</span> tag and the score comes
+          from the cross-encoder.
+        </p>
       </div>
 
       <div className="space-y-1.5">
