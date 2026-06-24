@@ -690,6 +690,32 @@ class VecgrepService:
     def list_corpora(self) -> list[Corpus]:
         return self.registry.list()
 
+    def calibration(self, corpus_name: str | None) -> dict:
+        """The display calibration the UI must mirror to reproduce a search's
+        similarity_pct for THIS corpus's embed model.
+
+        The web UI re-derives the displayed % client-side (so a tuning slider
+        updates without a round-trip). It used to seed those sliders from a
+        HARDCODED calibration (nomic's 0.66/12) regardless of the corpus's actual
+        model, so on a bge-m3 corpus (the default) the panel's % drifted from the
+        server's until the user matched the sliders by hand. Emitting the real
+        per-model calibration here lets the client seed the panel correctly for
+        whatever model the corpus is pinned to.
+        """
+        model = None
+        if corpus_name:
+            try:
+                model = self.registry.get(corpus_name).embed_model
+            except CorpusError:
+                model = None
+        center, slope = _calibration_for(model)
+        return {
+            "cosine_center": center,
+            "cosine_slope": slope,
+            "bm25_top": BM25_DISPLAY_TOP,
+            "bm25_floor": BM25_DISPLAY_FLOOR,
+        }
+
     def filterable_fields(self, corpus_name: str, max_values: int = 12) -> dict:
         """Describe what `filters` a caller can pass for this corpus.
 
