@@ -16,6 +16,16 @@ export type Corpus = {
 
 export type SearchMode = "hybrid" | "vector" | "bm25";
 
+// The score-display calibration the server used for the searched corpus's embed
+// model. The tuning UI seeds its sliders from this so the client-side re-derived
+// % matches the server (the old hardcoded default drifted on non-nomic corpora).
+export type Calibration = {
+  cosine_center: number;
+  cosine_slope: number;
+  bm25_top: number;
+  bm25_floor: number;
+};
+
 export type SearchHit = {
   similarity_pct: number;
   chunk: string;
@@ -91,7 +101,7 @@ export const api = {
     mode: SearchMode = "hybrid",
     rerank = false
   ) =>
-    request<{ hits: SearchHit[] }>("/api/search", {
+    request<{ hits: SearchHit[]; calibration?: Calibration }>("/api/search", {
       method: "POST",
       body: JSON.stringify({ query, corpus, top_k, mode, rerank }),
     }),

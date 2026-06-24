@@ -8,7 +8,13 @@ import Legend from "./components/Legend";
 import HowSearchWorks from "./components/HowSearchWorks";
 import AboutFooter from "./components/AboutFooter";
 import TuningPanel from "./components/TuningPanel";
-import { loadTuning, saveTuning, Tuning } from "./tuning";
+import {
+  loadTuning,
+  saveTuning,
+  hasSavedTuning,
+  tuningFromCalibration,
+  Tuning,
+} from "./tuning";
 
 export default function App() {
   const [corpora, setCorpora] = useState<Corpus[]>([]);
@@ -17,10 +23,15 @@ export default function App() {
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tuning, setTuning] = useState<Tuning>(() => loadTuning());
+  // Until the user customizes the sliders, seed them from each search's server
+  // calibration so the displayed % matches the server for whatever model the
+  // corpus uses. Once they drag a slider, their values win.
+  const [tuningCustom, setTuningCustom] = useState<boolean>(() => hasSavedTuning());
 
   const updateTuning = (t: Tuning) => {
     setTuning(t);
     saveTuning(t);
+    setTuningCustom(true);
   };
 
   const refresh = async () => {
@@ -46,6 +57,11 @@ export default function App() {
     try {
       const r = await api.search(query, selectedCorpus, topK, mode, rerank);
       setHits(r.hits);
+      // Seed the tuning sliders from the server's actual calibration for this
+      // corpus's model — but only while the user hasn't customized them.
+      if (!tuningCustom && r.calibration) {
+        setTuning((prev) => tuningFromCalibration(r.calibration!, prev));
+      }
     } catch (e) {
       setError(String((e as Error).message ?? e));
       setHits([]);

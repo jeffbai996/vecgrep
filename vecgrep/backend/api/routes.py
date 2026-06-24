@@ -12,6 +12,7 @@ from ..rerank import RerankerError
 from ..service import VecgrepService
 from ..store import CorpusError
 from .schemas import (
+    Calibration,
     ChunkWindow,
     ConfigOut,
     CorpusOut,
@@ -178,7 +179,8 @@ def search(req: SearchRequest) -> SearchResponse:
                 explain=r.explain or {},
             )
             for r in results
-        ]
+        ],
+        calibration=Calibration(**svc.calibration(req.corpus)),
     )
 
 

@@ -6,10 +6,14 @@
 // percentage under user-tunable parameters, so the user can drag a slider
 // and see scores update without a network round trip.
 //
-// Defaults mirror the server-side constants. If the user hasn't opened the
-// tuning panel, display percentages will match the server-rendered ones.
+// On every search the server now reports the calibration it ACTUALLY used for
+// that corpus's embed model (api.Calibration); App seeds these sliders from it
+// (unless the user has customized them), so the re-derived % matches the server
+// for any model. The defaults below are only the pre-first-search fallback —
+// set to bge-m3 (the default embedder) rather than the old nomic values, which
+// drifted from the server on every bge-m3 corpus.
 
-import { SearchHit } from "./api";
+import { Calibration, SearchHit } from "./api";
 
 export type Tuning = {
   cosineCenter: number; // sigmoid inflection point (0.0 - 1.0)
@@ -21,9 +25,9 @@ export type Tuning = {
 };
 
 export const DEFAULT_TUNING: Tuning = {
-  cosineCenter: 0.66,
-  cosineSlope: 12,
-  bm25Top: 100,
+  cosineCenter: 0.55,  // bge-m3 (the default embedder); server overrides per corpus
+  cosineSlope: 25,
+  bm25Top: 90,         // matches the server's BM25_DISPLAY_TOP
   bm25Floor: 25,
   bm25Bias: 0,
 };
@@ -39,6 +43,29 @@ export function loadTuning(): Tuning {
   } catch {
     return { ...DEFAULT_TUNING };
   }
+}
+
+// Whether the user has saved their own tuning. When false, App seeds the sliders
+// from each search's server calibration so the display matches the server; once
+// the user drags a slider (saveTuning), their values stick and take precedence.
+export function hasSavedTuning(): boolean {
+  try {
+    return window.localStorage.getItem(STORAGE_KEY) !== null;
+  } catch {
+    return false;
+  }
+}
+
+// Map a server calibration onto a Tuning, preserving the user's bm25Bias (the
+// server doesn't drive bias — it's a pure client-side display preference).
+export function tuningFromCalibration(cal: Calibration, prev: Tuning): Tuning {
+  return {
+    cosineCenter: cal.cosine_center,
+    cosineSlope: cal.cosine_slope,
+    bm25Top: cal.bm25_top,
+    bm25Floor: cal.bm25_floor,
+    bm25Bias: prev.bm25Bias,
+  };
 }
 
 export function saveTuning(t: Tuning) {

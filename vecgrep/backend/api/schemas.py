@@ -58,8 +58,19 @@ class ChunkWindow(BaseModel):
     window: int
 
 
+class Calibration(BaseModel):
+    """The score-display calibration the server used for this corpus's model, so
+    the web UI's client-side re-derivation of similarity_pct matches the server
+    instead of drifting from a hardcoded default."""
+    cosine_center: float
+    cosine_slope: float
+    bm25_top: float
+    bm25_floor: float
+
+
 class SearchResponse(BaseModel):
     hits: list[SearchHit]
+    calibration: Calibration | None = None
 
 
 class CorpusOut(BaseModel):
