@@ -25,24 +25,27 @@ export default function HowSearchWorks() {
           <Section title="hybrid retrieval (default)">
             Two retrievers run in parallel: a <Hl>vector</Hl> search (embeddings —
             finds <em>meaning</em>) and <Hl>BM25</Hl> (keywords — finds exact
-            words). Their rankings are fused with Reciprocal Rank Fusion, so a
-            hit that both agree on (
-            <span className="text-violet-300">VK</span>) rises to the top. This is
-            the right default for almost everything.
+            words). Each returns its top 50; their rankings are fused with{" "}
+            <Hl>Reciprocal Rank Fusion</Hl> (BM25 weighted 1.5&times; so genuine
+            keyword hits float over vector noise), so a hit that both agree on (
+            <span className="text-violet-300">VK</span>) rises to the top. Sub-noise
+            vector hits are dropped before fusion, and overlapping near-duplicate
+            chunks from one source are collapsed. The right default for almost
+            everything.
           </Section>
 
           <Section title="rerank (opt-in)">
-            With rerank on, the fused top candidates are re-scored by a{" "}
-            <Hl>cross-encoder</Hl> — a slower model that reads the query and each
-            chunk <em>together</em> instead of comparing pre-computed vectors.
-            It&apos;s more accurate on hard, meaning-heavy queries where plain
-            vector search whiffs.
+            With rerank on, the fused candidates are re-scored by a{" "}
+            <Hl>cross-encoder</Hl> (BAAI/bge-reranker-base) — a slower model that
+            reads the query and each chunk <em>together</em> instead of comparing
+            pre-computed vectors. It&apos;s more accurate on hard, meaning-heavy
+            queries where plain vector search whiffs.
             <br />
             <span className="text-amber-400/90">Tradeoff:</span> it adds roughly{" "}
-            <Hl>~120ms+</Hl> per search (vs ~12ms hybrid) and doesn&apos;t help —
-            can even hurt — on easy literal queries. So it&apos;s{" "}
-            <Hl>off by default</Hl>; flip it on when a hybrid search returns
-            near-misses for something you know is in there.
+            <Hl>~127ms</Hl> per search and doesn&apos;t help — can even hurt — on
+            easy literal queries. So it&apos;s <Hl>off by default</Hl>; flip it on
+            when a hybrid search returns near-misses for something you know is in
+            there. Reranked hits also gain a <Hl>rerank</Hl> tag.
           </Section>
 
           <Section title="reading the score">
@@ -50,8 +53,11 @@ export default function HowSearchWorks() {
             It&apos;s tuned per embedding model so the number means the same thing
             across corpora. Roughly: <span className="text-emerald-400">90%+</span>{" "}
             strong, <span className="text-amber-400">~50%</span> uncertain,{" "}
-            <span className="text-zinc-500">&lt;30%</span> likely noise. When
-            rerank is on the % comes straight from the cross-encoder.
+            <span className="text-zinc-500">&lt;30%</span> likely noise. BM25-only
+            hits (no cosine) are rescaled per query into a{" "}
+            <Hl>~25–90%</Hl> band so a real keyword match doesn&apos;t read as raw
+            noise. When rerank is on the % comes straight from the cross-encoder.
+            Hover any score to see the raw cosine / BM25 / RRF numbers.
           </Section>
 
           <Section title="recency">

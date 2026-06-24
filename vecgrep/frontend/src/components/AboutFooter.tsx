@@ -26,11 +26,16 @@ export default function AboutFooter() {
               vector (semantic)
             </div>
             <p className="text-zinc-300">
-              embeds your query and every chunk into a 1024-dim vector with
-              <span className="text-zinc-100"> bge-m3</span> by default (or a
-              lighter <span className="text-zinc-100">nomic-embed-text</span>, or
-              OpenAI&apos;s <span className="text-zinc-100">text-embedding-3-small</span>
-              as a fallback), then ranks by cosine similarity.
+              embeds your query and every chunk into a dense vector, then ranks
+              by cosine similarity. default model is Ollama{" "}
+              <span className="text-zinc-100">bge-m3</span> (1024-dim); a corpus
+              can instead be pinned to{" "}
+              <span className="text-zinc-100">nomic-embed-text</span> (768-dim,
+              lighter), <span className="text-zinc-100">mxbai-embed-large</span>{" "}
+              (1024-dim), or OpenAI&apos;s{" "}
+              <span className="text-zinc-100">text-embedding-3-small</span>{" "}
+              (1536-dim) as a fallback. each corpus remembers its own model, so
+              one server can query corpora built with different embedders.
             </p>
             <p className="text-zinc-400 text-xs mt-2">
               good at: paraphrase, concept-match, &ldquo;the idea is similar even
@@ -38,8 +43,10 @@ export default function AboutFooter() {
             </p>
             <p className="text-zinc-500 text-xs mt-1">
               weakness: has a noise floor for any English query &mdash; it always
-              finds <em>something</em> close to your sentence, so short rare-word
-              queries can drown in noise (calibration spreads the real range out).
+              finds <em>something</em> close to your sentence. vecgrep drops
+              vector hits whose cosine sits below the model&apos;s calibrated
+              floor <em>before</em> fusion, so sub-noise matches can&apos;t flood
+              the ranking; calibration then spreads the real range out.
             </p>
           </div>
 
@@ -100,21 +107,65 @@ export default function AboutFooter() {
           <h3 className="text-zinc-200 font-semibold mb-1">why the % can lie</h3>
           <p>
             vector cosine and BM25 raw scores aren&apos;t comparable. a BM25-only
-            hit&apos;s raw fused score is &lt; 2%, but if the keyword is genuinely
-            in the source it&apos;s a <em>real</em> match. vecgrep rescales the
-            displayed % per query so BM25-only hits land in a readable band
-            (60&ndash;90%); the underlying ranking is unchanged. trust the
-            badges and ranking order, not the absolute number.
+            hit&apos;s raw fused RRF score is around{" "}
+            <span className="text-zinc-300">1.6%</span>, but if the keyword is
+            genuinely in the source it&apos;s a <em>real</em> match. so vecgrep
+            rescales the displayed % per query: the strongest BM25 hit reads at{" "}
+            <span className="text-zinc-300">~90%</span> and weaker ones taper
+            down toward a <span className="text-zinc-300">~25%</span> floor. the
+            cosine % is a sigmoid <span className="text-zinc-100">calibrated
+            per embedding model</span> (each model parks its noise floor and
+            signal range in a different place), so the same % means the same
+            thing across corpora. when both retrievers fire, the higher of the
+            two signals wins &mdash; agreement should raise confidence, not
+            average it down. the underlying ranking always uses the raw fused
+            score; trust the badges and order over the absolute number.
           </p>
+        </section>
+
+        <section>
+          <h3 className="text-zinc-200 font-semibold mb-1">the pipeline, in order</h3>
+          <p>
+            <code className="text-zinc-300">retrieve (vector + BM25) → RRF fuse → recency decay → dedup → optional rerank → top-k</code>
+          </p>
+          <ul className="text-xs text-zinc-500 mt-2 space-y-1 list-disc list-inside">
+            <li>
+              <span className="text-zinc-400">recency decay</span> (optional,
+              per corpus): a hit&apos;s fused score is multiplied by{" "}
+              <code className="text-zinc-400">0.5 ** (age_days / half_life)</code>,
+              applied <em>before</em> the top-k cut so a fresh chunk can outrank
+              a stale one and wording alone can&apos;t float old content up. off
+              by default; undated chunks are never penalized. tuned fast for
+              chat/journal corpora, off for durable reference.
+            </li>
+            <li>
+              <span className="text-zinc-400">dedup</span>: the
+              sentence-window chunker emits overlapping windows, so one passage
+              can surface as several near-identical hits. vecgrep collapses
+              same-source hits whose character ranges overlap, keeping the
+              strongest, before truncating to top-k.
+            </li>
+            <li>
+              by default only <span className="text-zinc-400">active</span>{" "}
+              chunks are returned &mdash; if the write-tool has marked a chunk
+              superseded by a newer version, the stale one is hidden unless you
+              explicitly ask for it.
+            </li>
+          </ul>
         </section>
 
         <section className="pt-2 border-t border-zinc-800/50">
           <p className="text-xs text-zinc-500">
             optional: <span className="text-zinc-300">rerank</span> in the
             search bar runs a cross-encoder (BAAI/bge-reranker-base) over the
-            top results. expensive but more precise &mdash; useful when the
-            top-N look noisy and you want the model to look at query and
-            chunk together.
+            fused candidate pool. it reads query and chunk <em>together</em>
+            instead of comparing pre-computed vectors &mdash; more precise on
+            hard, paraphrase-heavy queries, but it adds latency (~127ms on a
+            small pool) and can be a wash on easy literal queries, so it&apos;s
+            off by default. when it&apos;s on, every hit also picks up a{" "}
+            <span className="text-zinc-400">rerank</span> tag and the displayed
+            % comes straight from the cross-encoder&apos;s own score (the
+            cleanest P(relevant) proxy), not the cosine/BM25 mix.
           </p>
         </section>
       </div>
