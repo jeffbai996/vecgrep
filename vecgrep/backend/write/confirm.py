@@ -15,6 +15,8 @@ but never confirm) + the no-read->write-loop bar is the wall (confirm_gate.py).
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +27,52 @@ def _body_of(rendered: str) -> str:
     """Extract the body below the YAML frontmatter of a rendered doc."""
     parts = rendered.split("---", 2)
     return parts[2].strip() if len(parts) >= 3 else rendered.strip()
+
+
+def _writethrough_cmd(corpus: str) -> str | None:
+    """A corpus may be a downstream MIRROR of some upstream store (e.g. a
+    transcript dump). For such a corpus, writing the local mirror file is wrong —
+    the next dump clobbers it. Instead, an operator points the corpus at its
+    upstream via env `VECGREP_WRITETHROUGH_<corpus>=<command>`. On confirm, that
+    command receives the operation as JSON on stdin and performs the REAL write;
+    vecgrep skips its mirror write/delete + embed (the upstream's own dump
+    re-renders the mirror). Keeps vecgrep generic — the upstream-specific routing
+    lives entirely in the operator's command, never in vecgrep source.
+
+    Corpus names aren't valid env-var suffixes verbatim (dashes), so we map any
+    non-alphanumeric char to '_' and uppercase: 'squad-store' → SQUAD_STORE."""
+    key = "VECGREP_WRITETHROUGH_" + "".join(
+        c.upper() if c.isalnum() else "_" for c in corpus)
+    cmd = os.environ.get(key, "").strip()
+    return cmd or None
+
+
+def _run_writethrough(cmd: str, *, op: str, corpus: str, doc_id: str,
+                      body: str, confirmed_by: str) -> ConfirmResult:
+    """Run the operator's write-through command with the op as JSON on stdin.
+    The command is responsible for the REAL upstream write; a non-zero exit (or
+    spawn failure) is surfaced as a failed confirm so the proposal is NOT
+    consumed — the human can retry once the upstream is reachable again."""
+    payload = json.dumps({
+        "op": op, "corpus": corpus, "doc_id": doc_id,
+        "body": body, "confirmed_by": confirmed_by,
+    })
+    try:
+        proc = subprocess.run(
+            ["bash", "-lc", cmd], input=payload, text=True,
+            capture_output=True, timeout=60,
+        )
+    except Exception as e:
+        return ConfirmResult(ok=False, doc_id=doc_id, path="",
+                             message=f"write-through spawn failed: {e}")
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()[:500]
+        return ConfirmResult(ok=False, doc_id=doc_id, path="",
+                             message=f"write-through failed (exit {proc.returncode}): {err}")
+    out = (proc.stdout or "").strip()
+    return ConfirmResult(ok=True, doc_id=doc_id, path="",
+                         message=f"{op} routed upstream ({corpus}): {out}" if out
+                                 else f"{op} routed upstream ({corpus})")
 
 
 class ConfirmError(RuntimeError):
@@ -119,6 +167,31 @@ def confirm(
         )
 
     target = Path(proposal.target_path)
+
+    # ── WRITE-THROUGH: if this corpus is a mirror of an upstream store, route the
+    #    confirmed op there instead of touching the local mirror file. The human-
+    #    confirm wall already passed (confirmer required, above). Protected-tier
+    #    acks still apply on an edit/delete of an on-disk protected doc — check
+    #    before handing off so a protected entry can't be mutated upstream without
+    #    the exact-id ack. The upstream's own dump re-renders the mirror, so we do
+    #    NOT write/delete/embed locally here. Consumes the proposal on success.
+    wt_cmd = _writethrough_cmd(corpus)
+    if wt_cmd is not None:
+        op = "delete" if getattr(proposal, "is_delete", False) else (
+            "edit" if proposal.is_edit else "write")
+        if op in ("edit", "delete") and target.exists():
+            if "tier: protected" in target.read_text() \
+                    and (protected_ack or "").strip() != proposal.doc_id:
+                raise ConfirmError(
+                    f"{proposal.doc_id} is protected — re-state its exact id as "
+                    f"protected_ack to {op} it (got {protected_ack!r}).")
+        body = "" if op == "delete" else _body_of(proposal.rendered)
+        res = _run_writethrough(wt_cmd, op=op, corpus=corpus,
+                                doc_id=proposal.doc_id, body=body,
+                                confirmed_by=confirmer)
+        if res.ok:
+            store.delete(proposal_id)  # consume only on a successful upstream write
+        return res
 
     # ── DELETE: remove the target doc + its embeddings. Same human-confirm wall
     #    (confirmer required, checked above). The doc must still exist; a
