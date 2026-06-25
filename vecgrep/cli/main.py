@@ -913,7 +913,8 @@ def pending() -> None:
             d = json.loads(Path(f).read_text())
         except Exception:
             continue
-        kind = "edit" if d.get("is_edit") else "new"
+        kind = ("delete" if d.get("is_delete")
+                else "edit" if d.get("is_edit") else "new")
         click.echo(f"{d.get('proposal_id')}  [{kind}] {d.get('doc_id')} "
                    f"({d.get('corpus')})  origin={d.get('meta', {}).get('origin', '?')}")
 
@@ -944,9 +945,13 @@ def confirm(proposal_id: str, ack: str | None) -> None:
     except _C.ConfirmError as e:
         raise click.ClickException(str(e))
     status = "✓" if res.ok else "⚠"
-    click.echo(f"{status} {res.doc_id} → {res.path}")
-    if not res.ok:
-        click.echo(f"  {res.message}")
+    if getattr(pr, "is_delete", False):
+        # A delete has no destination path to arrow toward — show the outcome.
+        click.echo(f"{status} {res.message}")
+    else:
+        click.echo(f"{status} {res.doc_id} → {res.path}")
+        if not res.ok:
+            click.echo(f"  {res.message}")
 
 
 @cli.command()

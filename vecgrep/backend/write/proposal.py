@@ -32,12 +32,15 @@ class ProposalError(ValueError):
 class Proposal:
     """A pending, un-written proposal. The confirm step references proposal_id."""
     proposal_id: str          # stable handle a human confirm must cite
-    doc_id: str               # e.g. note-001 (new) or note-007 (edit target)
+    doc_id: str               # e.g. note-001 (new) or note-007 (edit/delete target)
     corpus: str
-    target_path: str          # where the file WOULD be written
-    rendered: str             # the full file content (frontmatter + body)
+    target_path: str          # where the file WOULD be written (or removed)
+    rendered: str             # full file content (write/edit) OR a removal preview
     is_edit: bool             # True = overwrite an existing doc; False = new
     meta: dict = field(default_factory=dict)
+    is_delete: bool = False   # True = REMOVE the target doc on confirm (no write).
+    # Default False keeps existing on-disk pending proposals (no is_delete key)
+    # deserializing cleanly via Proposal(**dict) — back-compat for the store.
 
 
 def _slug_prefix(corpus: str) -> str:
@@ -157,4 +160,60 @@ def propose(
         rendered=rendered,
         is_edit=is_edit,
         meta=meta,
+    )
+
+
+def propose_delete(
+    corpus: str,
+    delete_id: str,
+    corpus_dir: Path,
+    meta: dict | None = None,
+    proposal_id: str | None = None,
+) -> Proposal:
+    """Build a DELETE proposal — WRITES/REMOVES NOTHING. Confirming it (human-
+    gated) removes the doc file + its embeddings.
+
+    Mirrors propose()'s corpus-boundary safety: delete_id must be a plain
+    doc-id (prefix-NNN) so it can't escape corpus_dir via path separators/'..'.
+    The target must exist (you can't delete what isn't there). `rendered` carries
+    a human-readable preview of what WILL be removed, so the confirm card shows
+    the doomed entry rather than a blank — a delete you can't see is a delete you
+    can't review."""
+    meta = dict(meta or {})
+    meta.setdefault("origin", "bot-suggested")
+    if meta.get("origin") not in ORIGINS:
+        raise ProposalError(f"origin must be one of {ORIGINS}")
+    if not _ID_RE.match(delete_id):
+        raise ProposalError(
+            f"delete_id {delete_id!r} is not a valid doc id (expected "
+            f"prefix-NNN, e.g. note-007) — path separators and '..' are "
+            f"rejected so a delete can't escape the corpus directory."
+        )
+    base = corpus_dir.resolve()
+    target = (corpus_dir / f"{delete_id}.md").resolve()
+    if base not in target.parents:
+        raise ProposalError(
+            f"refusing target {target} outside corpus dir {base}"
+        )
+    if not target.exists():
+        raise ProposalError(
+            f"delete target {delete_id} does not exist in corpus {corpus!r}."
+        )
+    # Preview the doomed doc so the confirm step shows what's being removed.
+    try:
+        current = target.read_text()
+    except OSError:
+        current = ""
+    rendered = (f"# DELETE {delete_id} from {corpus}\n"
+                f"# The entry below will be REMOVED on confirm:\n\n{current}")
+    pid = proposal_id or f"prop-del-{delete_id}-{uuid.uuid4().hex[:8]}"
+    return Proposal(
+        proposal_id=pid,
+        doc_id=delete_id,
+        corpus=corpus,
+        target_path=str(target),
+        rendered=rendered,
+        is_edit=False,
+        meta=meta,
+        is_delete=True,
     )

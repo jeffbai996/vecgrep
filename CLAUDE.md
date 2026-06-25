@@ -29,7 +29,7 @@ vecgrep/frontend/        React + Tailwind, single page, built into dist/
 - `~/.vecgrep/` is the only persistence location. `--ephemeral` skips it.
 - Qdrant runs in **embedded** mode (`path=...`), no server, no Docker.
 - Errors that the user can fix (Ollama not running, model not pulled) get plain English messages with the exact command to fix.
-- **MCP transport stays read-only.** The MCP server exposes `search`, `list_corpora`, `get_corpus` only — never `index` or `delete`. This is what makes "expose `/mcp` over a public reverse proxy" a safe deployment pattern: a leaked or unauthed public endpoint cannot wipe or poison corpora. Destructive ops stay on the REST routes, which operators are expected to keep behind tailnet / VPN / localhost.
+- **MCP exposes no DIRECT mutation.** The stdio MCP server is read-only (`search`, `list_corpora`, `get_corpus`). The HTTP transport adds the `propose_*` family (`propose_write`, `propose_edit`, `propose_delete`) — but these write/remove **nothing**: each creates an inert pending proposal that a human turns into a real write/delete via `vecgrep confirm` (off-protocol). So even over a leaked/unauthed `/mcp` endpoint an agent can only *suggest* a change, never land one — and a `propose_delete` removes a doc + its embeddings only after that human confirm. Direct/immediate `index` and `delete` stay on the REST routes, which operators keep behind tailnet / VPN / localhost. The propose corpus set is default-deny (`VECGREP_PROPOSE_ALLOWED_CORPORA`), so a proposal can't even target a corpus the operator hasn't opened.
 
 ## Don'ts
 
