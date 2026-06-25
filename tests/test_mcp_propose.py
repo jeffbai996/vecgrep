@@ -190,3 +190,95 @@ def test_full_preview_not_truncated_at_500(home):
     r = json.loads(S._run_propose("notes", body))
     assert "(truncated)" not in r["preview"]
     assert r["preview"].count("para.") > 250
+
+
+# --- propose_delete: the inert, human-confirmed removal path (Jeff 2026-06-25) ---
+
+def _seed_doc(corpus, doc_id, body):
+    """Write a doc straight to the corpus write-dir (no embed). Lets the delete
+    tests target an existing file without a confirm→index round-trip — which
+    would open the embedded Qdrant a second time in-process and trip its
+    single-writer lock (a test-harness limitation, not a path users hit)."""
+    h = os.environ["VECGREP_HOME"]
+    d = os.path.join(h, "write", corpus)
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, f"{doc_id}.md")
+    with open(p, "w") as f:
+        f.write(f"---\nid: {doc_id}\ncorpus: {corpus}\n---\n\n{body}\n")
+    return p
+
+
+def test_propose_delete_removes_nothing_but_persists(home):
+    from vecgrep.mcp import server as S
+    _seed_doc("notes", "notes-001", "delete me later")
+    h = os.environ["VECGREP_HOME"]
+
+    r = json.loads(S._run_propose_delete("notes", "notes-001"))
+    assert r["proposal_id"] and r["is_delete"] is True
+    assert r["doc_id"] == "notes-001"
+    # The proposal is inert: the doc is STILL on disk, only a pending exists.
+    assert glob.glob(f"{h}/write/notes/notes-001.md")
+    assert glob.glob(f"{h}/write/_pending/*.json")
+    # Preview shows what WILL be removed.
+    assert "delete me later" in r["preview"] and "DELETE" in r["preview"]
+
+
+def test_propose_delete_gated_by_allowlist(home):
+    from vecgrep.mcp import server as S
+    r = json.loads(S._run_propose_delete("squad-shared", "squad-shared-007"))
+    assert "error" in r and "not agent-writable" in r["error"]
+    assert not glob.glob(f"{os.environ['VECGREP_HOME']}/write/_pending/*.json")
+
+
+def test_propose_delete_nonexistent_target_rejected(home):
+    from vecgrep.mcp import server as S
+    r = json.loads(S._run_propose_delete("notes", "notes-999"))
+    assert "error" in r and "does not exist" in r["error"]
+    assert not glob.glob(f"{os.environ['VECGREP_HOME']}/write/_pending/*.json")
+
+
+def test_propose_delete_rejects_path_escape(home):
+    # delete_id must be a plain prefix-NNN; a traversal id can't escape the corpus.
+    from vecgrep.mcp import server as S
+    r = json.loads(S._run_propose_delete("notes", "../../etc/passwd"))
+    assert "error" in r  # rejected by the id validator before any fs touch
+
+
+def test_confirm_delete_removes_file_and_pending(home):
+    from click.testing import CliRunner
+    from vecgrep.cli.main import cli
+    from vecgrep.mcp import server as S
+    _seed_doc("notes", "notes-001", "doomed entry")
+    h = os.environ["VECGREP_HOME"]
+
+    r = json.loads(S._run_propose_delete("notes", "notes-001"))
+    pid = r["proposal_id"]
+    runner = CliRunner()
+    # pending labels it as a delete
+    p = runner.invoke(cli, ["pending"])
+    assert pid in p.output and "[delete]" in p.output
+    # confirm performs the removal (delete_source no-ops cleanly on an un-indexed
+    # seed doc — the confirm swallows the de-index warning and removes the file)
+    c = runner.invoke(cli, ["confirm", pid])
+    assert c.exit_code == 0, c.output
+    assert "deleted" in c.output
+    # file gone, pending consumed
+    assert not glob.glob(f"{h}/write/notes/notes-001.md")
+    assert not glob.glob(f"{h}/write/_pending/*.json")
+    # confirming again fails (proposal consumed)
+    c2 = runner.invoke(cli, ["confirm", pid])
+    assert c2.exit_code != 0
+
+
+def test_discard_cancels_a_delete_proposal(home):
+    from click.testing import CliRunner
+    from vecgrep.cli.main import cli
+    from vecgrep.mcp import server as S
+    _seed_doc("notes", "notes-001", "keep me actually")
+    r = json.loads(S._run_propose_delete("notes", "notes-001"))
+    runner = CliRunner()
+    d = runner.invoke(cli, ["discard", r["proposal_id"]])
+    assert d.exit_code == 0
+    h = os.environ["VECGREP_HOME"]
+    # the doc survives — a discarded delete leaves the entry intact
+    assert glob.glob(f"{h}/write/notes/notes-001.md")

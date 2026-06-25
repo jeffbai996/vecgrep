@@ -119,6 +119,43 @@ def confirm(
         )
 
     target = Path(proposal.target_path)
+
+    # ── DELETE: remove the target doc + its embeddings. Same human-confirm wall
+    #    (confirmer required, checked above). The doc must still exist; a
+    #    protected doc still needs the exact-id ack so a delete can't be slipped
+    #    in by a bot suggestion. Returns early — no write/embed pipeline.
+    if getattr(proposal, "is_delete", False):
+        if not target.exists():
+            # Idempotent-ish: already gone. Clear the pending proposal, report it.
+            store.delete(proposal_id)
+            return ConfirmResult(
+                ok=True, doc_id=proposal.doc_id, path=str(target),
+                message=f"{proposal.doc_id} was already absent — nothing to delete.",
+            )
+        on_disk = target.read_text()
+        if "tier: protected" in on_disk and (protected_ack or "").strip() != proposal.doc_id:
+            raise ConfirmError(
+                f"{proposal.doc_id} is protected — re-state its exact id as "
+                f"protected_ack to confirm the DELETE (got {protected_ack!r})."
+            )
+        # Remove embeddings first (best-effort), then the file. Doing the index
+        # side first means a crash leaves an orphaned file (recoverable by a
+        # reindex), not orphaned vectors pointing at a missing file.
+        index_note = ""
+        try:
+            svc.delete_source(corpus, str(target))
+        except Exception as e:
+            index_note = f" (de-index warning: {e}; a reindex will reconcile)"
+        try:
+            target.unlink()
+        except OSError as e:
+            raise ConfirmError(f"could not remove {target}: {e}")
+        store.delete(proposal_id)
+        return ConfirmResult(
+            ok=True, doc_id=proposal.doc_id, path=str(target),
+            message=f"deleted {proposal.doc_id} from {corpus}{index_note}",
+        )
+
     # A NEW entry must not silently clobber an existing doc id (that'd be an
     # accidental overwrite, not an edit). An EDIT targets an existing id on
     # purpose and overwrites it in place — simple, no versioning.

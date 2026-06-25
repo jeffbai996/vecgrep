@@ -222,6 +222,40 @@ def _run_propose(corpus: str, content: str, edit_id: str | None = None,
     return json.dumps(result)
 
 
+def _run_propose_delete(corpus: str, delete_id: str,
+                        origin: str = "bot-suggested") -> str:
+    """PROPOSE a deletion — REMOVES NOTHING. Stores a pending delete-proposal a
+    human confirms later (`vecgrep confirm <id>`). Same default-deny corpus wall
+    as _run_propose: an agent can only propose deletes in an agent-writable
+    corpus, and nothing is removed until a human authorizes it off-protocol."""
+    from ..backend.write import proposal as _P
+
+    allowed = _allowed_propose_corpora()
+    if corpus not in allowed:
+        return json.dumps({"error": (
+            f"corpus {corpus!r} is not agent-writable (default-deny). "
+            f"Allowed: {sorted(allowed)}. An operator widens this with "
+            f"VECGREP_PROPOSE_ALLOWED_CORPORA. This guard keeps an agent from "
+            f"proposing a delete in a shared corpus.")})
+    corpus_dir = _write_dir(corpus)
+    try:
+        pr = _P.propose_delete(corpus, delete_id, corpus_dir,
+                               meta={"origin": origin})
+    except _P.ProposalError as e:
+        return json.dumps({"error": str(e)})
+    _pending_store().put(pr)
+    result = {
+        "proposal_id": pr.proposal_id, "doc_id": pr.doc_id,
+        "is_delete": True, "corpus": corpus,
+        "status": "pending — a human must run `vecgrep confirm "
+                  f"{pr.proposal_id}` to delete it",
+        "preview": (pr.rendered if len(pr.rendered) <= PROPOSE_PREVIEW_CHARS
+                    else pr.rendered[:PROPOSE_PREVIEW_CHARS] + "\n... (truncated)"),
+    }
+    _fire_propose_hook(pr)
+    return json.dumps(result)
+
+
 def _fire_propose_hook(pr) -> None:
     """Optionally notify an external command that a proposal was created.
 
@@ -470,6 +504,22 @@ def build_http_app() -> Any:
         if corpus is None:
             corpus = doc_id.rsplit("-", 1)[0] if "-" in doc_id else doc_id
         return _run_propose(corpus, content, doc_id, source_kind, tags)
+
+    @fmcp.tool(
+        description=(
+            "PROPOSE deleting an existing entry (by id, e.g. notes-007). Removes "
+            "NOTHING — creates a pending proposal a human confirms before the doc "
+            "+ its embeddings are removed. The preview shows the entry that WILL "
+            "be deleted. Returns the proposal_id; tell the user to confirm it."
+        )
+    )
+    def propose_delete(doc_id: str, corpus: str | None = None) -> str:
+        """doc_id: existing id to remove. corpus: inferred from id prefix if
+        omitted. Proposal only — a human must confirm before anything is
+        deleted. Same default-deny corpus gate as propose_write/edit."""
+        if corpus is None:
+            corpus = doc_id.rsplit("-", 1)[0] if "-" in doc_id else doc_id
+        return _run_propose_delete(corpus, doc_id)
 
     return fmcp.streamable_http_app()
 
