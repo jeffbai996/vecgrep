@@ -304,3 +304,22 @@ def test_no_writethrough_env_uses_normal_path(corpus_dir, store, monkeypatch):
                     confirmed_by="owner")
     assert res.ok and Path(pr.target_path).exists()  # normal local write
     assert svc.indexed == [(pr.target_path, "squad-store")]
+
+
+def test_writethrough_payload_carries_meta(corpus_dir, store, monkeypatch, tmp_path):
+    # meta (source_kind, tags, ...) must reach the write-through command so it can
+    # route a NEW entry to the right upstream record type, not just edit by id.
+    pr = P.propose("squad-store", "remember this", corpus_dir,
+                   meta={"origin": "human", "source_kind": "memory",
+                         "tags": ["infra", "vecgrep"]})
+    store.put(pr)
+    seen = tmp_path / "seen.json"
+    monkeypatch.setenv("VECGREP_WRITETHROUGH_SQUAD_STORE", f"cat > {seen}")
+    svc = _FakeService()
+    res = C.confirm(pr.proposal_id, store, svc, "squad-store", corpus_dir,
+                    confirmed_by="owner")
+    assert res.ok
+    got = json.loads(seen.read_text())
+    assert got["op"] == "write"
+    assert got["meta"]["source_kind"] == "memory"
+    assert got["meta"]["tags"] == ["infra", "vecgrep"]

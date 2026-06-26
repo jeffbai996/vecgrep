@@ -48,14 +48,20 @@ def _writethrough_cmd(corpus: str) -> str | None:
 
 
 def _run_writethrough(cmd: str, *, op: str, corpus: str, doc_id: str,
-                      body: str, confirmed_by: str) -> ConfirmResult:
+                      body: str, confirmed_by: str,
+                      meta: dict | None = None) -> ConfirmResult:
     """Run the operator's write-through command with the op as JSON on stdin.
     The command is responsible for the REAL upstream write; a non-zero exit (or
     spawn failure) is surfaced as a failed confirm so the proposal is NOT
-    consumed — the human can retry once the upstream is reachable again."""
+    consumed — the human can retry once the upstream is reachable again.
+
+    `meta` carries the proposal's metadata (source_kind, tags, …) so a
+    write-through can route a NEW entry to the right upstream record type, not
+    just edit/delete an existing one by doc_id."""
     payload = json.dumps({
         "op": op, "corpus": corpus, "doc_id": doc_id,
         "body": body, "confirmed_by": confirmed_by,
+        "meta": meta or {},
     })
     try:
         proc = subprocess.run(
@@ -188,6 +194,7 @@ def confirm(
         body = "" if op == "delete" else _body_of(proposal.rendered)
         res = _run_writethrough(wt_cmd, op=op, corpus=corpus,
                                 doc_id=proposal.doc_id, body=body,
+                                meta=dict(proposal.meta or {}),
                                 confirmed_by=confirmer)
         if res.ok:
             store.delete(proposal_id)  # consume only on a successful upstream write
