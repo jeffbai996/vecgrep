@@ -30,11 +30,12 @@ def home(tmp_path, monkeypatch):
 def test_propose_writes_nothing_but_persists(home):
     from vecgrep.mcp import server as S
     r = json.loads(S._run_propose("notes", "a proposed fact", source_kind="fact"))
-    assert r["proposal_id"] and r["doc_id"] == "notes-001"
+    import re as _re
+    assert r["proposal_id"] and _re.match(r"^notes-\d+$", r["doc_id"])
     assert r["is_edit"] is False
     h = os.environ["VECGREP_HOME"]
     # no doc written
-    assert not glob.glob(f"{h}/write/notes/notes-001.md")
+    assert not glob.glob(f"{h}/write/notes/notes-*.md")
     # but a pending proposal exists
     assert glob.glob(f"{h}/write/_pending/*.json")
 
@@ -62,7 +63,7 @@ def test_cli_confirm_turns_proposal_into_write(home):
     c = runner.invoke(cli, ["confirm", pid])
     assert c.exit_code == 0, c.output
     h = os.environ["VECGREP_HOME"]
-    f = glob.glob(f"{h}/write/notes/notes-001.md")
+    f = glob.glob(f"{h}/write/notes/notes-*.md")
     assert f and "confirm me into existence" in open(f[0]).read()
     # proposal consumed — confirming again fails
     c2 = runner.invoke(cli, ["confirm", pid])
@@ -101,7 +102,7 @@ def test_discard_removes_proposal_without_writing(home):
     assert "discarded" in d.output
     h = os.environ["VECGREP_HOME"]
     # nothing written, pending cleared
-    assert not glob.glob(f"{h}/write/notes/notes-001.md")
+    assert not glob.glob(f"{h}/write/notes/notes-*.md")
     assert not glob.glob(f"{h}/write/_pending/*.json")
     # discarding again fails (already gone)
     d2 = runner.invoke(cli, ["discard", pid])
@@ -118,7 +119,8 @@ def test_propose_hook_fires_with_payload(home, tmp_path, monkeypatch):
     S._run_propose("notes", "card me", source_kind="fact")
     assert out.exists(), "hook should have run"
     seen = json.loads(out.read_text())
-    assert seen["proposal_id"].startswith("prop-notes-001-")
+    import re as _re
+    assert _re.match(r"^prop-notes-\d+-", seen["proposal_id"])
     assert seen["corpus"] == "notes"
     assert "card me" in seen["preview"]
 

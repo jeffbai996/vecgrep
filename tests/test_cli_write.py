@@ -25,22 +25,23 @@ def runner_home(tmp_path, monkeypatch):
 
 
 def test_write_creates_and_indexes_a_doc(runner_home):
+    import re
     r = runner_home.invoke(cli, ["write", "notes", "Cats sit on mats."])
     assert r.exit_code == 0, r.output
-    assert "notes-001" in r.output  # assigned id reported
+    # ids are nanosecond timestamps now (notes-<digits>), not a serial.
+    assert re.search(r"notes-\d+", r.output)  # assigned id reported
     # the markdown doc was written to the corpus dir (files-are-truth)
     import glob, os as _os
-    files = glob.glob(f"{_os.environ['VECGREP_HOME']}/write/notes/notes-001.md")
+    files = glob.glob(f"{_os.environ['VECGREP_HOME']}/write/notes/notes-*.md")
     assert files, "doc file should exist on disk"
     assert "Cats sit on mats" in open(files[0]).read()
     # (full semantic-search retrieval needs a live embedder — covered by the
     #  service-layer tests, not this hermetic CLI test.)
 
 
-def test_write_assigns_sequential_ids(runner_home):
-    runner_home.invoke(cli, ["write", "notes", "first"])
-    r = runner_home.invoke(cli, ["write", "notes", "second"])
-    assert "notes-002" in r.output
+# (id distinctness across rapid writes is unit-tested in test_write_propose.py
+#  ::test_propose_ids_are_unique — exercising it here needs a live Qdrant server,
+#  since two CLI invokes in one hermetic test collide on the embedded client.)
 
 
 def test_write_records_metadata_and_confirmer(runner_home):
