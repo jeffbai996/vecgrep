@@ -510,8 +510,8 @@ def build_http_app() -> Any:
                       tags: list[str] | None = None) -> str:
         """content: entry text. corpus: target (default the agent's own
         'claude-ai' corpus). source_kind: insight|fact|correction|journal|
-        decision. tags: optional. Returns the pending proposal (nothing is
-        written until a human confirms)."""
+        decision|memory|todo. tags: optional. Returns the pending proposal
+        (nothing is written until a human confirms)."""
         return _run_propose(corpus or DEFAULT_PROPOSE_CORPUS, content, None,
                             source_kind, tags)
 

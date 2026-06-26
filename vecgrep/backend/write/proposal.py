@@ -19,7 +19,8 @@ from pathlib import Path
 # value is caught before it ever reaches a write.
 ORIGINS = ("human", "bot-suggested")
 TIERS = ("normal", "protected")
-SOURCE_KINDS = ("insight", "fact", "correction", "journal", "decision")
+SOURCE_KINDS = ("insight", "fact", "correction", "journal", "decision",
+                "memory", "todo")
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]*-(\d+)$")
 

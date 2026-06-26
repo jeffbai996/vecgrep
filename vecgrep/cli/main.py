@@ -32,6 +32,7 @@ from ..backend.embed import EmbedBackendError
 from ..backend.ingestion.adapters import AdapterError
 from ..backend.service import VecgrepService
 from ..backend.store import CorpusError
+from ..backend.write.proposal import SOURCE_KINDS
 
 
 def _api_base() -> str:
@@ -872,8 +873,7 @@ def _do_write(corpus: str, content: str, edit_id: str | None,
 @cli.command()
 @click.argument("corpus")
 @click.argument("content")
-@click.option("--source-kind", type=click.Choice(
-    ["insight", "fact", "correction", "journal", "decision"]),
+@click.option("--source-kind", type=click.Choice(list(SOURCE_KINDS)),
     default=None, help="What kind of entry this is (powers filtered retrieval).")
 @click.option("--tag", "tags", multiple=True, help="Tag (repeatable).")
 def write(corpus: str, content: str, source_kind: str | None, tags: tuple[str, ...]) -> None:
@@ -886,8 +886,7 @@ def write(corpus: str, content: str, source_kind: str | None, tags: tuple[str, .
 @click.argument("doc_id")
 @click.argument("content")
 @click.option("--corpus", default=None, help="Corpus (default: inferred from doc_id prefix).")
-@click.option("--source-kind", type=click.Choice(
-    ["insight", "fact", "correction", "journal", "decision"]), default=None)
+@click.option("--source-kind", type=click.Choice(list(SOURCE_KINDS)), default=None)
 @click.option("--tag", "tags", multiple=True)
 def edit(doc_id: str, content: str, corpus: str | None,
          source_kind: str | None, tags: tuple[str, ...]) -> None:

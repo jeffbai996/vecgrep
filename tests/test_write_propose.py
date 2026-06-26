@@ -87,3 +87,12 @@ def test_bad_source_kind_rejected(tmp_path):
 def test_empty_content_rejected(tmp_path):
     with pytest.raises(P.ProposalError):
         P.propose("note", "   ", tmp_path)
+
+
+def test_memory_and_todo_source_kinds_accepted(tmp_path):
+    # memory + todo were added to SOURCE_KINDS so an agent can propose those
+    # record types (routed to the real store by an operator write-through).
+    for kind in ("memory", "todo", "journal"):
+        pr = P.propose("note", f"a {kind} entry", tmp_path,
+                       meta={"origin": "human", "source_kind": kind})
+        assert f"source_kind: {kind}" in pr.rendered
