@@ -55,17 +55,21 @@ def test_new_entry_target_stays_under_corpus_dir(tmp_path):
 # --- P2: proposal_id uniqueness --------------------------------------------
 
 def test_two_new_proposals_get_distinct_ids(tmp_path):
-    # Neither is confirmed, so both scan the same dir and pick the same doc_id.
-    # The proposal_ids MUST differ so storing the second can't clobber the first.
+    # Doc ids are nanosecond timestamps now, so two un-confirmed proposals get
+    # DISTINCT doc_ids (no shared target) AND distinct proposal_ids — neither can
+    # clobber the other on confirm.
+    import re
     a = propose("notes", "first version", tmp_path)
     b = propose("notes", "second version", tmp_path)
-    assert a.doc_id == b.doc_id == "notes-001"   # same target (expected)
-    assert a.proposal_id != b.proposal_id          # but distinct handles
+    assert a.doc_id != b.doc_id
+    assert re.match(r"^notes-\d+$", a.doc_id) and re.match(r"^notes-\d+$", b.doc_id)
+    assert a.proposal_id != b.proposal_id
 
 
 def test_proposal_id_includes_doc_id_for_readability(tmp_path):
+    import re
     p = propose("notes", "x", tmp_path)
-    assert p.proposal_id.startswith("prop-notes-001-")
+    assert re.match(r"^prop-notes-\d+-", p.proposal_id)
 
 
 # --- P1: frontmatter parsed into metadata at index time --------------------

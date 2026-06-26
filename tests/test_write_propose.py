@@ -4,22 +4,27 @@ diffs against the existing version, but never touches disk or the index.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from vecgrep.backend.write import proposal as P
 
+_ID = re.compile(r"^note-\d+$")  # <prefix>-<epoch> (timestamp, not a serial)
 
-def test_propose_assigns_first_id(tmp_path):
+
+def test_propose_assigns_timestamp_id(tmp_path):
     pr = P.propose("note", "first note", tmp_path)
-    assert pr.doc_id == "note-001"
+    assert _ID.match(pr.doc_id), f"expected note-<epoch>, got {pr.doc_id!r}"
 
 
-def test_propose_assigns_next_sequential_id(tmp_path):
-    # Existing files in the corpus dir → next id continues the sequence.
-    (tmp_path / "note-001.md").write_text("---\nid: note-001\n---\nx")
-    (tmp_path / "note-003.md").write_text("---\nid: note-003\n---\ny")
-    pr = P.propose("note", "another", tmp_path)
-    assert pr.doc_id == "note-004"  # max(1,3)+1
+def test_propose_ids_are_unique(tmp_path):
+    # Ids are timestamp-based, not a running serial — back-to-back proposes (even
+    # within the same second) must still get DISTINCT ids so neither overwrites
+    # the other on confirm.
+    ids = {P.propose("note", f"entry {i}", tmp_path).doc_id for i in range(5)}
+    assert len(ids) == 5, f"collision: {ids}"
+    assert all(_ID.match(i) for i in ids)
 
 
 def test_propose_writes_nothing(tmp_path):
@@ -31,19 +36,33 @@ def test_propose_writes_nothing(tmp_path):
 
 def test_propose_returns_target_path(tmp_path):
     pr = P.propose("note", "x", tmp_path)
-    assert pr.target_path == str(tmp_path / "note-001.md")
+    assert pr.target_path == str(tmp_path / f"{pr.doc_id}.md")
 
 
 def test_rendered_doc_carries_schema_frontmatter(tmp_path):
     pr = P.propose("note", "body text here", tmp_path,
                    meta={"origin": "human", "source_kind": "decision", "tags": ["a", "b"]})
     r = pr.rendered
-    assert "id: note-001" in r
+    assert re.search(r"id: note-\d+", r)
     assert "status: active" in r
     assert "origin: human" in r
     assert "source_kind: decision" in r
     assert "tags: [a, b]" in r
     assert "body text here" in r
+
+
+def test_title_auto_derived_from_first_line(tmp_path):
+    # No explicit title → derived from the first content line (markdown '#'
+    # stripped) and persisted, a scannable handle vs the opaque timestamp id.
+    pr = P.propose("note", "# Victor grad-date correction\nbody…", tmp_path,
+                   meta={"origin": "human"})
+    assert "title: Victor grad-date correction" in pr.rendered
+
+
+def test_explicit_title_wins(tmp_path):
+    pr = P.propose("note", "ignored first line", tmp_path,
+                   meta={"origin": "human", "title": "My Chosen Title"})
+    assert "title: My Chosen Title" in pr.rendered
 
 
 def test_origin_defaults_to_bot_suggested(tmp_path):

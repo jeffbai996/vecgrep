@@ -11,6 +11,7 @@ No versioning / supersede / archive — an edit overwrites in place.
 from __future__ import annotations
 
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,22 +54,29 @@ def _slug_prefix(corpus: str) -> str:
 
 
 def next_doc_id(corpus_dir: Path, corpus: str) -> str:
-    """Next sequential id for a corpus dir: <prefix>-NNN (max existing + 1)."""
+    """A fresh doc id for a corpus dir: `<prefix>-<epoch-nanos>`.
+
+    Timestamp-based, not a running serial: agent-proposed entries are throwaway
+    (many route upstream on confirm and never persist locally), so a serial
+    counter just adds noise and a scan. NANOSECOND precision (time.time_ns), not
+    seconds — propose() writes NOTHING to disk, so a same-second disk-existence
+    check can't catch a collision; back-to-back proposals would otherwise share a
+    seconds-granularity id and overwrite each other on confirm. Nanos make
+    distinct ids for rapid-fire calls. Still all-digits → `_ID_RE`-valid, so
+    edit/delete id-validation and the corpus-boundary check are unaffected. The
+    disk-existence bump stays as a paranoia backstop."""
     prefix = _slug_prefix(corpus)
-    highest = 0
-    if corpus_dir.exists():
-        for p in corpus_dir.glob(f"{prefix}-*.md"):
-            m = _ID_RE.match(p.stem)
-            if m:
-                highest = max(highest, int(m.group(1)))
-    return f"{prefix}-{highest + 1:03d}"
+    ts = time.time_ns()
+    while (corpus_dir / f"{prefix}-{ts}.md").exists():
+        ts += 1
+    return f"{prefix}-{ts}"
 
 
 def render_doc(doc_id: str, content: str, meta: dict) -> str:
     """Render a doc as YAML-frontmatter + body, deterministic key order."""
     order = [
-        "id", "status", "created_at", "origin", "confirmed_by", "confirmed_at",
-        "tier", "corpus", "source_kind", "tags",
+        "id", "title", "status", "created_at", "origin", "confirmed_by",
+        "confirmed_at", "tier", "corpus", "source_kind", "tags",
     ]
     fm = {**meta, "id": doc_id}
     lines = ["---"]
@@ -116,6 +124,19 @@ def propose(
     meta.setdefault("tier", "normal")
     meta.setdefault("status", "active")
     meta.setdefault("corpus", corpus)
+    # Auto-derive a short human-readable title from the first content line when
+    # the caller didn't supply one — a generated, scannable handle for the entry
+    # (vs the opaque timestamp id). First non-empty line, leading markdown '#'
+    # stripped, capped. Callers can still pass an explicit meta["title"].
+    if not (meta.get("title") or "").strip():
+        derived = ""
+        for line in content.splitlines():
+            s = line.strip().lstrip("#").strip()
+            if s:
+                derived = s[:80]
+                break
+        if derived:
+            meta["title"] = derived
     _validate_meta(meta)
 
     is_edit = edit_id is not None
