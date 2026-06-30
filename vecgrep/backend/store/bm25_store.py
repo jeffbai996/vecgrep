@@ -87,22 +87,6 @@ def _required_coverage(n_query_tokens: int) -> int:
     return max(1, min(needed, n_query_tokens))
 
 
-def _meets_coverage(q_tokens: list[str], doc_tokens: list[str]) -> bool:
-    """True if `doc_tokens` covers enough of the query's distinct tokens.
-
-    Reads env vars on every call (cheap, and lets the safety-hatch
-    `VECGREP_BM25_DISABLE_COVERAGE_FILTER` flip mid-process).
-    """
-    if os.environ.get("VECGREP_BM25_DISABLE_COVERAGE_FILTER") == "1":
-        return True
-    q_set = set(q_tokens)
-    if not q_set:
-        return True
-    needed = _required_coverage(len(q_set))
-    doc_set = set(doc_tokens)
-    return sum(1 for t in q_set if t in doc_set) >= needed
-
-
 def _coverage_factor(q_tokens: list[str], doc_tokens: list[str]) -> float | None:
     """Return the score multiplier this doc's coverage earns, or None to drop.
 
