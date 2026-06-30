@@ -10,11 +10,10 @@ One Document per conversation, like the Claude adapter. Title in metadata.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Iterator
 
-from .base import Adapter, AdapterError, Document
+from .base import Adapter, Document, load_json_file, try_load_json_file
 from .registry import register_adapter
 
 
@@ -78,18 +77,14 @@ class ChatGPTExportAdapter(Adapter):
         p = Path(source)
         if not p.is_file() or p.suffix.lower() != ".json":
             return False
-        try:
-            obj = json.loads(p.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, json.JSONDecodeError):
+        obj = try_load_json_file(p)
+        if obj is None:
             return False
         return _looks_like_chatgpt_export(obj)
 
     def load(self, source: str) -> Iterator[Document]:
         p = Path(source)
-        try:
-            data = json.loads(p.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, json.JSONDecodeError) as e:
-            raise AdapterError(f"Could not parse {source}: {e}") from e
+        data = load_json_file(p, source)
 
         for conv in data:
             if not isinstance(conv, dict):

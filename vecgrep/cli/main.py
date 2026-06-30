@@ -53,6 +53,15 @@ def _api_alive() -> bool:
         return False
 
 
+def _raise_for_status(r: httpx.Response) -> None:
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("detail", r.text)
+        except Exception:
+            detail = r.text
+        raise click.ClickException(detail)
+
+
 def _post(path: str, payload: dict) -> Any:
     r = httpx.post(
         f"{_api_base()}{path}",
@@ -60,19 +69,13 @@ def _post(path: str, payload: dict) -> Any:
         timeout=600.0,
         headers=_auth_headers(),
     )
-    if r.status_code >= 400:
-        try:
-            detail = r.json().get("detail", r.text)
-        except Exception:
-            detail = r.text
-        raise click.ClickException(detail)
+    _raise_for_status(r)
     return r.json()
 
 
 def _get(path: str) -> Any:
     r = httpx.get(f"{_api_base()}{path}", timeout=30.0, headers=_auth_headers())
-    if r.status_code >= 400:
-        raise click.ClickException(r.text)
+    _raise_for_status(r)
     return r.json()
 
 
@@ -80,12 +83,7 @@ def _delete(path: str) -> Any:
     r = httpx.delete(
         f"{_api_base()}{path}", timeout=30.0, headers=_auth_headers()
     )
-    if r.status_code >= 400:
-        try:
-            detail = r.json().get("detail", r.text)
-        except Exception:
-            detail = r.text
-        raise click.ClickException(detail)
+    _raise_for_status(r)
     return r.json()
 
 
@@ -928,7 +926,6 @@ def confirm(proposal_id: str, ack: str | None) -> None:
     confirm."""
     import getpass
     from ..backend.write import confirm as _C
-    from ..backend.write.proposal import _slug_prefix  # noqa: F401 (kept for parity)
 
     store = _C.ProposalStore(get_settings().home / "write" / "_pending")
     pr = store.get(proposal_id)
