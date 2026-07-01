@@ -14,7 +14,6 @@ or skipped if it's some other JSONL data.
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 

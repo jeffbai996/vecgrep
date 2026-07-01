@@ -24,10 +24,8 @@ to its own Qdrant collection. Payload schema:
 """
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
