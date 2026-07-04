@@ -2,6 +2,8 @@
 
 > grep for meaning, not keywords
 
+**v0.7.0** · pre-1.0 (API unstable until v1.0) · see [CHANGELOG.md](CHANGELOG.md) for release history
+
 `vecgrep` is a local-first semantic search engine for any corpus you throw at it. Drop in documents — text, markdown, PDFs, URLs — and search by concept instead of exact words. Runs on your machine, no cloud roundtrip required.
 
 ![vecgrep web UI — index panel and corpus list on the left, search bar with mode toggle, side-by-side primer on vector vs BM25 retrieval](docs/assets/web-ui.png)
