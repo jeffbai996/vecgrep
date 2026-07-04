@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vecgrep"
-version = "0.7.0"
+# Version is the single source of truth in vecgrep/__init__.py — see
+# [tool.setuptools.dynamic] below. Do NOT hardcode it here (they used to
+# drift: pyproject said 0.7.0 while __init__ said 0.6.0).
+dynamic = ["version"]
 description = "grep for meaning, not keywords. Local-first semantic search for any corpus."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -53,6 +56,11 @@ Issues = "https://github.com/jeffbai996/vecgrep/issues"
 
 [project.scripts]
 vecgrep = "vecgrep.cli.main:cli"
+
+[tool.setuptools.dynamic]
+# Read the version from vecgrep/__init__.py:__version__ — the single source
+# of truth (project.version is declared dynamic above).
+version = { attr = "vecgrep.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["vecgrep*"]
