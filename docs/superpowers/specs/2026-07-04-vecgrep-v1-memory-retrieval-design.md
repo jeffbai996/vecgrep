@@ -62,6 +62,17 @@ Prioritized exactly as the review's deliverables list:
    set. Config-driven, not learned (v1). The map itself is user-supplied and
    lives outside the repo (it's personal data); vecgrep just consumes it.
 
+6. **Result budget + stub tier.** Surface far more results by default without
+   blowing the token budget: **top 8 full** (context windows, all scores) then
+   **up to 72 stubs** (source path + timestamp + a one-line snippet + score, NO
+   context windows). Token-driven: emit stubs until a token ceiling is hit, so
+   it auto-scales rather than a fixed count (8 full + ≤72 stubs = ≤80 total).
+   The assistant gets breadth to spot patterns, then can re-query for full
+   context on any stub. Pairs with dedup/MMR (item 1): kill the duplicate slices
+   first, so the expanded budget spends on *distinct* evidence.
+   - **Web UI:** default hit count **5 → 20** (a plain default change; the UI
+     doesn't need the stub tier — it renders full cards, just more of them).
+
 Deferred to post-v1 (review points 5, 8): full "incident reconstruction" object
 format and automatic query-intent detection. They're valuable but higher-risk;
 v1 gives the assistant the primitives (timeline slice + filters + aliases) to
@@ -90,12 +101,16 @@ merged to main only when green + proven, **never touching the live service check
 
 1. Test harness + transcript fixtures (the eval set — everything else tests against it)
 2. Source-span dedup / MMR
-3. Date / path / time filters
-4. Clearer score output
-5. Timeline mode
-6. Alias expansion
-7. (parallel track) OAuth re-integration
-8. Cut **v1.0**, update CHANGELOG, tag, merge to main, restart live service
+3. Result budget + stub tier (8 full + ≤72 stubs, token-driven) + web UI 5→20
+4. Date / path / time filters
+5. Clearer score output
+6. Timeline mode
+7. Alias expansion
+8. (parallel track) OAuth re-integration
+9. Cut **v1.0**, update CHANGELOG, tag, merge to main, restart live service
+
+Dedup (2) lands before the stub tier (3) on purpose: expanding the result count
+is only worth it once duplicates are gone, else the extra budget fills with noise.
 
 ## Non-goals for v1
 
