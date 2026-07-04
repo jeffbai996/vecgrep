@@ -13,6 +13,18 @@ existing hybrid-search core — source-span dedup/MMR, date & path & time
 filters, timeline reconstruction, clearer score output, and alias/entity
 expansion. See `docs/superpowers/specs/` for the design.
 
+### Added
+- **Eval harness** (`tests/eval_harness.py`): synthetic PII-free Discord-style
+  transcript fixtures (bilingual, alias-bearing, multi-channel incident, bot
+  alert spam, exact-keyword + semantic-vague cases) + 7 golden benchmark
+  queries with assembly-quality metrics (redundancy, expected-source recall,
+  forbidden-source leakage). v0.7.0 baseline captured at
+  `tests/fixtures/baselines/v0_7_0.json`; regenerate with
+  `python -m tests.eval_harness`. The baseline documents the problems this
+  release fixes: duplicate slices survive span-only dedup (redundancy 0.09 on
+  the dup probe) and date-less queries leak week-old lore (4 forbidden hits on
+  the "today" incident query).
+
 ## [0.7.0] — 2026-07-04
 
 The write + retrieval-quality release. 91 commits since v0.6.0; retroactively

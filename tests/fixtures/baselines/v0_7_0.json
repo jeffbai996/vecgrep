@@ -1,0 +1,55 @@
+{
+  "corpus": "evalchat",
+  "queries": {
+    "alias_cn": {
+      "distinct_sources": 4,
+      "expected_recall": 1.0,
+      "forbidden_hits": 0,
+      "n_results": 10,
+      "redundancy": 0.0222
+    },
+    "argument": {
+      "distinct_sources": 3,
+      "expected_recall": 1.0,
+      "forbidden_hits": 1,
+      "n_results": 10,
+      "redundancy": 0.0
+    },
+    "dup_stress": {
+      "distinct_sources": 3,
+      "expected_recall": 1.0,
+      "forbidden_hits": 0,
+      "n_results": 10,
+      "redundancy": 0.0889
+    },
+    "exact_keyword": {
+      "distinct_sources": 2,
+      "expected_recall": 0.6667,
+      "forbidden_hits": 0,
+      "n_results": 10,
+      "redundancy": 0.1111
+    },
+    "greatest_hits": {
+      "distinct_sources": 4,
+      "expected_recall": 1.0,
+      "forbidden_hits": 0,
+      "n_results": 10,
+      "redundancy": 0.0
+    },
+    "incident_today": {
+      "distinct_sources": 3,
+      "expected_recall": 1.0,
+      "forbidden_hits": 4,
+      "n_results": 10,
+      "redundancy": 0.0444
+    },
+    "semantic_vague": {
+      "distinct_sources": 3,
+      "expected_recall": 1.0,
+      "forbidden_hits": 0,
+      "n_results": 10,
+      "redundancy": 0.0222
+    }
+  },
+  "version": "0.7.0"
+}
