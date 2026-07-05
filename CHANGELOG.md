@@ -14,6 +14,16 @@ filters, timeline reconstruction, clearer score output, and alias/entity
 expansion. See `docs/superpowers/specs/` for the design.
 
 ### Added
+- **MCP OAuth** (re-integrated from the parked `feat/mcp-oauth` branch):
+  optional OAuth 2.1 on the `/mcp` endpoint (`VECGREP_OAUTH_ENABLED=1` +
+  `VECGREP_OAUTH_ISSUER_URL=<public url>`). Embedded authorization server
+  (`vecgrep/backend/auth/`: token store + auth-code/refresh provider), MCP
+  sub-app mounted so the SDK's /authorize, /token and /.well-known routes
+  resolve, discovery served at the origin root ahead of the SPA catch-all,
+  funnel-safe bare `/mcp` delegate (no 307 loop), dynamic client
+  registration advertised. Off by default; the localhost/tailnet /api
+  surface is unchanged. The no-frontend fallback now answers all unknown
+  paths with the API-running message (uniform with the SPA catch-all).
 - **Alias / entity expansion** (`vecgrep/backend/aliases.py`): one entity,
   many surface forms (nickname ⇄ handle ⇄ another language). A query naming
   any form expands with the entity's other forms before retrieval, so
