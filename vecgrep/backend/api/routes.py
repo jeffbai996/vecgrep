@@ -155,6 +155,8 @@ def _hit_out(r) -> SearchHit:
         chunk_id=r.chunk_id,
         matched_by=r.matched_by,
         doc_timestamp=r.doc_timestamp,
+        relevance_pct=r.relevance_pct,
+        relevance_label=r.relevance_label,
         explain=r.explain or {},
     )
 

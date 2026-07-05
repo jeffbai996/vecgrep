@@ -109,7 +109,9 @@ def _print_results(hits: list[dict], json_out: bool) -> None:
         corpus = h["corpus"]
         matched_by = h.get("matched_by") or []
         badge = f"  [{'+'.join(matched_by)}]" if matched_by else ""
-        click.echo(f"\n[{i}] {pct:5.1f}%  {corpus}  {sid}{badge}")
+        label = h.get("relevance_label") or ""
+        label_s = f" {label:<7s}" if label else ""
+        click.echo(f"\n[{i}] {pct:5.1f}%{label_s}  {corpus}  {sid}{badge}")
         explain = h.get("explain") or {}
         if explain:
             parts: list[str] = []
@@ -256,6 +258,8 @@ def _run_budget_search(
                 "corpus": r.corpus,
                 "metadata": r.metadata,
                 "matched_by": r.matched_by,
+                "relevance_pct": r.relevance_pct,
+                "relevance_label": r.relevance_label,
                 "explain": r.explain or {},
             }
             for r in full
@@ -452,6 +456,8 @@ def search(
                 "corpus": r.corpus,
                 "metadata": r.metadata,
                 "matched_by": r.matched_by,
+                "relevance_pct": r.relevance_pct,
+                "relevance_label": r.relevance_label,
                 "explain": r.explain or {},
             }
             for r in results

@@ -46,6 +46,10 @@ class SearchHit(BaseModel):
     chunk_id: str = ""
     matched_by: list[str] = []
     doc_timestamp: float | None = None
+    # Going-forward names: relevance_pct == similarity_pct (compat alias);
+    # relevance_label is the qualitative bucket (exact/strong/related/weak).
+    relevance_pct: float = 0.0
+    relevance_label: str = ""
     explain: dict = {}
 
 

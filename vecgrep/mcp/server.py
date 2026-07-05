@@ -60,7 +60,9 @@ def _require_mcp() -> None:
 
 def _result_payload(r) -> dict:
     return {
-        "similarity_pct": round(r.similarity_pct, 1),
+        "similarity_pct": round(r.similarity_pct, 1),  # compat alias
+        "relevance_pct": round(r.relevance_pct, 1),
+        "relevance_label": r.relevance_label,
         "corpus": r.corpus,
         "source_id": r.source_id,
         "matched_by": r.matched_by,
