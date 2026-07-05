@@ -125,3 +125,35 @@ class TokenStore:
         """Revoke an access OR refresh token by its value. Idempotent."""
         self._access.pop(token, None)
         self._refresh.pop(token, None)
+
+    # ----- admin surface (the /inventory OAuth panel reads these) -----
+    def counts(self) -> dict:
+        """Live token tallies, total and per-client. Expired tokens still in
+        the dicts count — they can't LOAD, and showing them beats hiding a
+        pileup from the ops view."""
+        by_client: dict[str, dict[str, int]] = {}
+        for at in self._access.values():
+            by_client.setdefault(at.client_id, {"access": 0, "refresh": 0})
+            by_client[at.client_id]["access"] += 1
+        for rt in self._refresh.values():
+            by_client.setdefault(rt.client_id, {"access": 0, "refresh": 0})
+            by_client[rt.client_id]["refresh"] += 1
+        return {
+            "access": len(self._access),
+            "refresh": len(self._refresh),
+            "codes": len(self._codes),
+            "by_client": by_client,
+        }
+
+    def revoke_client(self, client_id: str) -> int:
+        """Kill every access + refresh token a client holds (the inventory
+        panel's revoke button). Returns how many tokens died."""
+        doomed_a = [t for t, at in self._access.items() if at.client_id == client_id]
+        doomed_r = [t for t, rt in self._refresh.items() if rt.client_id == client_id]
+        for t in doomed_a:
+            self._access.pop(t, None)
+        for t in doomed_r:
+            self._refresh.pop(t, None)
+        self._codes = {c: ac for c, ac in self._codes.items()
+                       if ac.client_id != client_id}
+        return len(doomed_a) + len(doomed_r)

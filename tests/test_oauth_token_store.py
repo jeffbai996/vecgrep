@@ -101,3 +101,26 @@ def test_token_has_scope(store):
     at = store.issue_access_token(client_id="c1", scopes=["read"], ttl_s=3600)
     assert store.token_has_scope(at.token, "read") is True
     assert store.token_has_scope(at.token, "propose") is False
+
+
+# ----- admin surface (inventory panel) -----
+
+def test_counts_reflect_live_tokens(store):
+    store.issue_access_token("c1", ["read"])
+    store.issue_access_token("c1", ["read"])
+    store.issue_refresh_token("c1", ["read"])
+    store.issue_access_token("c2", ["read"])
+    c = store.counts()
+    assert c["access"] == 3
+    assert c["refresh"] == 1
+    assert c["by_client"]["c1"]["access"] == 2
+
+
+def test_revoke_client_kills_all_its_tokens(store):
+    a1 = store.issue_access_token("c1", ["read"])
+    r1 = store.issue_refresh_token("c1", ["read"])
+    a2 = store.issue_access_token("c2", ["read"])
+    assert store.revoke_client("c1") == 2
+    assert store.load_access_token(a1.token) is None
+    assert store.load_refresh_token("c1", r1.token) is None
+    assert store.load_access_token(a2.token) is not None
