@@ -405,8 +405,14 @@ def build_mcp_server() -> Any:
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "Optional filter expressions. Forms: 'source:<glob>', "
-                                "'corpus:<name>', 'meta.<key>=<value>'. All ANDed."
+                                "Optional HARD-constraint filters. Forms: "
+                                "'source:<glob>', 'source_path:<glob>', "
+                                "'corpus:<name>', 'meta.<key>=<value>', "
+                                "'date:YYYY-MM-DD', 'after:<iso>', "
+                                "'before:<iso>', 'channel:<name>'. All ANDed. "
+                                "Use date/after/before for 'today'/'this "
+                                "morning' style questions so old lore can't "
+                                "leak in."
                             ),
                         },
                         "budget": {
@@ -554,7 +560,10 @@ def build_http_app() -> Any:
         """Natural-language query. corpus: limit to one corpus (omit = all).
         top_k: max results. mode: hybrid|vector|bm25.
         rerank: cross-encoder rerank (slower, more accurate).
-        filters: list of 'source:<glob>', 'corpus:<name>', or 'meta.<k>=<v>'.
+        filters: hard constraints — 'source:<glob>', 'source_path:<glob>',
+        'corpus:<name>', 'meta.<k>=<v>', 'date:YYYY-MM-DD', 'after:<iso>',
+        'before:<iso>', 'channel:<name>'. Use date/after/before for
+        'today'-style questions so old lore can't leak in.
         budget: breadth mode — top full_k results WITH context plus a
         one-line stub tail capped at ~token_ceiling tokens; expand any stub
         via get_chunk. Best for pattern-spotting across many hits."""
