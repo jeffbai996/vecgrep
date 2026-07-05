@@ -69,6 +69,9 @@ def _result_payload(r) -> dict:
         "chunk": r.chunk,
         "chunk_id": r.chunk_id,
         "doc_timestamp": r.doc_timestamp,
+        "anchor": r.anchor,
+        "line_start": r.line_start,
+        "line_end": r.line_end,
         "context_before": r.context_before,
         "context_after": r.context_after,
         # Raw retriever scores for downstream re-calibration.
@@ -135,6 +138,20 @@ def _run_timeline(args: dict) -> str:
         filters=args.get("filters") or None,
     )
     return json.dumps(groups, indent=2, ensure_ascii=False)
+
+
+def _run_incident(args: dict) -> str:
+    """Structured incident answer assembled from search + timeline."""
+    svc = VecgrepService()
+    inc = svc.incident(
+        args["query"],
+        args.get("corpus"),
+        mode=args.get("mode", "hybrid"),
+        filters=args.get("filters") or None,
+    )
+    if inc is None:
+        return json.dumps({"error": "nothing found for that query"})
+    return json.dumps(inc, indent=2, ensure_ascii=False)
 
 
 def _run_list_corpora() -> str:
@@ -484,6 +501,30 @@ def build_mcp_server() -> Any:
                 },
             ),
             Tool(
+                name="incident",
+                description=(
+                    "One structured answer for an incident question: title, "
+                    "sources, participants, time range, the primary "
+                    "chronological timeline, related context kept separate, "
+                    "and a confidence label. Assembled from search + "
+                    "timeline; same hard filters as search."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "corpus": {"type": "string"},
+                        "mode": {
+                            "type": "string",
+                            "enum": ["hybrid", "vector", "bm25"],
+                            "default": "hybrid",
+                        },
+                        "filters": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["query"],
+                },
+            ),
+            Tool(
                 name="get_chunk",
                 description=(
                     "Expand a chunk to its surrounding context by chunk_id "
@@ -526,6 +567,8 @@ def build_mcp_server() -> Any:
                 text = _run_search(args)
             elif name == "timeline":
                 text = _run_timeline(args)
+            elif name == "incident":
+                text = _run_incident(args)
             elif name == "get_chunk":
                 text = _run_get_chunk(
                     args.get("corpus", ""),
@@ -736,6 +779,28 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
             "corpus": corpus,
             "top_k": top_k,
             "max_groups": max_groups,
+            "mode": mode,
+            "filters": filters,
+        })
+
+    @fmcp.tool(
+        description=(
+            "One structured answer for an incident question: title, sources, "
+            "participants, time range, primary chronological timeline, "
+            "related context separated, confidence label. Same hard filters "
+            "as search."
+        )
+    )
+    def incident(
+        query: str,
+        corpus: str | None = None,
+        mode: str = "hybrid",
+        filters: list[str] | None = None,
+    ) -> str:
+        """Assembled from search + timeline primitives."""
+        return _run_incident({
+            "query": query,
+            "corpus": corpus,
             "mode": mode,
             "filters": filters,
         })
