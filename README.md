@@ -250,6 +250,12 @@ retrieval core is unchanged.
   `has:code|table|link` (content shape). A leading `-` inverts any filter
   (`-corpus:scratch` excludes). Recognized filters fail closed (a typo'd
   date reads as zero results, not silently ignored) — in either polarity.
+- **Insight tools (v1.2)** — `related <chunk_id>` (query-by-example: more
+  evidence like this chunk, no re-embedding), `compare` (one query, two time
+  windows, source-level delta — "how did we talk about X then vs now"),
+  `stats <corpus>` (counts, date coverage, gap days — a broken archiver shows
+  up here), `summarize <corpus>` (speaker tally + span + sampled chunks for
+  rollups; sampling always explicit). All four: CLI + `/api/*` + MCP.
 - **Timeline mode** — "what happened?" gets an ordered event sequence, not
   ranked chunks: `vecgrep timeline "query"` / `POST /api/timeline` / MCP
   `timeline`. Contiguous chronological slices grouped by source file,

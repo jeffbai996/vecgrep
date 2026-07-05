@@ -702,6 +702,187 @@ class VecgrepService:
             ],
         }
 
+    # ----- v1.2 tools: related / compare / stats / summarize ----------------
+
+    def related(
+        self, chunk_id: str, corpus_name: str, top_k: int = 8
+    ) -> list[SearchResult]:
+        """Nearest neighbours of an EXISTING chunk by its stored vector —
+        query-by-example without re-embedding anything. Excludes the seed
+        chunk and collapses near-duplicate slices of the same exchange with
+        the same dedup the normal search path uses."""
+        corpus = self.registry.get(corpus_name)
+        collection = _collection_for(corpus.name)
+        vector = self.store.get_vector(collection, chunk_id)
+        if vector is None:
+            raise CorpusError(
+                f"chunk '{chunk_id}' not found in corpus '{corpus_name}'"
+            )
+        hits = self.store.search(collection, vector, top_k * 3 + 1)
+        results: list[SearchResult] = []
+        for h in hits:
+            r = _hit_to_result(h, ["vector"], model=corpus.embed_model)
+            if r.chunk_id == chunk_id:
+                continue
+            results.append(r)
+        return dedup_near_duplicates(results)[:top_k]
+
+    def compare(
+        self,
+        query: str,
+        corpus_name: str,
+        a_after: str | None = None,
+        a_before: str | None = None,
+        b_after: str | None = None,
+        b_before: str | None = None,
+        top_k: int = 8,
+        mode: str = "hybrid",
+    ) -> dict:
+        """Temporal diff: the same query run in two time windows, side by
+        side, plus the source-level delta. Answers "how did we talk about X
+        then vs now" — the institutional-memory question a flat search can't.
+        Window values accept everything after:/before: accept (ISO or
+        relative like '30d'). The delta is source-set based; the caller (an
+        LLM, usually) narrates the content change from the two result sets."""
+
+        def _side(after: str | None, before: str | None) -> dict:
+            filters = []
+            if after:
+                filters.append(f"after:{after}")
+            if before:
+                filters.append(f"before:{before}")
+            res = self.search(
+                query, corpus_name, top_k=top_k, mode=mode, filters=filters
+            )
+            return {
+                "results": res,
+                "sources": sorted({r.source_id for r in res}),
+            }
+
+        a = _side(a_after, a_before)
+        b = _side(b_after, b_before)
+        a_set, b_set = set(a["sources"]), set(b["sources"])
+        return {
+            "windows": {
+                "a": {"after": a_after, "before": a_before},
+                "b": {"after": b_after, "before": b_before},
+            },
+            "a": a,
+            "b": b,
+            "only_in_a": sorted(a_set - b_set),
+            "only_in_b": sorted(b_set - a_set),
+            "in_both": sorted(a_set & b_set),
+        }
+
+    def corpus_stats(self, corpus_name: str) -> dict:
+        """Ops-facing health snapshot: counts, date coverage, gaps (days with
+        zero chunks inside the covered span — a broken archiver shows up as a
+        growing gap), and per-source chunk sizes."""
+        corpus = self.registry.get(corpus_name)
+        idx = self.bm25._load(corpus.name)
+        payloads = idx.payloads
+        by_source: dict[str, int] = {}
+        for p in payloads:
+            sid = p.get("source_id", "") or ""
+            by_source[sid] = by_source.get(sid, 0) + 1
+        ts = [float(p["doc_timestamp"]) for p in payloads
+              if p.get("doc_timestamp")]
+        span: dict = {"first": None, "last": None}
+        gap_days = 0
+        dated_days: set[int] = set()
+        if ts:
+            first, last = min(ts), max(ts)
+            span = {
+                "first": datetime.fromtimestamp(first, tz=timezone.utc)
+                .strftime("%Y-%m-%d"),
+                "last": datetime.fromtimestamp(last, tz=timezone.utc)
+                .strftime("%Y-%m-%d"),
+            }
+            dated_days = {int(t // 86400) for t in ts}
+            total_days = int(last // 86400) - int(first // 86400) + 1
+            gap_days = total_days - len(dated_days)
+        top_sources = dict(
+            sorted(by_source.items(), key=lambda kv: -kv[1])[:25]
+        )
+        return {
+            "corpus": corpus.name,
+            "chunks": len(payloads),
+            "docs": len(by_source),
+            "date_span": span,
+            "days_covered": len(dated_days),
+            "gap_days": gap_days,
+            "sources": top_sources,
+            # No silent caps: say when the source table was cut.
+            "sources_truncated": len(by_source) > len(top_sources),
+        }
+
+    def summarize_corpus(
+        self,
+        corpus_name: str,
+        after: str | None = None,
+        before: str | None = None,
+        sample: int = 40,
+    ) -> dict:
+        """Boot-context rollup of a corpus (optionally windowed): speaker
+        tally (from chunk enrichment), date span, top sources, and an evenly
+        spaced deterministic sample of chunks for an LLM to theme. Sampling
+        is explicit in the output — never a silent truncation."""
+        corpus = self.registry.get(corpus_name)
+        idx = self.bm25._load(corpus.name)
+        payloads = idx.payloads
+        if after or before:
+            filters = []
+            if after:
+                filters.append(f"after:{after}")
+            if before:
+                filters.append(f"before:{before}")
+            payloads = [
+                p for p in payloads
+                if _passes_filters(_payload_to_result(p, 0.0, 0.0, []), filters)
+            ]
+        speakers: dict[str, int] = {}
+        by_source: dict[str, int] = {}
+        ts: list[float] = []
+        for p in payloads:
+            md = p.get("metadata", {}) or {}
+            for sp in md.get("speakers") or []:
+                speakers[str(sp)] = speakers.get(str(sp), 0) + 1
+            sid = p.get("source_id", "") or ""
+            by_source[sid] = by_source.get(sid, 0) + 1
+            if p.get("doc_timestamp"):
+                ts.append(float(p["doc_timestamp"]))
+        span: dict = {"first": None, "last": None}
+        if ts:
+            span = {
+                "first": datetime.fromtimestamp(min(ts), tz=timezone.utc)
+                .strftime("%Y-%m-%d"),
+                "last": datetime.fromtimestamp(max(ts), tz=timezone.utc)
+                .strftime("%Y-%m-%d"),
+            }
+        n = len(payloads)
+        take = min(max(0, sample), n)
+        step = max(1, n // take) if take else 1
+        sample_payloads = payloads[::step][:take]
+        sample_chunks = [
+            {
+                "chunk_id": _chunk_id(
+                    corpus.name, p.get("source_id", ""), int(p.get("chunk_index", 0))
+                ),
+                "source_id": p.get("source_id", ""),
+                "text": (p.get("text", "") or "")[:240],
+            }
+            for p in sample_payloads
+        ]
+        return {
+            "corpus": corpus.name,
+            "chunks": n,
+            "date_span": span,
+            "top_speakers": sorted(speakers.items(), key=lambda kv: -kv[1])[:15],
+            "top_sources": sorted(by_source.items(), key=lambda kv: -kv[1])[:15],
+            "sampled": take < n,
+            "sample_chunks": sample_chunks,
+        }
+
     def _payload_for_result(self, r: SearchResult) -> dict | None:
         """Stored payload (with source_text) for a result's chunk."""
         corpus = self.registry.get(r.corpus)
