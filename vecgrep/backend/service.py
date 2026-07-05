@@ -18,6 +18,7 @@ from typing import Literal
 
 from .config import Settings, get_settings
 from .embed import EmbedBackend, EmbedBackendError, get_embed_backend
+from .aliases import aliases_path, expand_query, load_alias_map_cached
 from .assembly import (
     DEFAULT_FULL_K,
     DEFAULT_MAX_TOTAL,
@@ -409,8 +410,17 @@ class VecgrepService:
         filters: list[str] | None = None,
         explain: bool = False,
         include_superseded: bool = False,
+        expand_aliases: bool = True,
     ) -> list[SearchResult]:
         top_k = top_k or self.settings.default_top_k
+        if expand_aliases:
+            # Entity alias expansion (user-supplied map, outside the repo;
+            # empty/missing map = exact no-op). A query naming one surface
+            # form of an entity also matches evidence written under its
+            # other forms.
+            alias_map = load_alias_map_cached(aliases_path())
+            if alias_map:
+                query, _matched = expand_query(query, alias_map)
         if corpus_name:
             corpora = [self.registry.get(corpus_name)]
         else:
