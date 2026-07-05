@@ -208,6 +208,81 @@ def index(
     click.echo(_format(out))
 
 
+@cli.command()
+@click.argument("chunk_id")
+@click.option("--corpus", required=True)
+@click.option("--top-k", default=8, show_default=True)
+def related(chunk_id: str, corpus: str, top_k: int) -> None:
+    """Nearest neighbours of an existing chunk (query-by-example)."""
+    svc = VecgrepService(ephemeral=False)
+    try:
+        results = svc.related(chunk_id, corpus, top_k=top_k)
+    except (CorpusError, EmbedBackendError) as e:
+        raise click.ClickException(str(e))
+    for r in results:
+        click.echo(f"[{r.similarity_pct:5.1f}%] {r.chunk_id}  {r.source_id}")
+        click.echo(f"    {(r.chunk or '')[:160]}")
+
+
+@cli.command()
+@click.argument("query")
+@click.option("--corpus", required=True)
+@click.option("--a-after", default=None, help="Window A start (ISO or 30d).")
+@click.option("--a-before", default=None)
+@click.option("--b-after", default=None)
+@click.option("--b-before", default=None)
+@click.option("--top-k", default=8, show_default=True)
+def compare(query: str, corpus: str, a_after: str | None, a_before: str | None,
+            b_after: str | None, b_before: str | None, top_k: int) -> None:
+    """Temporal diff: one query, two time windows, source-level delta."""
+    svc = VecgrepService(ephemeral=False)
+    try:
+        out = svc.compare(query, corpus, a_after=a_after, a_before=a_before,
+                          b_after=b_after, b_before=b_before, top_k=top_k)
+    except (CorpusError, EmbedBackendError) as e:
+        raise click.ClickException(str(e))
+    for side in ("a", "b"):
+        w = out["windows"][side]
+        click.echo(f"— window {side.upper()} "
+                   f"({w['after'] or '…'} → {w['before'] or '…'}): "
+                   f"{len(out[side]['results'])} hit(s)")
+        for r in out[side]["results"][:top_k]:
+            click.echo(f"  [{r.similarity_pct:5.1f}%] {r.source_id}")
+    click.echo(f"only in A: {', '.join(out['only_in_a']) or '—'}")
+    click.echo(f"only in B: {', '.join(out['only_in_b']) or '—'}")
+    click.echo(f"in both:   {', '.join(out['in_both']) or '—'}")
+
+
+@cli.command()
+@click.argument("corpus")
+def stats(corpus: str) -> None:
+    """Corpus health: counts, date coverage, gap days, source sizes."""
+    import json as _json
+    svc = VecgrepService(ephemeral=False)
+    try:
+        click.echo(_json.dumps(svc.corpus_stats(corpus), indent=2))
+    except CorpusError as e:
+        raise click.ClickException(str(e))
+
+
+@cli.command()
+@click.argument("corpus")
+@click.option("--after", default=None, help="ISO or relative (7d, today).")
+@click.option("--before", default=None)
+@click.option("--sample", default=40, show_default=True)
+def summarize(corpus: str, after: str | None, before: str | None,
+              sample: int) -> None:
+    """Rollup: speakers, span, top sources, sampled chunks."""
+    import json as _json
+    svc = VecgrepService(ephemeral=False)
+    try:
+        click.echo(_json.dumps(
+            svc.summarize_corpus(corpus, after=after, before=before,
+                                 sample=sample), indent=2))
+    except CorpusError as e:
+        raise click.ClickException(str(e))
+
+
 def _run_budget_search(
     query: str,
     corpus: str | None,

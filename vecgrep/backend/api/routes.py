@@ -241,6 +241,59 @@ def timeline(req: TimelineRequest) -> list[TimelineGroup]:
     return [TimelineGroup(**g) for g in groups]
 
 
+@router.get("/related/{corpus}/{chunk_id}")
+def related(corpus: str, chunk_id: str, top_k: int = 8) -> dict:
+    """Nearest neighbours of an existing chunk (query-by-example)."""
+    svc = _service()
+    try:
+        results = svc.related(chunk_id, corpus, top_k=top_k)
+    except CorpusError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"hits": [_hit_out(r).model_dump() for r in results]}
+
+
+@router.post("/compare")
+def compare(req: dict) -> dict:
+    """Temporal diff: {query, corpus, a_after?, a_before?, b_after?,
+    b_before?, top_k?}. Same window grammar as after:/before: filters."""
+    try:
+        out = _service().compare(
+            req["query"], req["corpus"],
+            a_after=req.get("a_after"), a_before=req.get("a_before"),
+            b_after=req.get("b_after"), b_before=req.get("b_before"),
+            top_k=int(req.get("top_k") or 8),
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=400, detail=f"missing field: {e}")
+    except CorpusError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    for side in ("a", "b"):
+        out[side]["results"] = [
+            _hit_out(r).model_dump() for r in out[side]["results"]
+        ]
+    return out
+
+
+@router.get("/stats/{corpus}")
+def corpus_stats(corpus: str) -> dict:
+    """Corpus health snapshot (counts, date coverage, gaps, source sizes)."""
+    try:
+        return _service().corpus_stats(corpus)
+    except CorpusError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/summarize/{corpus}")
+def summarize_corpus(corpus: str, after: str = "", before: str = "",
+                     sample: int = 40) -> dict:
+    """Rollup: speakers, span, top sources, sampled chunks (explicit flag)."""
+    try:
+        return _service().summarize_corpus(
+            corpus, after=after or None, before=before or None, sample=sample)
+    except CorpusError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @router.get("/chunk/{corpus}/{chunk_id}", response_model=ChunkWindow)
 def get_chunk(corpus: str, chunk_id: str, window: str = str(_DEFAULT_CHUNK_WINDOW)) -> ChunkWindow:
     """Fetch an expanded context window around a chunk.

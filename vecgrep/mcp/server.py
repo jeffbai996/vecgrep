@@ -218,6 +218,67 @@ def _run_get_source(corpus: str, source_id: str) -> str:
     return json.dumps(doc, indent=2, ensure_ascii=False)
 
 
+def _run_related(args: dict) -> str:
+    """Nearest neighbours of an existing chunk (query-by-example)."""
+    svc = _svc()
+    try:
+        results = svc.related(
+            args["chunk_id"], args["corpus"], top_k=int(args.get("top_k") or 8)
+        )
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+    return json.dumps(
+        [_result_payload(r) for r in results], indent=2, ensure_ascii=False
+    )
+
+
+def _run_compare(args: dict) -> str:
+    """Temporal diff: one query, two time windows, source-level delta."""
+    svc = _svc()
+    try:
+        out = svc.compare(
+            args["query"],
+            args["corpus"],
+            a_after=args.get("a_after"),
+            a_before=args.get("a_before"),
+            b_after=args.get("b_after"),
+            b_before=args.get("b_before"),
+            top_k=int(args.get("top_k") or 8),
+        )
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+    out["a"]["results"] = [_result_payload(r) for r in out["a"]["results"]]
+    out["b"]["results"] = [_result_payload(r) for r in out["b"]["results"]]
+    return json.dumps(out, indent=2, ensure_ascii=False)
+
+
+def _run_stats(args: dict) -> str:
+    """Corpus health snapshot: counts, date coverage, gaps, source sizes."""
+    svc = _svc()
+    try:
+        return json.dumps(svc.corpus_stats(args["corpus"]), indent=2,
+                          ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def _run_summarize(args: dict) -> str:
+    """Boot-context rollup: speakers, span, sources, sampled chunks."""
+    svc = _svc()
+    try:
+        return json.dumps(
+            svc.summarize_corpus(
+                args["corpus"],
+                after=args.get("after"),
+                before=args.get("before"),
+                sample=int(args.get("sample") or 40),
+            ),
+            indent=2, ensure_ascii=False,
+        )
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
 def _run_list_aliases() -> str:
     """Read-only view of the active alias-expansion map."""
     from ..backend.aliases import describe_aliases
@@ -662,6 +723,77 @@ def build_mcp_server() -> Any:
                 inputSchema={"type": "object", "properties": {}},
             ),
             Tool(
+                name="related",
+                description=(
+                    "Nearest neighbours of an EXISTING chunk by its stored "
+                    "vector (query-by-example). Feed it a chunk_id from any "
+                    "search/stub hit to pull more evidence like it."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "corpus": {"type": "string"},
+                        "chunk_id": {"type": "string"},
+                        "top_k": {"type": "integer", "default": 8},
+                    },
+                    "required": ["corpus", "chunk_id"],
+                },
+            ),
+            Tool(
+                name="compare",
+                description=(
+                    "Temporal diff: run one query in TWO time windows and get "
+                    "both result sets plus the source-level delta. Answers "
+                    "'how did we talk about X then vs now'. Window values "
+                    "accept ISO dates or relative forms (30d, 2w, today)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "corpus": {"type": "string"},
+                        "a_after": {"type": "string"},
+                        "a_before": {"type": "string"},
+                        "b_after": {"type": "string"},
+                        "b_before": {"type": "string"},
+                        "top_k": {"type": "integer", "default": 8},
+                    },
+                    "required": ["query", "corpus"],
+                },
+            ),
+            Tool(
+                name="stats",
+                description=(
+                    "Corpus health snapshot: chunk/doc counts, date coverage "
+                    "span, gap days (zero-chunk days inside the span — a "
+                    "broken archiver shows here), per-source chunk counts."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {"corpus": {"type": "string"}},
+                    "required": ["corpus"],
+                },
+            ),
+            Tool(
+                name="summarize_corpus",
+                description=(
+                    "Rollup of a corpus (optionally time-windowed): speaker "
+                    "tally, date span, top sources, and an evenly-spaced "
+                    "sample of chunks to theme. Sampling is explicit in the "
+                    "output, never silent."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "corpus": {"type": "string"},
+                        "after": {"type": "string"},
+                        "before": {"type": "string"},
+                        "sample": {"type": "integer", "default": 40},
+                    },
+                    "required": ["corpus"],
+                },
+            ),
+            Tool(
                 name="propose_write",
                 description=(
                     "PROPOSE a new entry for a corpus. Writes NOTHING — "
@@ -750,6 +882,14 @@ def build_mcp_server() -> Any:
                 text = _run_browse(args)
             elif name == "get_source":
                 text = _run_get_source(args.get("corpus", ""), args.get("source_id", ""))
+            elif name == "related":
+                text = _run_related(args)
+            elif name == "compare":
+                text = _run_compare(args)
+            elif name == "stats":
+                text = _run_stats(args)
+            elif name == "summarize_corpus":
+                text = _run_summarize(args)
             elif name == "list_aliases":
                 text = _run_list_aliases()
             elif name == "propose_write":
@@ -1047,6 +1187,60 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
     def list_aliases() -> str:
         """No arguments."""
         return _run_list_aliases()
+
+    @fmcp.tool(
+        description=(
+            "Nearest neighbours of an EXISTING chunk by its stored vector "
+            "(query-by-example). Feed it a chunk_id from any search/stub hit "
+            "to pull more evidence like it."
+        )
+    )
+    def related(corpus: str, chunk_id: str, top_k: int = 8) -> str:
+        """chunk_id exactly as returned by search/stubs."""
+        return _run_related({"corpus": corpus, "chunk_id": chunk_id,
+                             "top_k": top_k})
+
+    @fmcp.tool(
+        description=(
+            "Temporal diff: one query in TWO time windows, both result sets "
+            "plus the source-level delta. 'How did we talk about X then vs "
+            "now'. Windows accept ISO dates or relative forms (30d, 2w, "
+            "today)."
+        )
+    )
+    def compare(query: str, corpus: str, a_after: str = "",
+                a_before: str = "", b_after: str = "", b_before: str = "",
+                top_k: int = 8) -> str:
+        """Empty window bounds mean unbounded on that side."""
+        return _run_compare({
+            "query": query, "corpus": corpus,
+            "a_after": a_after or None, "a_before": a_before or None,
+            "b_after": b_after or None, "b_before": b_before or None,
+            "top_k": top_k,
+        })
+
+    @fmcp.tool(
+        description=(
+            "Corpus health snapshot: chunk/doc counts, date coverage span, "
+            "gap days (a broken archiver shows here), per-source sizes."
+        )
+    )
+    def stats(corpus: str) -> str:
+        """One corpus per call."""
+        return _run_stats({"corpus": corpus})
+
+    @fmcp.tool(
+        description=(
+            "Rollup of a corpus (optionally time-windowed): speaker tally, "
+            "date span, top sources, evenly-spaced sample of chunks to "
+            "theme. Sampling is explicit, never silent."
+        )
+    )
+    def summarize_corpus(corpus: str, after: str = "", before: str = "",
+                         sample: int = 40) -> str:
+        """after/before accept ISO or relative (7d, today)."""
+        return _run_summarize({"corpus": corpus, "after": after or None,
+                               "before": before or None, "sample": sample})
 
     @fmcp.tool(
         description=(

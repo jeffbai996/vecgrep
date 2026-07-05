@@ -140,6 +140,27 @@ class QdrantStore:
             )
         return hits
 
+    def get_vector(self, collection: str, point_id: str) -> list[float] | None:
+        """Stored embedding vector for one point — powers query-by-example
+        (`related`) without re-embedding. None if the point is missing."""
+        existing = {c.name for c in self.client.get_collections().collections}
+        if collection not in existing:
+            return None
+        try:
+            points = self.client.retrieve(
+                collection_name=collection,
+                ids=[point_id],
+                with_payload=False,
+                with_vectors=True,
+            )
+        except Exception:
+            return None
+        if not points or points[0].vector is None:
+            return None
+        v = points[0].vector
+        # Named-vector collections return a dict; we use a single unnamed one.
+        return list(v) if not isinstance(v, dict) else None
+
     def get_by_id(self, collection: str, point_id: str) -> dict | None:
         """Fetch a single point's payload by id. Returns None if missing."""
         existing = {c.name for c in self.client.get_collections().collections}
