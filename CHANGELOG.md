@@ -14,6 +14,15 @@ filters, timeline reconstruction, clearer score output, and alias/entity
 expansion. See `docs/superpowers/specs/` for the design.
 
 ### Added
+- **Source-span dedup / MMR** (`vecgrep/backend/assembly.py`): result
+  selection is now diversity-aware. The hard dedup extends beyond span
+  overlap to same-source text clones at distant spans (repeated messages /
+  bot alert spam), and top_k selection uses greedy MMR (relevance-dominant,
+  λ=0.7) with near-clone exclusion, on both the fused-score and rerank
+  paths. Corpora without near-dups degrade to plain score order. Eval:
+  dup-probe redundancy 0.089 → 0.022; exact-keyword redundancy 0.111 → 0.0
+  with expected-source recall 0.67 → 1.0 (freed slots went to distinct
+  evidence).
 - **Eval harness** (`tests/eval_harness.py`): synthetic PII-free Discord-style
   transcript fixtures (bilingual, alias-bearing, multi-channel incident, bot
   alert spam, exact-keyword + semantic-vague cases) + 7 golden benchmark

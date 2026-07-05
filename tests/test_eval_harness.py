@@ -107,15 +107,13 @@ def test_run_eval_produces_metrics_for_every_query(svc) -> None:
 
 # ── the baseline captures the PROBLEMS the release fixes ─────────────────────
 
-def test_baseline_shows_duplicate_slices_survive_today(svc) -> None:
-    """The dup-stress probe returns near-identical repeated content at
-    DIFFERENT char spans (quote-spam), which span-overlap dedup cannot catch.
-    Baseline redundancy must be visibly nonzero — this is the Phase 1 target.
-    If this starts failing after Phase 1 lands, that's the improvement, and
-    the assertion flips in that phase's tests."""
-    eh.build_eval_corpus(svc)
-    report = eh.run_eval(svc)
-    assert report["queries"]["dup_stress"]["redundancy"] > 0.0
+def test_v070_baseline_recorded_the_duplicate_problem() -> None:
+    """Historical record: the committed v0.7.0 baseline captured near-identical
+    repeated content surviving span-overlap dedup (the Phase 1 target). Live
+    behavior has since improved — tests/test_mmr.py asserts the improvement;
+    this asserts the problem was real and measured."""
+    data = json.loads(BASELINE.read_text(encoding="utf-8"))
+    assert data["queries"]["dup_stress"]["redundancy"] > 0.0
 
 
 def test_baseline_shows_date_leakage_today(svc) -> None:

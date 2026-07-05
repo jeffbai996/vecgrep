@@ -17,6 +17,7 @@ from typing import Literal
 
 from .config import Settings, get_settings
 from .embed import EmbedBackend, EmbedBackendError, get_embed_backend
+from .assembly import dedup_near_duplicates, mmr_select
 from .embed.cache import CachedBackend, EmbedCache
 from .ingestion.adapters import (
     AdapterError,
@@ -405,19 +406,21 @@ class VecgrepService:
         if filters:
             results = [r for r in results if _passes_filters(r, filters, default_active=True)]
 
-        # Collapse near-duplicate overlapping chunks from the same source before
-        # truncating, so adjacent sentence-windows don't each eat a top_k slot.
-        results = _dedup_overlapping(results)
+        # Collapse near-duplicate chunks from the same source before selecting,
+        # so adjacent sentence-windows and repeated messages (bot alert spam,
+        # quoted replies) don't each eat a top_k slot.
+        results = dedup_near_duplicates(results)
 
         if rerank:
             results = self._apply_rerank(query, results, top_k, rerank_model, explain=explain)
         else:
+            # Diversity-aware top_k: MMR keeps relevance dominant but skips
+            # near-clones of already-selected results, so the returned set is
+            # distinct evidence, not five slices of one exchange. On corpora
+            # with no near-dups this degrades to plain score order.
+            results = mmr_select(results, top_k)
             # Display order matches the displayed similarity_pct so the user
             # can trust their eyes (a higher % is always above a lower %).
-            # `r.score` is the underlying RRF fused score — used for selection
-            # of the top_k pool, not for visible ranking.
-            results.sort(key=lambda r: r.score, reverse=True)
-            results = results[:top_k]
             results.sort(key=lambda r: r.similarity_pct, reverse=True)
         return results
 
@@ -438,7 +441,7 @@ class VecgrepService:
         pairs = [(c.chunk, c) for c in candidates]
         scored = _rerank(query, pairs, model_name or DEFAULT_RERANKER)
         out: list[SearchResult] = []
-        for score, original in scored[:top_k]:
+        for score, original in scored:
             r: SearchResult = original  # type: ignore[assignment]
             # The cross-encoder score IS the canonical relevance signal when
             # reranking is on: it's the single number that best approximates
@@ -455,9 +458,14 @@ class VecgrepService:
                 r.matched_by = [*r.matched_by, "rerank"]
             out.append(r)
         # `scored` is sorted by reranker score desc, and we appended in that
-        # order -- so `out` already reflects the reranked ordering. Do NOT
-        # re-sort by similarity_pct here (that would undo the rerank).
-        return out
+        # order -- so `out` already reflects the reranked ordering. MMR selects
+        # top_k from it using the rerank score as relevance, skipping
+        # near-clones; selection order starts from the best hit, so the
+        # reranked ordering survives for everything selected. Do NOT re-sort
+        # by similarity_pct here (that would undo the rerank).
+        return mmr_select(
+            out, top_k, key=lambda r: r.explain.get("rerank_score", 0.0)
+        )
 
     def _search_one(
         self,
@@ -1289,34 +1297,11 @@ def _rerank_to_pct(prob: float) -> float:
     return 100.0 / (1.0 + math.exp(-x))
 
 
-def _dedup_overlapping(results: list[SearchResult], min_overlap: float = 0.5) -> list[SearchResult]:
-    """Drop near-duplicate chunks from the same source with overlapping spans.
-
-    The sentence-window chunker emits overlapping windows (stride < window), so
-    one passage can surface as several hits at different ranks, wasting top_k
-    slots. Two hits collide when they share a (corpus, source_id) and their
-    char ranges overlap by >= `min_overlap` of the shorter span. We keep the
-    higher-scoring hit of each colliding group and preserve input order
-    otherwise (callers sort afterward).
-    """
-    kept: list[SearchResult] = []
-    for r in results:
-        dup_idx = None
-        for i, k in enumerate(kept):
-            if k.corpus != r.corpus or k.source_id != r.source_id:
-                continue
-            lo = max(k.chunk_start, r.chunk_start)
-            hi = min(k.chunk_end, r.chunk_end)
-            overlap = max(0, hi - lo)
-            shorter = min(k.chunk_end - k.chunk_start, r.chunk_end - r.chunk_start)
-            if shorter > 0 and overlap / shorter >= min_overlap:
-                dup_idx = i
-                break
-        if dup_idx is None:
-            kept.append(r)
-        elif r.score > kept[dup_idx].score:
-            kept[dup_idx] = r  # replace with the stronger of the pair
-    return kept
+# Near-duplicate collapse + MMR selection live in assembly.py (Phase 1 of the
+# memory-v1 release). `_dedup_overlapping` remains as the historical name:
+# same span-overlap semantics as v0.7.0, now also collapsing same-source text
+# clones at distant spans (repeated messages / bot alert spam).
+_dedup_overlapping = dedup_near_duplicates
 
 
 def _hit_to_result(h: StoredHit, matched_by: list[str], model: str | None = None) -> SearchResult:
