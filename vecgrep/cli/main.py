@@ -296,6 +296,58 @@ def _run_budget_search(
 
 
 @cli.command()
+@click.argument("query")
+@click.option("--corpus", default=None, help="Limit to one corpus (default: all).")
+@click.option("--top", "top_k", default=10, type=int, show_default=True,
+              help="Anchor hits the underlying search pulls.")
+@click.option("--max-groups", default=4, type=int, show_default=True,
+              help="Max source files in the timeline.")
+@click.option(
+    "--mode", default="hybrid",
+    type=click.Choice(["hybrid", "vector", "bm25"]), show_default=True,
+)
+@click.option("--filter", "filters", multiple=True,
+              help="Hard filters, same forms as search --filter.")
+@click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
+def timeline(
+    query: str,
+    corpus: str | None,
+    top_k: int,
+    max_groups: int,
+    mode: str,
+    filters: tuple[str, ...],
+    json_out: bool,
+) -> None:
+    """Reconstruct 'what happened': chronological events grouped by file."""
+    svc = VecgrepService(ephemeral=False)
+    try:
+        groups = svc.timeline(
+            query, corpus, top_k=top_k, max_groups=max_groups,
+            mode=mode, filters=list(filters) or None,
+        )
+    except (CorpusError, EmbedBackendError) as e:
+        raise click.ClickException(str(e))
+    if json_out:
+        click.echo(json.dumps(groups, indent=2, ensure_ascii=False))
+        return
+    if not groups:
+        click.echo("no timeline found.")
+        return
+    for g in groups:
+        day = ""
+        if g["doc_timestamp"]:
+            day = datetime.fromtimestamp(
+                g["doc_timestamp"], tz=timezone.utc
+            ).strftime(" — %Y-%m-%d")
+        click.echo(f"\n== {g['source_id']}{day} ==")
+        if g["events"]:
+            for e in g["events"]:
+                click.echo(f"  {e['time']}  {e['speaker']}: {e['text']}")
+        elif g["slice_text"]:
+            click.echo(g["slice_text"])
+
+
+@cli.command()
 @click.argument("corpus")
 @click.argument("chunk_id")
 @click.option(

@@ -122,6 +122,21 @@ def _run_get_chunk(corpus: str, chunk_id: str, window: int = 400) -> str:
     return json.dumps(win, indent=2)
 
 
+def _run_timeline(args: dict) -> str:
+    """'What happened?' mode — contiguous chronological slices grouped by
+    source file, transcript slices parsed into speaker/time/text events."""
+    svc = VecgrepService()
+    groups = svc.timeline(
+        args["query"],
+        args.get("corpus"),
+        top_k=int(args.get("top_k") or 10),
+        max_groups=int(args.get("max_groups") or 4),
+        mode=args.get("mode", "hybrid"),
+        filters=args.get("filters") or None,
+    )
+    return json.dumps(groups, indent=2, ensure_ascii=False)
+
+
 def _run_list_corpora() -> str:
     svc = VecgrepService()
     corpora = [
@@ -442,6 +457,33 @@ def build_mcp_server() -> Any:
                 },
             ),
             Tool(
+                name="timeline",
+                description=(
+                    "'What happened?' mode: reconstructs the event sequence "
+                    "around an incident — contiguous chronological slices "
+                    "grouped by source file, with speakers + timestamps "
+                    "preserved. Use for narrative/incident questions instead "
+                    "of piecing together ranked chunks. Supports the same "
+                    "hard filters as search (date:/after:/before:/channel:)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "corpus": {"type": "string"},
+                        "top_k": {"type": "integer", "default": 10},
+                        "max_groups": {"type": "integer", "default": 4},
+                        "mode": {
+                            "type": "string",
+                            "enum": ["hybrid", "vector", "bm25"],
+                            "default": "hybrid",
+                        },
+                        "filters": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["query"],
+                },
+            ),
+            Tool(
                 name="get_chunk",
                 description=(
                     "Expand a chunk to its surrounding context by chunk_id "
@@ -482,6 +524,8 @@ def build_mcp_server() -> Any:
         try:
             if name == "search":
                 text = _run_search(args)
+            elif name == "timeline":
+                text = _run_timeline(args)
             elif name == "get_chunk":
                 text = _run_get_chunk(
                     args.get("corpus", ""),
@@ -579,6 +623,32 @@ def build_http_app() -> Any:
             "budget": budget,
             "full_k": full_k,
             "token_ceiling": token_ceiling,
+        })
+
+    @fmcp.tool(
+        description=(
+            "'What happened?' mode: reconstructs the event sequence around an "
+            "incident — contiguous chronological slices grouped by source "
+            "file, speakers + timestamps preserved. Use for narrative/incident "
+            "questions instead of piecing together ranked chunks."
+        )
+    )
+    def timeline(
+        query: str,
+        corpus: str | None = None,
+        top_k: int = 10,
+        max_groups: int = 4,
+        mode: str = "hybrid",
+        filters: list[str] | None = None,
+    ) -> str:
+        """Same hard filters as search (date:/after:/before:/channel:...)."""
+        return _run_timeline({
+            "query": query,
+            "corpus": corpus,
+            "top_k": top_k,
+            "max_groups": max_groups,
+            "mode": mode,
+            "filters": filters,
         })
 
     @fmcp.tool(
