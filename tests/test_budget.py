@@ -195,3 +195,31 @@ def test_default_split_head_is_10():
     full, stubs = split_full_and_stubs(results)  # defaults
     assert len(full) == 10
     assert len(full) + len(stubs) <= 100
+
+
+# ── enrichment lands in indexed payloads (F-1..F-3 integration) ─────────────
+
+def test_indexed_chunks_carry_enrichment_and_filter(svc) -> None:
+    from tests import eval_harness as eh
+
+    eh.build_eval_corpus(svc)
+    hits = svc.search("relay-service", "evalchat", top_k=10)
+    assert hits
+    enriched = [h for h in hits if isinstance(h.metadata.get("speakers"), list)]
+    assert enriched, "index path must attach chunk enrichment metadata"
+
+    by_alice = svc.search("relay-service", "evalchat", top_k=10,
+                          filters=["speaker:alice"])
+    assert by_alice, "alice speaks in the fixtures"
+    assert all("alice" in [s.lower().removesuffix(" [bot]")
+                           for s in h.metadata.get("speakers", [])]
+               for h in by_alice)
+
+    bots_only = svc.search("relay-service", "evalchat", top_k=10,
+                           filters=["bot:true"])
+    assert bots_only, "ops-bot [bot] speaks in the fixtures"
+    no_alice = svc.search("relay-service", "evalchat", top_k=10,
+                          filters=["-speaker:alice"])
+    assert all(
+        "alice" not in [str(s).lower() for s in h.metadata.get("speakers", [])]
+        for h in no_alice)
