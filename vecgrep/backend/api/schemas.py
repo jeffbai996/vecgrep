@@ -89,6 +89,34 @@ class Calibration(BaseModel):
     bm25_floor: float
 
 
+class TimelineRequest(BaseModel):
+    query: str
+    corpus: str | None = None
+    top_k: int = 10
+    max_groups: int = 4
+    padding: int = 1200
+    mode: str = "hybrid"
+    filters: list[str] = []
+
+
+class TimelineEvent(BaseModel):
+    speaker: str
+    time: str
+    text: str
+
+
+class TimelineGroup(BaseModel):
+    """One source file's contiguous slice, parsed into chronological events.
+    slice_text is set only when the source isn't a transcript (no events)."""
+    corpus: str
+    source_id: str
+    doc_timestamp: float | None = None
+    slice_start: int
+    slice_end: int
+    events: list[TimelineEvent]
+    slice_text: str = ""
+
+
 class SearchResponse(BaseModel):
     hits: list[SearchHit]
     # Budget mode only: the stub tail below the full-context hits.

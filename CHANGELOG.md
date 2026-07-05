@@ -14,6 +14,14 @@ filters, timeline reconstruction, clearer score output, and alias/entity
 expansion. See `docs/superpowers/specs/` for the design.
 
 ### Added
+- **Timeline mode** (`vecgrep/backend/timeline.py`): "what happened?"
+  questions get an ordered event sequence instead of ranked chunks. A normal
+  search (dedup/MMR/filters apply) finds anchor chunks; the best source
+  files each contribute ONE contiguous slice spanning their anchors, parsed
+  into (speaker, time, text) events via the transcript format — chronological
+  within a file, files oldest → newest, non-transcript sources degrade to
+  the raw slice. Surfaces: `service.timeline()`, `POST /api/timeline`, MCP
+  `timeline` tool (stdio + HTTP), CLI `vecgrep timeline "<query>"`.
 - **Clearer score output**: results now carry `relevance_pct` (going-forward
   name; `similarity_pct` stays as a compatibility alias) and a qualitative
   `relevance_label` (exact ≥95 / strong ≥75 / related ≥40 / weak) on the

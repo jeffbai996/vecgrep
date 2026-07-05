@@ -23,6 +23,8 @@ from .schemas import (
     SearchRequest,
     SearchResponse,
     SearchStub,
+    TimelineGroup,
+    TimelineRequest,
 )
 
 
@@ -210,6 +212,30 @@ def search(req: SearchRequest) -> SearchResponse:
         hits=[_hit_out(r) for r in results],
         calibration=Calibration(**svc.calibration(req.corpus)),
     )
+
+
+@router.post("/timeline", response_model=list[TimelineGroup])
+def timeline(req: TimelineRequest) -> list[TimelineGroup]:
+    """'What happened?' mode: contiguous chronological slices grouped by
+    source file, transcript slices parsed into (speaker, time, text) events."""
+    svc = _service()
+    if req.mode not in ("hybrid", "vector", "bm25"):
+        raise HTTPException(status_code=400, detail=f"Unknown search mode: {req.mode}")
+    try:
+        groups = svc.timeline(
+            req.query,
+            req.corpus,
+            top_k=req.top_k,
+            max_groups=req.max_groups,
+            padding=req.padding,
+            mode=req.mode,
+            filters=req.filters or None,
+        )
+    except CorpusError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except EmbedBackendError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return [TimelineGroup(**g) for g in groups]
 
 
 @router.get("/chunk/{corpus}/{chunk_id}", response_model=ChunkWindow)

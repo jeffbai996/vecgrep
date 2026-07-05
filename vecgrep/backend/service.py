@@ -48,6 +48,7 @@ from .store import (
     QdrantStore,
     StoredHit,
 )
+from .timeline import ANCHOR_TOP_K, MAX_GROUPS, SLICE_PADDING, build_timeline
 
 
 CHUNKERS: dict[str, type[Chunker]] = {
@@ -480,6 +481,38 @@ class VecgrepService:
         results = self.search(query, corpus_name, top_k=max_total, **kwargs)
         return split_full_and_stubs(
             results, full_k=full_k, max_total=max_total, token_ceiling=token_ceiling
+        )
+
+    def timeline(
+        self,
+        query: str,
+        corpus_name: str | None = None,
+        top_k: int = ANCHOR_TOP_K,
+        max_groups: int = MAX_GROUPS,
+        padding: int = SLICE_PADDING,
+        **kwargs,
+    ) -> list[dict]:
+        """'What happened?' mode: contiguous chronological slices, not chunks.
+
+        Runs a normal search (dedup/MMR/filters all apply) to find anchor
+        chunks, keeps the best `max_groups` source files, cuts ONE contiguous
+        slice per file spanning its anchors (+`padding` chars each side), and
+        parses transcript slices into (speaker, time, text) events — in
+        document order, which for transcripts IS chronological order. Groups
+        come back oldest → newest. Non-transcript sources return the raw
+        slice with no events. Extra kwargs pass to search() (mode, filters…).
+        """
+        anchors = self.search(query, corpus_name, top_k=top_k, **kwargs)
+
+        def _payload_for(r: SearchResult) -> dict | None:
+            corpus = self.registry.get(r.corpus)
+            payload = self.store.get_by_id(_collection_for(corpus.name), r.chunk_id)
+            if payload is None:
+                payload = self.bm25.get_by_id(corpus.name, r.chunk_id)
+            return payload
+
+        return build_timeline(
+            anchors, _payload_for, max_groups=max_groups, padding=padding
         )
 
     def _apply_rerank(
