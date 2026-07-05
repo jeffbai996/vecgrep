@@ -50,9 +50,11 @@ SHINGLE_SIM = 0.95
 # ── result budget (full tier + stub tail) ────────────────────────────────────
 # The assistant gets breadth without a blown context: the head of the ranking
 # keeps context windows ("full"), the tail degrades to one-line stubs emitted
-# until a token ceiling. 8 + 72 = 80 mirrors the review's budget sketch.
-DEFAULT_FULL_K = 8
-DEFAULT_MAX_TOTAL = 80
+# until a token ceiling. 10 + 90 = 100 (Jeff 2026-07-05, up from 8+72=80).
+# max_total is a CAP, not a target — token_ceiling stays the real limit, so a
+# dense result set legitimately returns fewer stubs.
+DEFAULT_FULL_K = 10
+DEFAULT_MAX_TOTAL = 100
 DEFAULT_STUB_TOKEN_CEILING = 4000
 _SNIPPET_CHARS = 160
 # Cheap deterministic token estimate (~4 chars/token for EN/code, safely
