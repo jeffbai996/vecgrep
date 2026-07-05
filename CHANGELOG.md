@@ -14,6 +14,15 @@ filters, timeline reconstruction, clearer score output, and alias/entity
 expansion. See `docs/superpowers/specs/` for the design.
 
 ### Added
+- **Alias / entity expansion** (`vecgrep/backend/aliases.py`): one entity,
+  many surface forms (nickname ⇄ handle ⇄ another language). A query naming
+  any form expands with the entity's other forms before retrieval, so
+  evidence written under a different form still surfaces. The map is
+  user-supplied personal data OUTSIDE the repo (`$VECGREP_HOME/aliases.json`
+  or `VECGREP_ALIASES_FILE`; generic example at `docs/aliases.example.json`);
+  empty/missing map is an exact no-op. ASCII forms match on word boundaries
+  ("ali" never fires inside "alignment"), CJK forms by containment.
+  Config-driven, not learned. Opt out per call with `expand_aliases=False`.
 - **Timeline mode** (`vecgrep/backend/timeline.py`): "what happened?"
   questions get an ordered event sequence instead of ranked chunks. A normal
   search (dedup/MMR/filters apply) finds anchor chunks; the best source

@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy to $VECGREP_HOME/aliases.json (or point VECGREP_ALIASES_FILE at it). One entity per key: canonical form -> other surface forms (nicknames, handles, other languages). This file is PERSONAL DATA - keep your real map outside any repo.",
+  "alice": ["ali", "alice_dev", "小艾"],
+  "project-x": ["projx", "the pipeline"]
+}
