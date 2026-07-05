@@ -178,3 +178,19 @@ def test_web_ui_default_hits_is_20() -> None:
     ).read_text(encoding="utf-8")
     assert "useState(20)" in src, "web UI default hit count must be 20"
     assert "useState(5)" not in src
+
+
+def test_default_budget_is_10_full_100_total():
+    """Jeff's 2026-07-05 bump: 10 full + up to 90 stubs. max_total stays a CAP
+    — token_ceiling is the real limit, so a dense set legitimately yields
+    fewer stubs. These defaults are what the API/CLI/MCP inherit."""
+    from vecgrep.backend.assembly import DEFAULT_FULL_K, DEFAULT_MAX_TOTAL
+    assert DEFAULT_FULL_K == 10
+    assert DEFAULT_MAX_TOTAL == 100
+
+
+def test_default_split_head_is_10():
+    results = [_hit(i, score=1.0 - i * 0.01) for i in range(30)]
+    full, stubs = split_full_and_stubs(results)  # defaults
+    assert len(full) == 10
+    assert len(full) + len(stubs) <= 100
