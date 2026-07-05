@@ -16,6 +16,15 @@ re-index of the `chats` corpus (~21k chunks) is therefore mostly re-chunk +
 cache-hit + upsert, not 21k fresh embeddings. Still: it rewrites every point
 in Qdrant and the BM25 store for the corpus.
 
+## ⚠️ The CLI delegates to the running server
+
+`vecgrep index` silently POSTs to the live API server when one is up
+(`_api_alive()` in cli/main.py) — so with vecgrep-serve running OLD code, a
+re-index runs OLD code no matter which checkout you invoke it from, and no
+enrichment lands. (This ate the first smoke run of this very feature.)
+**Restart vecgrep-serve onto the new build BEFORE re-indexing**, or force the
+in-process path with `VECGREP_API_PORT=1` (dead port → CLI runs locally).
+
 ## Staged procedure (do NOT run against the live corpus unprompted)
 
 1. **Smoke on a scratch corpus first** (any box, new code):
