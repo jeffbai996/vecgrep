@@ -30,10 +30,14 @@ def client_with_token(vg_home, monkeypatch: pytest.MonkeyPatch) -> Iterator[Test
         yield client
 
 
-def test_mcp_endpoint_requires_auth(client_with_token: TestClient) -> None:
-    # No Authorization header → 401, same shape as the REST gate.
+def test_mcp_open_when_oauth_off(client_with_token: TestClient) -> None:
+    # The static-token gate on /mcp was RETIRED (OAuth replaces it; /mcp is
+    # network-trusted when OAuth is off — reached over localhost/tailnet/secret
+    # funnel path). So an unauthenticated POST is no longer a flat 401; it
+    # reaches the MCP handler (which may 400 on a malformed body, but is NOT a
+    # static-token 401). Auth-on behavior is covered once OAuth mounting lands.
     resp = client_with_token.post("/mcp", json={})
-    assert resp.status_code == 401
+    assert resp.status_code != 401  # static-token gate is gone
 
 
 def test_mcp_endpoint_responds_to_initialize(client_with_token: TestClient) -> None:
