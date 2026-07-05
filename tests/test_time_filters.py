@@ -165,3 +165,74 @@ def test_filters_compose_with_budget(svc) -> None:
         assert "2026-01-08" not in r.source_id
     for s in stubs:
         assert "2026-01-08" not in s.source_id
+
+
+# ── relative time forms (F-4) ────────────────────────────────────────────────
+# after:7d / after:24h / before:yesterday / date:today — resolved against an
+# injected `now` so tests are deterministic. ISO forms unchanged.
+
+_NOW = _ts("2026-07-05T12:00")  # fixed reference clock for every test below
+
+
+def test_after_relative_days() -> None:
+    r = _hit(_ts("2026-07-01T12:00"))          # 4 days old
+    assert _passes_filters(r, ["after:7d"], now=_NOW)
+    assert not _passes_filters(r, ["after:3d"], now=_NOW)
+
+
+def test_after_relative_hours_and_weeks() -> None:
+    r = _hit(_ts("2026-07-05T09:00"))          # 3h old
+    assert _passes_filters(r, ["after:24h"], now=_NOW)
+    assert not _passes_filters(r, ["after:2h"], now=_NOW)
+    old = _hit(_ts("2026-06-15T12:00"))        # ~3 weeks old
+    assert _passes_filters(old, ["after:4w"], now=_NOW)
+    assert not _passes_filters(old, ["after:2w"], now=_NOW)
+
+
+def test_date_today_and_before_yesterday() -> None:
+    today = _hit(_ts("2026-07-05T03:00"))
+    yesterday = _hit(_ts("2026-07-04T15:00"))
+    assert _passes_filters(today, ["date:today"], now=_NOW)
+    assert not _passes_filters(yesterday, ["date:today"], now=_NOW)
+    assert _passes_filters(yesterday, ["date:yesterday"], now=_NOW)
+    assert _passes_filters(yesterday, ["before:today"], now=_NOW)
+    assert not _passes_filters(today, ["before:today"], now=_NOW)
+
+
+def test_relative_garbage_fails_closed() -> None:
+    r = _hit(_ts("2026-07-05T03:00"))
+    assert not _passes_filters(r, ["after:7x"], now=_NOW)
+    assert not _passes_filters(r, ["after:someday"], now=_NOW)
+
+
+def test_iso_forms_unchanged_with_now_param() -> None:
+    r = _hit(_ts("2026-01-15T08:00"))
+    assert _passes_filters(r, ["after:2026-01-15"], now=_NOW)
+
+
+# ── negation (F-5) ───────────────────────────────────────────────────────────
+
+def test_negated_corpus_excludes() -> None:
+    r = _hit(_ts("2026-07-05T03:00"))          # corpus "c" per _hit
+    assert not _passes_filters(r, ["-corpus:c"])
+    assert _passes_filters(r, ["-corpus:scratch"])
+
+
+def test_negated_source_glob_excludes() -> None:
+    r = _hit(_ts("2026-07-05T03:00"))          # source_id "chan/2026-*.md"
+    assert not _passes_filters(r, [f"-source:{r.source_id}"])
+    assert _passes_filters(r, ["-source:*/other/*"])
+
+
+def test_negated_channel_excludes() -> None:
+    r = _hit(_ts("2026-07-05T03:00"))
+    r.metadata["channel"] = "cl-3"
+    assert not _passes_filters(r, ["-channel:cl-3"])
+    assert _passes_filters(r, ["-channel:cl-6"])
+
+
+def test_negated_time_filter_with_garbage_still_fails_closed() -> None:
+    """-after:<typo> must NOT invert into match-everything — a typo'd filter
+    yields zero results in either polarity."""
+    r = _hit(_ts("2026-07-05T03:00"))
+    assert not _passes_filters(r, ["-after:notadate"], now=_NOW)

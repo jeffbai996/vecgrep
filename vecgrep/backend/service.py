@@ -9,6 +9,7 @@ import fnmatch
 import hashlib
 import math
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -1418,10 +1419,34 @@ def _copytree(src: Path, dst: Path) -> None:
     shutil.copytree(src, dst, dirs_exist_ok=True)
 
 
-def _parse_filter_time(value: str) -> float | None:
-    """ISO date/datetime → epoch seconds (UTC when naive). None = unparseable."""
+# Relative time sugar: after:7d, before:24h, after:2w, date:today/yesterday.
+# Resolved against an injectable `now` so tests stay deterministic.
+_RELATIVE_TIME_RE = re.compile(r"^(\d+)([mhdw])$")
+_RELATIVE_UNIT_S = {"m": 60.0, "h": 3600.0, "d": 86400.0, "w": 7 * 86400.0}
+
+
+def _parse_filter_time(value: str, now: float | None = None) -> float | None:
+    """ISO date/datetime OR a relative form → epoch seconds. None = unparseable.
+
+    Relative forms: `<N>[m|h|d|w]` (that long ago, from `now`), `today` (start
+    of the current UTC day), `yesterday` (start of the previous UTC day). ISO
+    input behaves exactly as before (UTC when naive)."""
+    value = value.strip()
+    low = value.lower()
+    if low in ("today", "yesterday"):
+        ref = time.time() if now is None else now
+        day_start = (
+            datetime.fromtimestamp(ref, tz=timezone.utc)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .timestamp()
+        )
+        return day_start if low == "today" else day_start - _SECONDS_IN_DAY
+    rel = _RELATIVE_TIME_RE.match(low)
+    if rel:
+        ref = time.time() if now is None else now
+        return ref - int(rel.group(1)) * _RELATIVE_UNIT_S[rel.group(2)]
     try:
-        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
     if dt.tzinfo is None:
@@ -1432,8 +1457,57 @@ def _parse_filter_time(value: str) -> float | None:
 _SECONDS_IN_DAY = 86400.0
 
 
+# Sentinel: a RECOGNIZED filter form whose value is unparseable (typo'd date).
+# Fails closed in EITHER polarity — `-after:notadate` must not invert into
+# match-everything.
+_INVALID = object()
+
+
+def _filter_matches(
+    result: SearchResult, f: str, now: float | None = None
+):
+    """One filter's verdict for one result. Returns True/False (matched / not),
+    None (unknown form — ignored for back-compat), or _INVALID (recognized
+    form, unparseable value — the caller fails closed)."""
+    if f.startswith("source:") or f.startswith("source_path:"):
+        pat = f.split(":", 1)[1]
+        return fnmatch.fnmatch(result.source_id, pat)
+    if f.startswith("corpus:"):
+        return result.corpus == f[len("corpus:"):]
+    if f.startswith("date:"):
+        day_start = _parse_filter_time(f[len("date:"):], now=now)
+        if day_start is None:
+            return _INVALID
+        ts = result.doc_timestamp
+        return ts is not None and day_start <= ts < day_start + _SECONDS_IN_DAY
+    if f.startswith("after:"):
+        cut = _parse_filter_time(f[len("after:"):], now=now)
+        if cut is None:
+            return _INVALID
+        ts = result.doc_timestamp
+        return ts is not None and ts >= cut
+    if f.startswith("before:"):
+        cut = _parse_filter_time(f[len("before:"):], now=now)
+        if cut is None:
+            return _INVALID
+        ts = result.doc_timestamp
+        return ts is not None and ts < cut
+    if f.startswith("channel:"):
+        want = f[len("channel:"):].strip()
+        have = str(result.metadata.get("channel", "")).strip().strip("\"'")
+        return have == want
+    if f.startswith("meta."):
+        key_value = f[len("meta."):]
+        if "=" not in key_value:
+            return None
+        key, value = key_value.split("=", 1)
+        return str(result.metadata.get(key, "")) == value
+    return None
+
+
 def _passes_filters(
-    result: SearchResult, filters: list[str], default_active: bool = False
+    result: SearchResult, filters: list[str], default_active: bool = False,
+    now: float | None = None,
 ) -> bool:
     """Apply --filter expressions. Supported forms:
 
@@ -1442,16 +1516,24 @@ def _passes_filters(
         corpus:NAME       — exact corpus name match
         meta.KEY=VALUE    — exact metadata field match (string compare)
         date:YYYY-MM-DD   — doc_timestamp inside that UTC day
-        after:<iso>       — doc_timestamp >= <iso> (date or datetime)
-        before:<iso>      — doc_timestamp <  <iso>
+        after:<t>         — doc_timestamp >= <t>
+        before:<t>        — doc_timestamp <  <t>
         channel:NAME      — metadata 'channel' match (quote-tolerant, since
                             archiver frontmatter is `channel: "name"`)
 
+    Time values <t> accept ISO dates/datetimes AND relative forms: `7d`,
+    `24h`, `30m`, `2w`, `today`, `yesterday` (resolved against `now`, which
+    is injectable for tests and defaults to the wall clock).
+
+    NEGATION: a leading `-` on any recognized filter inverts it —
+    `-corpus:scratch` excludes the scratch corpus, `-channel:cl-6` excludes a
+    channel, `-source:GLOB` excludes matching sources.
+
     All filters AND together. Unknown filter forms are silently ignored
-    (back-compat), but time filters are HARD constraints: a chunk with no
-    doc_timestamp fails them, and an unparseable time value matches NOTHING —
-    failing closed makes a typo'd date visible as zero results instead of
-    silently leaking out-of-window evidence back in.
+    (back-compat), but recognized forms with unparseable values are HARD
+    fail-closed in either polarity: a typo'd date is visible as zero results
+    instead of silently leaking out-of-window evidence back in. A chunk with
+    no doc_timestamp fails every positive time filter.
 
     default_active: back-compat for the write-tool status schema. When True, a
     `meta.status=active` filter also passes a chunk that has NO status field at
@@ -1468,42 +1550,17 @@ def _passes_filters(
             continue
         if ":" not in f and "=" not in f:
             continue
-        if f.startswith("source:") or f.startswith("source_path:"):
-            pat = f.split(":", 1)[1]
-            if not fnmatch.fnmatch(result.source_id, pat):
-                return False
-        elif f.startswith("corpus:"):
-            if result.corpus != f[len("corpus:") :]:
-                return False
-        elif f.startswith("date:"):
-            day_start = _parse_filter_time(f[len("date:") :])
-            ts = result.doc_timestamp
-            if day_start is None or ts is None:
-                return False
-            if not (day_start <= ts < day_start + _SECONDS_IN_DAY):
-                return False
-        elif f.startswith("after:"):
-            cut = _parse_filter_time(f[len("after:") :])
-            ts = result.doc_timestamp
-            if cut is None or ts is None or ts < cut:
-                return False
-        elif f.startswith("before:"):
-            cut = _parse_filter_time(f[len("before:") :])
-            ts = result.doc_timestamp
-            if cut is None or ts is None or ts >= cut:
-                return False
-        elif f.startswith("channel:"):
-            want = f[len("channel:") :].strip()
-            have = str(result.metadata.get("channel", "")).strip().strip("\"'")
-            if have != want:
-                return False
-        elif f.startswith("meta."):
-            key_value = f[len("meta.") :]
-            if "=" not in key_value:
-                continue
-            key, value = key_value.split("=", 1)
-            if str(result.metadata.get(key, "")) != value:
-                return False
+        negated = f.startswith("-")
+        form = f[1:] if negated else f
+        verdict = _filter_matches(result, form, now=now)
+        if verdict is None:
+            continue  # unknown form — ignored (back-compat)
+        if verdict is _INVALID:
+            return False  # typo'd value: zero results, either polarity
+        if negated:
+            verdict = not verdict
+        if not verdict:
+            return False
     return True
 
 
