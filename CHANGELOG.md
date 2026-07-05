@@ -14,6 +14,18 @@ filters, timeline reconstruction, clearer score output, and alias/entity
 expansion. See `docs/superpowers/specs/` for the design.
 
 ### Added
+- **Result budget + stub tier**: breadth without a blown context. Budgeted
+  search returns the top `full_k` (default 8) hits with context windows plus
+  a one-line stub tail (source + timestamp + snippet + score + chunk_id, NO
+  context) emitted in rank order until a configurable token ceiling
+  (default ~4000), capped at 80 total. Every stub expands to full context
+  via its chunk_id. Surfaces: `service.search_budgeted()`,
+  `POST /api/search {"budget": true}` (+ `stubs` in the response), MCP
+  `search(budget=true)` + new `get_chunk` tool (stdio + HTTP), CLI
+  `vecgrep search --budget` + new `vecgrep chunk <corpus> <chunk_id>`.
+  Runs after dedup/MMR by design — the widened budget is spent on distinct
+  evidence, not duplicate slices. `SearchResult`/API hits now carry
+  `doc_timestamp`. Web UI default hit count 5 → 20.
 - **Source-span dedup / MMR** (`vecgrep/backend/assembly.py`): result
   selection is now diversity-aware. The hard dedup extends beyond span
   overlap to same-source text clones at distant spans (repeated messages /

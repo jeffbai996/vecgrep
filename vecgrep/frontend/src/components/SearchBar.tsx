@@ -31,7 +31,7 @@ const MODE_STYLES: Record<SearchMode, { active: string; idle: string }> = {
 
 export default function SearchBar({ onSearch, disabled, corpus, corpusCount }: Props) {
   const [query, setQuery] = useState("");
-  const [topK, setTopK] = useState(5);
+  const [topK, setTopK] = useState(20);
   const [mode, setMode] = useState<SearchMode>("hybrid");
   const [rerank, setRerank] = useState(false);
 

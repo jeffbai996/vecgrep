@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard (service imports us)
@@ -45,6 +46,78 @@ MIN_CLONE_CHARS = 40
 # least MIN_CLONE_CHARS chars) contain the same message — treat as near-clone.
 SHINGLE_TOKENS = 8
 SHINGLE_SIM = 0.95
+
+# ── result budget (full tier + stub tail) ────────────────────────────────────
+# The assistant gets breadth without a blown context: the head of the ranking
+# keeps context windows ("full"), the tail degrades to one-line stubs emitted
+# until a token ceiling. 8 + 72 = 80 mirrors the review's budget sketch.
+DEFAULT_FULL_K = 8
+DEFAULT_MAX_TOTAL = 80
+DEFAULT_STUB_TOKEN_CEILING = 4000
+_SNIPPET_CHARS = 160
+# Cheap deterministic token estimate (~4 chars/token for EN/code, safely
+# conservative for CJK) — a real tokenizer is a heavy dep for a budget knob.
+_CHARS_PER_TOKEN = 4
+
+
+@dataclass(frozen=True)
+class ResultStub:
+    """A one-line result reference: enough to spot a pattern and decide to
+    expand, cheap enough to return by the dozen. NO context windows — the
+    assistant re-queries the full window via chunk_id (`/api/chunk`, MCP
+    `get_chunk`) when a stub looks interesting."""
+
+    chunk_id: str
+    corpus: str
+    source_id: str
+    doc_timestamp: float | None
+    snippet: str
+    score: float
+    similarity_pct: float
+
+
+def estimate_tokens(text: str) -> int:
+    """Deterministic ~4-chars/token estimate for budget accounting."""
+    return len(text) // _CHARS_PER_TOKEN
+
+
+def _stub_of(r: "SearchResult") -> ResultStub:
+    snippet = " ".join(r.chunk.split())[:_SNIPPET_CHARS]
+    return ResultStub(
+        chunk_id=r.chunk_id,
+        corpus=r.corpus,
+        source_id=r.source_id,
+        doc_timestamp=r.doc_timestamp,
+        snippet=snippet,
+        score=r.score,
+        similarity_pct=r.similarity_pct,
+    )
+
+
+def split_full_and_stubs(
+    results: list["SearchResult"],
+    full_k: int = DEFAULT_FULL_K,
+    max_total: int = DEFAULT_MAX_TOTAL,
+    token_ceiling: int = DEFAULT_STUB_TOKEN_CEILING,
+) -> tuple[list["SearchResult"], list[ResultStub]]:
+    """Split a ranked result list into (full head, stub tail).
+
+    The head keeps full context; the tail is stubbed and emitted in rank
+    order until either max_total results or the stub token ceiling is
+    reached — whichever bites first. The ceiling is checked after appending,
+    so it can be crossed by at most one stub (never under-fills on a
+    generous budget).
+    """
+    full = results[:full_k]
+    stubs: list[ResultStub] = []
+    spent = 0
+    for r in results[full_k:max_total]:
+        s = _stub_of(r)
+        stubs.append(s)
+        spent += estimate_tokens(s.snippet + s.source_id)
+        if spent >= token_ceiling:
+            break
+    return full, stubs
 
 
 def _normalized(r: "SearchResult") -> str:

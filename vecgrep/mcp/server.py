@@ -58,31 +58,66 @@ def _require_mcp() -> None:
 # Shared tool logic — called by both the stdio and HTTP handlers.
 # ---------------------------------------------------------------------------
 
+def _result_payload(r) -> dict:
+    return {
+        "similarity_pct": round(r.similarity_pct, 1),
+        "corpus": r.corpus,
+        "source_id": r.source_id,
+        "matched_by": r.matched_by,
+        "chunk": r.chunk,
+        "chunk_id": r.chunk_id,
+        "doc_timestamp": r.doc_timestamp,
+        "context_before": r.context_before,
+        "context_after": r.context_after,
+        # Raw retriever scores for downstream re-calibration.
+        "scores": r.explain or {},
+    }
+
+
 def _run_search(args: dict) -> str:
     svc = VecgrepService()
-    results = svc.search(
-        query=args["query"],
+    common = dict(
         corpus_name=args.get("corpus"),
-        top_k=args.get("top_k"),
         mode=args.get("mode", "hybrid"),
         rerank=bool(args.get("rerank", False)),
         filters=args.get("filters") or None,
     )
-    payload = [
-        {
-            "similarity_pct": round(r.similarity_pct, 1),
-            "corpus": r.corpus,
-            "source_id": r.source_id,
-            "matched_by": r.matched_by,
-            "chunk": r.chunk,
-            "context_before": r.context_before,
-            "context_after": r.context_after,
-            # Raw retriever scores for downstream re-calibration.
-            "scores": r.explain or {},
+    if args.get("budget"):
+        # Breadth mode: full head + one-line stub tail under a token ceiling.
+        # Stubs carry chunk_id — expand any of them with the get_chunk tool.
+        full, stubs = svc.search_budgeted(
+            args["query"],
+            full_k=int(args.get("full_k") or 8),
+            token_ceiling=int(args.get("token_ceiling") or 4000),
+            **common,
+        )
+        payload = {
+            "full": [_result_payload(r) for r in full],
+            "stubs": [
+                {
+                    "chunk_id": s.chunk_id,
+                    "corpus": s.corpus,
+                    "source_id": s.source_id,
+                    "doc_timestamp": s.doc_timestamp,
+                    "snippet": s.snippet,
+                    "similarity_pct": round(s.similarity_pct, 1),
+                }
+                for s in stubs
+            ],
         }
-        for r in results
-    ]
-    return json.dumps(payload, indent=2)
+        return json.dumps(payload, indent=2)
+    results = svc.search(args["query"], top_k=args.get("top_k"), **common)
+    return json.dumps([_result_payload(r) for r in results], indent=2)
+
+
+def _run_get_chunk(corpus: str, chunk_id: str, window: int = 400) -> str:
+    """Expand a chunk (typically from a budget-search stub) to its full
+    context window. window: chars each side, -1 = whole source."""
+    svc = VecgrepService()
+    win = svc.get_chunk_window(corpus, chunk_id, window)
+    if win is None:
+        return json.dumps({"error": f"chunk not found: {corpus}/{chunk_id}"})
+    return json.dumps(win, indent=2)
 
 
 def _run_list_corpora() -> str:
@@ -374,8 +409,45 @@ def build_mcp_server() -> Any:
                                 "'corpus:<name>', 'meta.<key>=<value>'. All ANDed."
                             ),
                         },
+                        "budget": {
+                            "type": "boolean",
+                            "description": (
+                                "Breadth mode: return the top full_k results WITH "
+                                "context plus a one-line stub tail (up to a token "
+                                "ceiling). Expand any stub via get_chunk. Best for "
+                                "pattern-spotting across many hits."
+                            ),
+                            "default": False,
+                        },
+                        "full_k": {
+                            "type": "integer",
+                            "description": "Budget mode: results with full context (default 8).",
+                            "default": 8,
+                        },
+                        "token_ceiling": {
+                            "type": "integer",
+                            "description": "Budget mode: approx token cap for the stub tail (default 4000).",
+                            "default": 4000,
+                        },
                     },
                     "required": ["query"],
+                },
+            ),
+            Tool(
+                name="get_chunk",
+                description=(
+                    "Expand a chunk to its surrounding context by chunk_id "
+                    "(e.g. from a budget-search stub). window = chars each "
+                    "side, -1 for the whole source document."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "corpus": {"type": "string"},
+                        "chunk_id": {"type": "string"},
+                        "window": {"type": "integer", "default": 400},
+                    },
+                    "required": ["corpus", "chunk_id"],
                 },
             ),
             Tool(
@@ -402,6 +474,12 @@ def build_mcp_server() -> Any:
         try:
             if name == "search":
                 text = _run_search(args)
+            elif name == "get_chunk":
+                text = _run_get_chunk(
+                    args.get("corpus", ""),
+                    args.get("chunk_id", ""),
+                    int(args.get("window", 400)),
+                )
             elif name == "list_corpora":
                 text = _run_list_corpora()
             elif name == "get_corpus":
@@ -469,11 +547,17 @@ def build_http_app() -> Any:
         mode: str = "hybrid",
         rerank: bool = False,
         filters: list[str] | None = None,
+        budget: bool = False,
+        full_k: int = 8,
+        token_ceiling: int = 4000,
     ) -> str:
         """Natural-language query. corpus: limit to one corpus (omit = all).
         top_k: max results. mode: hybrid|vector|bm25.
         rerank: cross-encoder rerank (slower, more accurate).
-        filters: list of 'source:<glob>', 'corpus:<name>', or 'meta.<k>=<v>'."""
+        filters: list of 'source:<glob>', 'corpus:<name>', or 'meta.<k>=<v>'.
+        budget: breadth mode — top full_k results WITH context plus a
+        one-line stub tail capped at ~token_ceiling tokens; expand any stub
+        via get_chunk. Best for pattern-spotting across many hits."""
         return _run_search({
             "query": query,
             "corpus": corpus,
@@ -481,7 +565,22 @@ def build_http_app() -> Any:
             "mode": mode,
             "rerank": rerank,
             "filters": filters,
+            "budget": budget,
+            "full_k": full_k,
+            "token_ceiling": token_ceiling,
         })
+
+    @fmcp.tool(
+        description=(
+            "Expand a chunk to its surrounding context by chunk_id (e.g. from "
+            "a budget-search stub). window = chars each side, -1 for the "
+            "whole source document."
+        )
+    )
+    def get_chunk(corpus: str, chunk_id: str, window: int = 400) -> str:
+        """corpus + chunk_id identify the chunk (both are on every result and
+        stub). window: context chars each side."""
+        return _run_get_chunk(corpus, chunk_id, window)
 
     @fmcp.tool(
         description="List every vecgrep corpus and its stats (doc count, chunk count, embedding model)."

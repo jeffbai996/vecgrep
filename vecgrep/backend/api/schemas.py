@@ -26,6 +26,11 @@ class SearchRequest(BaseModel):
     rerank_model: str | None = None
     filters: list[str] = []
     explain: bool = False
+    # Breadth mode: top full_k hits keep context; the rest degrade to
+    # one-line stubs (see SearchStub) until ~token_ceiling estimated tokens.
+    budget: bool = False
+    full_k: int = 8
+    token_ceiling: int = 4000
 
 
 class SearchHit(BaseModel):
@@ -40,7 +45,19 @@ class SearchHit(BaseModel):
     # fetch a wider context window.
     chunk_id: str = ""
     matched_by: list[str] = []
+    doc_timestamp: float | None = None
     explain: dict = {}
+
+
+class SearchStub(BaseModel):
+    """A one-line result reference (budget mode's tail tier): no context
+    windows. Expand via GET /api/chunk/{corpus}/{chunk_id}."""
+    chunk_id: str
+    corpus: str
+    source_id: str
+    doc_timestamp: float | None = None
+    snippet: str
+    similarity_pct: float
 
 
 class ChunkWindow(BaseModel):
@@ -70,6 +87,8 @@ class Calibration(BaseModel):
 
 class SearchResponse(BaseModel):
     hits: list[SearchHit]
+    # Budget mode only: the stub tail below the full-context hits.
+    stubs: list[SearchStub] = []
     calibration: Calibration | None = None
 
 
