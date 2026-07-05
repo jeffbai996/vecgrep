@@ -241,6 +241,44 @@ def timeline(req: TimelineRequest) -> list[TimelineGroup]:
     return [TimelineGroup(**g) for g in groups]
 
 
+@router.get("/oauth/status")
+def oauth_status() -> dict:
+    """State for the squad inventory's OAuth panel. Token VALUES never leave
+    the store — clients, counts, issuer only."""
+    from ..config import get_settings
+    s = get_settings()
+    issuer = getattr(s, "oauth_issuer_url", None)
+    enabled = bool(getattr(s, "oauth_enabled", False) and issuer)
+    if not enabled:
+        return {"enabled": False}
+    from ...mcp.server import _shared_provider
+    prov = _shared_provider()
+    return {
+        "enabled": True,
+        "issuer": issuer,
+        "scopes": list(prov.valid_scopes),
+        "clients": [
+            {
+                "client_id": c.client_id,
+                "name": getattr(c, "client_name", None) or c.client_id,
+                "redirect_uris": [str(u) for u in (c.redirect_uris or [])],
+            }
+            for c in prov._clients.values()
+        ],
+        "tokens": prov.store.counts(),
+    }
+
+
+@router.post("/oauth/revoke_client")
+def oauth_revoke_client(req: dict) -> dict:
+    """Inventory revoke button: kill every token a client holds."""
+    client_id = (req or {}).get("client_id") or ""
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id required")
+    from ...mcp.server import _shared_provider
+    return {"revoked": _shared_provider().store.revoke_client(client_id)}
+
+
 @router.get("/related/{corpus}/{chunk_id}")
 def related(corpus: str, chunk_id: str, top_k: int = 8) -> dict:
     """Nearest neighbours of an existing chunk (query-by-example)."""
