@@ -171,12 +171,13 @@ def test_search_budgeted_stub_chunk_ids_resolve(svc) -> None:
 
 # ── web UI default ───────────────────────────────────────────────────────────
 
-def test_web_ui_default_hits_is_20() -> None:
+def test_web_ui_default_hits_is_25() -> None:
+    # 20 → 25 with the 2026-07-05 budget bump (10 full + 90 stub cap).
     src = (
         Path(__file__).parent.parent
         / "vecgrep" / "frontend" / "src" / "components" / "SearchBar.tsx"
     ).read_text(encoding="utf-8")
-    assert "useState(20)" in src, "web UI default hit count must be 20"
+    assert "useState(25)" in src, "web UI default hit count must be 25"
     assert "useState(5)" not in src
 
 

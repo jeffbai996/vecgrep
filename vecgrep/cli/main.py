@@ -403,8 +403,11 @@ def chunk(corpus: str, chunk_id: str, window: int, json_out: bool) -> None:
     help=(
         "Filter results (hard constraints). Forms: 'source:<glob>', "
         "'source_path:<glob>', 'corpus:<name>', 'meta.<key>=<value>', "
-        "'date:YYYY-MM-DD', 'after:<iso>', 'before:<iso>', "
-        "'channel:<name>'. Repeatable; all ANDed."
+        "'date:YYYY-MM-DD|today|yesterday', 'after:<iso>|7d|24h|2w', "
+        "'before:<iso>|today', 'channel:<name>', 'speaker:<name>' (alias "
+        "author:; ' [bot]' optional), 'bot:true|false', "
+        "'has:code|table|link'. Prefix any with '-' to EXCLUDE "
+        "(-corpus:scratch). Repeatable; all ANDed."
     ),
 )
 @click.option(
