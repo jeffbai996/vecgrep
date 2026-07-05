@@ -2,7 +2,7 @@
 
 > grep for meaning, not keywords
 
-**v0.7.0** · pre-1.0 (API unstable until v1.0) · see [CHANGELOG.md](CHANGELOG.md) for release history
+**v1.0.0** · stable CLI + HTTP API surface · see [CHANGELOG.md](CHANGELOG.md) for release history
 
 `vecgrep` is a local-first semantic search engine for any corpus you throw at it. Drop in documents — text, markdown, PDFs, URLs — and search by concept instead of exact words. Runs on your machine, no cloud roundtrip required.
 
@@ -220,9 +220,46 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 | `VECGREP_API_PORT` | `8765` | API port |
 | `VECGREP_API_TOKEN` | unset | If set, `/api/*` requires `Authorization: Bearer <token>` (health stays public) |
 | `VECGREP_TOP_K` | `5` | Default `--top` value |
+| `VECGREP_ALIASES_FILE` | `$VECGREP_HOME/aliases.json` | Entity alias map (personal data — keep it out of any repo). See `docs/aliases.example.json`. Missing = no expansion. |
+| `VECGREP_OAUTH_ENABLED` | unset | `1` enables OAuth 2.1 on `/mcp` (embedded auth server: /authorize, /token, /.well-known). |
+| `VECGREP_OAUTH_ISSUER_URL` | unset | Public base URL the MCP endpoint is reachable at. Required when OAuth is on. |
 | `VECGREP_BM25_WEIGHT` | `1.5` | Weight on BM25 contribution to RRF fusion. >1 boosts literal-keyword matches over semantic noise on short queries. Set to `1.0` for pure RRF, higher for keyword-leaning ranking. |
 | `VECGREP_BM25_COVERAGE_MODE` | `penalty` | How BM25 treats docs that match only some query tokens. `penalty` keeps them but demotes the score by `(matched/total)²`; `filter` drops anything below a coverage threshold (higher precision, but can zero out the BM25 half of a multi-token query). |
 | `VECGREP_EMBED_CACHE_MAX_ROWS` | `50000` | Row cap on the sqlite embedding cache (~1 GB at a 1024-dim model). Oldest entries are evicted first once over the cap. Set `<= 0` to disable the cap. |
+
+## Memory-retrieval mode (v1.0)
+
+vecgrep's highest-value real-world use turned out to be searching messy,
+multilingual chat transcripts as a personal memory layer. v1.0 adds the
+result-assembly tools that make an AI assistant good at it — the hybrid
+retrieval core is unchanged.
+
+- **Dedup + MMR** (always on): repeated messages (bot alert spam, quoted
+  replies) collapse to one representative; top-k selection favors distinct
+  evidence. No-dup corpora are unaffected.
+- **Budget search** — breadth without a blown context:
+  `vecgrep search "query" --budget` (API `{"budget": true}`, MCP
+  `search(budget=true)`) returns the top 8 hits with full context plus a
+  token-capped one-line stub tail (≤80 total). Expand any stub:
+  `vecgrep chunk <corpus> <chunk_id>` / `GET /api/chunk/...` / MCP `get_chunk`.
+- **Hard filters** — the caller passes explicit constraints; vecgrep never
+  guesses intent: `--filter date:2026-01-15`, `after:<iso>`, `before:<iso>`,
+  `channel:<name>`, `source_path:<glob>`. Time filters fail closed (a typo'd
+  date reads as zero results, not silently ignored).
+- **Timeline mode** — "what happened?" gets an ordered event sequence, not
+  ranked chunks: `vecgrep timeline "query"` / `POST /api/timeline` / MCP
+  `timeline`. Contiguous chronological slices grouped by source file,
+  speakers + timestamps preserved.
+- **Incident object** — `service.incident()` / MCP `incident`: one structured
+  answer (title, sources, participants, time range, primary timeline,
+  related context separated, confidence).
+- **Alias expansion** — one entity, many surface forms (nickname ⇄ handle ⇄
+  another language), config-driven via an out-of-repo map
+  (`VECGREP_ALIASES_FILE`); a query naming one form finds evidence written
+  under the others.
+- **Clear scores** — every result carries `relevance_pct`, a qualitative
+  `relevance_label` (exact / strong / related / weak), raw component scores,
+  and a precise `anchor` citation (`path#L12-L24`).
 
 ## Web UI
 
@@ -371,10 +408,21 @@ The plan is short and ordered. Make search good first, connect it to where you a
 **Later**
 Code-aware adapter (tree-sitter), EPUB/DOCX, OCR fallback, RSS feeds, query-aware chunking, query rewriting, single-binary build. See [docs/IDEAS.md](docs/IDEAS.md) for the live list and a "won't do" section explaining what we've explicitly ruled out.
 
-**v1.0 — stability**
-- Locked HTTP API and CLI surface
+**v1.0 — the memory-retrieval quality release (shipped)**
+- ✅ Source-span dedup / MMR diversity selection (bot-spam dups collapse)
+- ✅ Result budget + stub tier (8 full + token-capped stubs, ≤80 total)
+- ✅ Hard date/path/time/channel filters (fail-closed)
+- ✅ Timeline mode + incident object (chronological reconstruction)
+- ✅ Alias / entity expansion (config-driven, out-of-repo map)
+- ✅ relevance_pct + labels + precise line anchors
+- ✅ OAuth 2.1 on /mcp (embedded auth server, off by default)
+- ✅ Eval harness with committed baseline (improvements are measured, not vibes)
+- ✅ Locked HTTP API and CLI surface
+
+**post-1.0**
 - Migration tooling for embedding model upgrades
 - Documented plugin API for adapters, chunkers, embed backends, rerankers
+- Query-intent hints (fact-lookup / timeline / recap) tuning retrieval
 
 PRs welcome on anything in v0.2 or v0.3. For larger items in **Later**, open an issue first.
 

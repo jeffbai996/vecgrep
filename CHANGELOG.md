@@ -7,11 +7,17 @@ patch = fixes). The version is a single source of truth in
 
 ## [Unreleased]
 
-Work toward **v1.0** — a stable, usable release. Focus (from real-world
-personal-memory / Discord-transcript usage): better result assembly over the
-existing hybrid-search core — source-span dedup/MMR, date & path & time
-filters, timeline reconstruction, clearer score output, and alias/entity
-expansion. See `docs/superpowers/specs/` for the design.
+## [1.0.0] — 2026-07-04
+
+**The memory-retrieval quality release** — v1.0, stable surface. Driven by
+real-world use as a personal-memory / chat-transcript search layer: better
+RESULT ASSEMBLY over the unchanged hybrid-search + rerank core — dedup/MMR,
+result budget, hard time/path filters, timeline + incident reconstruction,
+clearer scores, alias expansion, precise anchors — plus OAuth on /mcp.
+Measured end to end by a committed eval harness: duplicate-slice redundancy
+0.089 → 0.022 (0.111 → 0 on the keyword probe, with recall 0.67 → 1.0), and
+out-of-window leakage on dated questions 4 hits → 0. See
+`docs/superpowers/specs/2026-07-04-vecgrep-v1-memory-retrieval-design.md`.
 
 ### Added
 - **Precise source anchors**: every result carries a 1-based inclusive
