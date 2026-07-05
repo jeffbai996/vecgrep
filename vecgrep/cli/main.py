@@ -345,8 +345,10 @@ def chunk(corpus: str, chunk_id: str, window: int, json_out: bool) -> None:
     "filters",
     multiple=True,
     help=(
-        "Filter results. Forms: 'source:<glob>', 'corpus:<name>', "
-        "'meta.<key>=<value>'. Repeatable; all ANDed."
+        "Filter results (hard constraints). Forms: 'source:<glob>', "
+        "'source_path:<glob>', 'corpus:<name>', 'meta.<key>=<value>', "
+        "'date:YYYY-MM-DD', 'after:<iso>', 'before:<iso>', "
+        "'channel:<name>'. Repeatable; all ANDed."
     ),
 )
 @click.option(

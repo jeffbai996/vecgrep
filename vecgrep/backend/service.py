@@ -12,6 +12,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -783,11 +784,19 @@ class VecgrepService:
                     if len(meta_values[k]) < max_values:
                         meta_values[k].add(v)
         has_timestamp = any(p.get("doc_timestamp") is not None for p in idx.payloads)
-        return {
+        out: dict = {
             "corpus": corpus.name,
             "filters": {
                 "source": {"form": "source:GLOB", "description": "fnmatch on source_id"},
+                "source_path": {
+                    "form": "source_path:GLOB",
+                    "description": "alias of source: (fnmatch on source_id)",
+                },
                 "corpus": {"form": "corpus:NAME", "description": "exact corpus match"},
+                "channel": {
+                    "form": "channel:NAME",
+                    "description": "metadata channel match (quote-tolerant)",
+                },
                 "meta": {
                     "form": "meta.KEY=VALUE",
                     "keys": {
@@ -797,6 +806,21 @@ class VecgrepService:
             },
             "has_doc_timestamp": has_timestamp,
         }
+        if has_timestamp:
+            # Time filters only make sense on corpora whose chunks carry dates.
+            out["filters"]["date"] = {
+                "form": "date:YYYY-MM-DD",
+                "description": "doc_timestamp inside that UTC day (hard constraint)",
+            }
+            out["filters"]["after"] = {
+                "form": "after:ISO",
+                "description": "doc_timestamp >= ISO date/datetime",
+            }
+            out["filters"]["before"] = {
+                "form": "before:ISO",
+                "description": "doc_timestamp < ISO date/datetime",
+            }
+        return out
 
     # ----- migration ------------------------------------------------------------
     def migrate_corpus(
@@ -1151,16 +1175,40 @@ def _copytree(src: Path, dst: Path) -> None:
     shutil.copytree(src, dst, dirs_exist_ok=True)
 
 
+def _parse_filter_time(value: str) -> float | None:
+    """ISO date/datetime → epoch seconds (UTC when naive). None = unparseable."""
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+_SECONDS_IN_DAY = 86400.0
+
+
 def _passes_filters(
     result: SearchResult, filters: list[str], default_active: bool = False
 ) -> bool:
     """Apply --filter expressions. Supported forms:
 
-        source:GLOB      — fnmatch against result.source_id
-        corpus:NAME      — exact corpus name match
-        meta.KEY=VALUE   — exact metadata field match (string compare)
+        source:GLOB       — fnmatch against result.source_id
+        source_path:GLOB  — alias of source: (the assistant-facing name)
+        corpus:NAME       — exact corpus name match
+        meta.KEY=VALUE    — exact metadata field match (string compare)
+        date:YYYY-MM-DD   — doc_timestamp inside that UTC day
+        after:<iso>       — doc_timestamp >= <iso> (date or datetime)
+        before:<iso>      — doc_timestamp <  <iso>
+        channel:NAME      — metadata 'channel' match (quote-tolerant, since
+                            archiver frontmatter is `channel: "name"`)
 
-    All filters AND together. A malformed filter is silently ignored.
+    All filters AND together. Unknown filter forms are silently ignored
+    (back-compat), but time filters are HARD constraints: a chunk with no
+    doc_timestamp fails them, and an unparseable time value matches NOTHING —
+    failing closed makes a typo'd date visible as zero results instead of
+    silently leaking out-of-window evidence back in.
 
     default_active: back-compat for the write-tool status schema. When True, a
     `meta.status=active` filter also passes a chunk that has NO status field at
@@ -1177,12 +1225,34 @@ def _passes_filters(
             continue
         if ":" not in f and "=" not in f:
             continue
-        if f.startswith("source:"):
-            pat = f[len("source:") :]
+        if f.startswith("source:") or f.startswith("source_path:"):
+            pat = f.split(":", 1)[1]
             if not fnmatch.fnmatch(result.source_id, pat):
                 return False
         elif f.startswith("corpus:"):
             if result.corpus != f[len("corpus:") :]:
+                return False
+        elif f.startswith("date:"):
+            day_start = _parse_filter_time(f[len("date:") :])
+            ts = result.doc_timestamp
+            if day_start is None or ts is None:
+                return False
+            if not (day_start <= ts < day_start + _SECONDS_IN_DAY):
+                return False
+        elif f.startswith("after:"):
+            cut = _parse_filter_time(f[len("after:") :])
+            ts = result.doc_timestamp
+            if cut is None or ts is None or ts < cut:
+                return False
+        elif f.startswith("before:"):
+            cut = _parse_filter_time(f[len("before:") :])
+            ts = result.doc_timestamp
+            if cut is None or ts is None or ts >= cut:
+                return False
+        elif f.startswith("channel:"):
+            want = f[len("channel:") :].strip()
+            have = str(result.metadata.get("channel", "")).strip().strip("\"'")
+            if have != want:
                 return False
         elif f.startswith("meta."):
             key_value = f[len("meta.") :]

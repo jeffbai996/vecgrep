@@ -65,6 +65,15 @@ GOLDEN_QUERIES: list[GoldenQuery] = [
         forbidden_sources=("channel-a/2026-01-08.md",),
     ),
     GoldenQuery(
+        id="incident_today_filtered",
+        query="why did relay-service fail today?",
+        # Same question WITH the explicit date filter an assistant should
+        # pass for "today" — the Phase 3 fix for incident_today's leak.
+        expected_sources=("channel-a/2026-01-15.md", "channel-b/2026-01-15.md"),
+        forbidden_sources=("channel-a/2026-01-08.md",),
+        search_kwargs={"filters": ["date:2026-01-15"]},
+    ),
+    GoldenQuery(
         id="argument",
         query="what was alice arguing with bob about this morning?",
         expected_sources=("channel-a/2026-01-15.md",),

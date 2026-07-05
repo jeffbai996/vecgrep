@@ -14,6 +14,18 @@ filters, timeline reconstruction, clearer score output, and alias/entity
 expansion. See `docs/superpowers/specs/` for the design.
 
 ### Added
+- **Date / path / time filters as hard constraints**: `date:YYYY-MM-DD`,
+  `after:<iso>`, `before:<iso>`, `channel:<name>` (quote-tolerant against
+  archiver frontmatter), `source_path:<glob>` (alias of `source:`) join the
+  filter grammar on every surface (CLI `--filter`, API `filters`, MCP
+  `search.filters`). Time filters are hard: undated chunks fail them, and an
+  unparseable value matches NOTHING (failing closed makes a typo'd date
+  visible as zero results instead of silently leaking old lore). Fixes the
+  over-eager "this morning" query dragging in week-old evidence — eval:
+  the dated incident query goes from 4 out-of-window hits to 0 with
+  `date:` passed, recall unchanged. `/api/corpora/{name}/filters` now
+  advertises the new forms (time filters only when the corpus has dated
+  chunks).
 - **Result budget + stub tier**: breadth without a blown context. Budgeted
   search returns the top `full_k` (default 8) hits with context windows plus
   a one-line stub tail (source + timestamp + snippet + score + chunk_id, NO
