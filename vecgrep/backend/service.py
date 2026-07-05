@@ -49,7 +49,13 @@ from .store import (
     QdrantStore,
     StoredHit,
 )
-from .timeline import ANCHOR_TOP_K, MAX_GROUPS, SLICE_PADDING, build_timeline
+from .timeline import (
+    ANCHOR_TOP_K,
+    MAX_GROUPS,
+    SLICE_PADDING,
+    build_timeline,
+    parse_events,
+)
 
 
 CHUNKERS: dict[str, type[Chunker]] = {
@@ -599,6 +605,97 @@ class VecgrepService:
             "primary_source": primary["source_id"],
             "primary_timeline": primary["events"],
             "related": related,
+        }
+
+    def browse(
+        self,
+        corpus_name: str,
+        channel: str | None = None,
+        date: str | None = None,
+        source_path: str | None = None,
+    ) -> list[dict]:
+        """Location-first reading: no query, no ranking — the full event
+        sequence of the sources matching channel / date / path glob.
+
+        Search answers "where did we say X?"; browse answers "show me
+        channel Y on day Z". At least one selector is required — refusing a
+        bare corpus dump keeps a fat corpus from flooding the caller.
+        Groups come back oldest → newest, events chronological (document
+        order). Non-transcript sources return raw text, no events.
+        """
+        if not (channel or date or source_path):
+            raise ValueError(
+                "browse needs at least one selector: channel, date, or source_path"
+            )
+        corpus = self.registry.get(corpus_name)
+        day_start = _parse_filter_time(date) if date else None
+        if date and day_start is None:
+            raise ValueError(f"unparseable date: {date!r} (want YYYY-MM-DD)")
+
+        idx = self.bm25._load(corpus.name)
+        groups: list[dict] = []
+        for source_id, positions in idx.by_source.items():
+            if not positions:
+                continue
+            payload = idx.payloads[positions[0]]
+            meta = payload.get("metadata") or {}
+            if channel is not None:
+                have = str(meta.get("channel", "")).strip().strip("\"'")
+                if have != channel:
+                    continue
+            ts = payload.get("doc_timestamp")
+            if day_start is not None:
+                if ts is None or not (
+                    day_start <= float(ts) < day_start + _SECONDS_IN_DAY
+                ):
+                    continue
+            if source_path is not None and not fnmatch.fnmatch(
+                source_id, source_path
+            ):
+                continue
+            source_text = payload.get("source_text", "") or ""
+            events = parse_events(source_text)
+            groups.append(
+                {
+                    "corpus": corpus.name,
+                    "source_id": source_id,
+                    "doc_timestamp": float(ts) if ts is not None else None,
+                    "events": [
+                        {"speaker": e.speaker, "time": e.time, "text": e.text}
+                        for e in events
+                    ],
+                    "slice_text": "" if events else source_text,
+                }
+            )
+        groups.sort(
+            key=lambda g: (g["doc_timestamp"] is None, g["doc_timestamp"] or 0.0)
+        )
+        return groups
+
+    def get_source(self, corpus_name: str, source_id: str) -> dict | None:
+        """Whole source document by source_id: raw text + parsed events (for
+        transcripts) + timestamp/metadata. The by-source complement of
+        get_chunk_window — a stub or corpus listing hands you the source_id;
+        this hands back the file. None when the source isn't indexed."""
+        corpus = self.registry.get(corpus_name)
+        idx = self.bm25._load(corpus.name)
+        positions = idx.by_source.get(source_id)
+        if not positions:
+            return None
+        payload = idx.payloads[positions[0]]
+        source_text = payload.get("source_text", "") or ""
+        ts = payload.get("doc_timestamp")
+        events = parse_events(source_text)
+        return {
+            "corpus": corpus.name,
+            "source_id": source_id,
+            "doc_timestamp": float(ts) if ts is not None else None,
+            "metadata": payload.get("metadata", {}) or {},
+            "text": source_text,
+            "events": [
+                {"speaker": e.speaker, "time": e.time, "text": e.text}
+                for e in events
+            ],
         }
 
     def _payload_for_result(self, r: SearchResult) -> dict | None:

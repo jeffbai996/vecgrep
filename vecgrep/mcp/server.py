@@ -58,6 +58,45 @@ def _require_mcp() -> None:
 # Shared tool logic — called by both the stdio and HTTP handlers.
 # ---------------------------------------------------------------------------
 
+# One service per settings generation. Tool calls used to build a fresh
+# VecgrepService each (registry read + store handles + cache handle per
+# call); the REST routes already kept a singleton. Keyed on the Settings
+# object identity so a config reload (tests, env change) rebuilds cleanly.
+_SVC: tuple[int, VecgrepService] | None = None
+
+
+def _close_svc(svc: VecgrepService) -> None:
+    """Best-effort close of a service's store client — matters for embedded
+    qdrant (holds a dir lock + noisy destructor at interpreter shutdown)."""
+    try:
+        svc.store.client.close()
+    except Exception:
+        pass
+
+
+def _svc() -> VecgrepService:
+    global _SVC
+    from ..backend.config import get_settings
+
+    key = id(get_settings())
+    if _SVC is None or _SVC[0] != key:
+        if _SVC is not None:
+            _close_svc(_SVC[1])  # settings changed — release the old handles
+        _SVC = (key, VecgrepService())
+    return _SVC[1]
+
+
+def _reset_service_cache() -> None:
+    global _SVC
+    if _SVC is not None:
+        _close_svc(_SVC[1])
+    _SVC = None
+
+
+import atexit as _atexit
+_atexit.register(lambda: _reset_service_cache())
+
+
 def _result_payload(r) -> dict:
     return {
         "similarity_pct": round(r.similarity_pct, 1),  # compat alias
@@ -80,7 +119,7 @@ def _result_payload(r) -> dict:
 
 
 def _run_search(args: dict) -> str:
-    svc = VecgrepService()
+    svc = _svc()
     common = dict(
         corpus_name=args.get("corpus"),
         mode=args.get("mode", "hybrid"),
@@ -118,7 +157,7 @@ def _run_search(args: dict) -> str:
 def _run_get_chunk(corpus: str, chunk_id: str, window: int = 400) -> str:
     """Expand a chunk (typically from a budget-search stub) to its full
     context window. window: chars each side, -1 = whole source."""
-    svc = VecgrepService()
+    svc = _svc()
     win = svc.get_chunk_window(corpus, chunk_id, window)
     if win is None:
         return json.dumps({"error": f"chunk not found: {corpus}/{chunk_id}"})
@@ -128,7 +167,7 @@ def _run_get_chunk(corpus: str, chunk_id: str, window: int = 400) -> str:
 def _run_timeline(args: dict) -> str:
     """'What happened?' mode — contiguous chronological slices grouped by
     source file, transcript slices parsed into speaker/time/text events."""
-    svc = VecgrepService()
+    svc = _svc()
     groups = svc.timeline(
         args["query"],
         args.get("corpus"),
@@ -142,7 +181,7 @@ def _run_timeline(args: dict) -> str:
 
 def _run_incident(args: dict) -> str:
     """Structured incident answer assembled from search + timeline."""
-    svc = VecgrepService()
+    svc = _svc()
     inc = svc.incident(
         args["query"],
         args.get("corpus"),
@@ -154,8 +193,40 @@ def _run_incident(args: dict) -> str:
     return json.dumps(inc, indent=2, ensure_ascii=False)
 
 
+def _run_browse(args: dict) -> str:
+    """Location-first reading: full event sequence for channel/date/path —
+    no query, no ranking. At least one selector required."""
+    svc = _svc()
+    try:
+        groups = svc.browse(
+            args["corpus"],
+            channel=args.get("channel"),
+            date=args.get("date"),
+            source_path=args.get("source_path"),
+        )
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    return json.dumps(groups, indent=2, ensure_ascii=False)
+
+
+def _run_get_source(corpus: str, source_id: str) -> str:
+    """Whole source document by source_id (text + parsed events)."""
+    svc = _svc()
+    doc = svc.get_source(corpus, source_id)
+    if doc is None:
+        return json.dumps({"error": f"source not indexed: {source_id}"})
+    return json.dumps(doc, indent=2, ensure_ascii=False)
+
+
+def _run_list_aliases() -> str:
+    """Read-only view of the active alias-expansion map."""
+    from ..backend.aliases import describe_aliases
+
+    return json.dumps(describe_aliases(), indent=2, ensure_ascii=False)
+
+
 def _run_list_corpora() -> str:
-    svc = VecgrepService()
+    svc = _svc()
     corpora = [
         {
             "name": c.name,
@@ -171,7 +242,7 @@ def _run_list_corpora() -> str:
 
 
 def _run_get_corpus(name: str) -> str:
-    svc = VecgrepService()
+    svc = _svc()
     for c in svc.list_corpora():
         if c.name == name:
             detail = {
@@ -542,6 +613,102 @@ def build_mcp_server() -> Any:
                 },
             ),
             Tool(
+                name="browse",
+                description=(
+                    "Location-first reading, no query: the full event "
+                    "sequence for a channel and/or day and/or path glob. "
+                    "Use when you know WHERE/WHEN rather than what words "
+                    "to search for. Requires at least one selector."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "corpus": {"type": "string"},
+                        "channel": {"type": "string"},
+                        "date": {"type": "string", "description": "YYYY-MM-DD (UTC day)"},
+                        "source_path": {"type": "string", "description": "fnmatch glob on source_id"},
+                    },
+                    "required": ["corpus"],
+                },
+            ),
+            Tool(
+                name="get_source",
+                description=(
+                    "Whole source document by source_id (raw text + parsed "
+                    "transcript events). Use after a stub or corpus listing "
+                    "hands you a source_id; get_chunk is the by-chunk_id "
+                    "variant."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "corpus": {"type": "string"},
+                        "source_id": {"type": "string"},
+                    },
+                    "required": ["corpus", "source_id"],
+                },
+            ),
+            Tool(
+                name="list_aliases",
+                description=(
+                    "Read-only view of the active alias-expansion map (which "
+                    "entity surface forms expand into which). Explains why a "
+                    "search matched terms you didn't type."
+                ),
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
+                name="propose_write",
+                description=(
+                    "PROPOSE a new entry for a corpus. Writes NOTHING — "
+                    "creates a pending proposal a human reviews + confirms "
+                    "before it's saved. Returns the proposal_id."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string"},
+                        "corpus": {"type": "string"},
+                        "source_kind": {"type": "string"},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["content"],
+                },
+            ),
+            Tool(
+                name="propose_edit",
+                description=(
+                    "PROPOSE an edit to an existing entry by id. Writes "
+                    "NOTHING until a human confirms. Returns the proposal_id."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "doc_id": {"type": "string"},
+                        "content": {"type": "string"},
+                        "corpus": {"type": "string"},
+                        "source_kind": {"type": "string"},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["doc_id", "content"],
+                },
+            ),
+            Tool(
+                name="propose_delete",
+                description=(
+                    "PROPOSE deleting an existing entry by id. Removes "
+                    "NOTHING until a human confirms. Returns the proposal_id."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "doc_id": {"type": "string"},
+                        "corpus": {"type": "string"},
+                    },
+                    "required": ["doc_id"],
+                },
+            ),
+            Tool(
                 name="list_corpora",
                 description="List every vecgrep corpus and its stats (doc count, chunk count, embedding model).",
                 inputSchema={"type": "object", "properties": {}},
@@ -575,6 +742,33 @@ def build_mcp_server() -> Any:
                     args.get("chunk_id", ""),
                     int(args.get("window", 400)),
                 )
+            elif name == "browse":
+                text = _run_browse(args)
+            elif name == "get_source":
+                text = _run_get_source(args.get("corpus", ""), args.get("source_id", ""))
+            elif name == "list_aliases":
+                text = _run_list_aliases()
+            elif name == "propose_write":
+                text = _run_propose(
+                    args.get("corpus") or DEFAULT_PROPOSE_CORPUS,
+                    args.get("content", ""), None,
+                    args.get("source_kind"), args.get("tags"),
+                )
+            elif name == "propose_edit":
+                doc_id = args.get("doc_id", "")
+                corpus = args.get("corpus") or (
+                    doc_id.rsplit("-", 1)[0] if "-" in doc_id else doc_id
+                )
+                text = _run_propose(
+                    corpus, args.get("content", ""), doc_id,
+                    args.get("source_kind"), args.get("tags"),
+                )
+            elif name == "propose_delete":
+                doc_id = args.get("doc_id", "")
+                corpus = args.get("corpus") or (
+                    doc_id.rsplit("-", 1)[0] if "-" in doc_id else doc_id
+                )
+                text = _run_propose_delete(corpus, doc_id)
             elif name == "list_corpora":
                 text = _run_list_corpora()
             elif name == "get_corpus":
@@ -804,6 +998,48 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
             "mode": mode,
             "filters": filters,
         })
+
+    @fmcp.tool(
+        description=(
+            "Location-first reading, no query: the full event sequence for a "
+            "channel and/or day (YYYY-MM-DD) and/or path glob. Use when you "
+            "know WHERE/WHEN rather than what words to search for."
+        )
+    )
+    def browse(
+        corpus: str,
+        channel: str | None = None,
+        date: str | None = None,
+        source_path: str | None = None,
+    ) -> str:
+        """Requires at least one selector (channel/date/source_path)."""
+        return _run_browse({
+            "corpus": corpus,
+            "channel": channel,
+            "date": date,
+            "source_path": source_path,
+        })
+
+    @fmcp.tool(
+        description=(
+            "Whole source document by source_id (raw text + parsed transcript "
+            "events). Use after a stub or corpus listing hands you a "
+            "source_id; get_chunk is the by-chunk_id variant."
+        )
+    )
+    def get_source(corpus: str, source_id: str) -> str:
+        """source_id exactly as returned by search/stubs/get_corpus."""
+        return _run_get_source(corpus, source_id)
+
+    @fmcp.tool(
+        description=(
+            "Read-only view of the active alias-expansion map. Explains why "
+            "a search matched terms you didn't type."
+        )
+    )
+    def list_aliases() -> str:
+        """No arguments."""
+        return _run_list_aliases()
 
     @fmcp.tool(
         description=(

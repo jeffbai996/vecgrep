@@ -7,6 +7,31 @@ patch = fixes). The version is a single source of truth in
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-07-04
+
+Tool-surface follow-up to v1.0, from a post-release audit.
+
+### Added
+- **`browse`** (service + MCP both transports): location-first reading — the
+  full event sequence for a channel and/or UTC day and/or path glob, no
+  query, no ranking. Complements query-first search/timeline ("show me
+  channel X on day Y"). Requires at least one selector — a bare corpus dump
+  is refused.
+- **`get_source`** (service + MCP): whole source document by source_id (raw
+  text + parsed transcript events + metadata) — the by-source complement of
+  get_chunk's by-chunk_id window.
+- **`list_aliases`** (MCP): read-only view of the active alias-expansion map,
+  so a caller can see why a query matched terms it didn't type.
+
+### Changed
+- MCP tool handlers now reuse one `VecgrepService` per settings generation
+  (previously a fresh service per tool call — registry/store/cache handles
+  rebuilt every invocation); stale services are closed on settings change
+  and at exit.
+- The stdio MCP transport now exposes the same `propose_write` /
+  `propose_edit` / `propose_delete` write tools as the HTTP transport
+  (parity was silently missing).
+
 ## [1.0.0] — 2026-07-04
 
 **The memory-retrieval quality release** — v1.0, stable surface. Driven by

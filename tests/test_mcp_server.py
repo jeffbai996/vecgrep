@@ -28,7 +28,12 @@ def test_build_mcp_server_registers_tools() -> None:
     req = ListToolsRequest(method="tools/list")
     result = asyncio.run(handler(req))
     tools = {t.name for t in result.root.tools}
-    assert tools == {"search", "timeline", "incident", "get_chunk", "list_corpora", "get_corpus"}
+    assert tools == {
+        "search", "timeline", "incident", "browse", "get_chunk", "get_source",
+        "list_aliases", "list_corpora", "get_corpus",
+        # write path — parity with the HTTP transport as of v1.1
+        "propose_write", "propose_edit", "propose_delete",
+    }
 
 
 def test_build_http_app_returns_asgi_app() -> None:

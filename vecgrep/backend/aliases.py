@@ -103,3 +103,12 @@ def expand_query(query: str, alias_map: dict[str, list[str]]) -> tuple[str, list
     if not additions:
         return query, matched
     return f"{query} {' '.join(additions)}", matched
+
+
+def describe_aliases() -> dict:
+    """Read-only view of the active alias map — so a caller can see why a
+    query expanded (or didn't). Never exposes anything beyond what the
+    operator already put in their own map file."""
+    p = aliases_path()
+    entities = load_alias_map(p)
+    return {"path": str(p), "active": bool(entities), "entities": entities}
