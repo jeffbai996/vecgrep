@@ -243,9 +243,13 @@ retrieval core is unchanged.
   token-capped one-line stub tail (≤80 total). Expand any stub:
   `vecgrep chunk <corpus> <chunk_id>` / `GET /api/chunk/...` / MCP `get_chunk`.
 - **Hard filters** — the caller passes explicit constraints; vecgrep never
-  guesses intent: `--filter date:2026-01-15`, `after:<iso>`, `before:<iso>`,
-  `channel:<name>`, `source_path:<glob>`. Time filters fail closed (a typo'd
-  date reads as zero results, not silently ignored).
+  guesses intent: `--filter date:2026-01-15` (or `date:today`), `after:<iso>`
+  (or relative: `after:7d`, `after:24h`, `after:2w`), `before:<iso>`,
+  `channel:<name>`, `source_path:<glob>`, `speaker:<name>` (who said it —
+  chunk-level, ` [bot]` suffix optional), `bot:true|false`,
+  `has:code|table|link` (content shape). A leading `-` inverts any filter
+  (`-corpus:scratch` excludes). Recognized filters fail closed (a typo'd
+  date reads as zero results, not silently ignored) — in either polarity.
 - **Timeline mode** — "what happened?" gets an ordered event sequence, not
   ranked chunks: `vecgrep timeline "query"` / `POST /api/timeline` / MCP
   `timeline`. Contiguous chronological slices grouped by source file,

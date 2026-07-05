@@ -236,3 +236,61 @@ def test_negated_time_filter_with_garbage_still_fails_closed() -> None:
     yields zero results in either polarity."""
     r = _hit(_ts("2026-07-05T03:00"))
     assert not _passes_filters(r, ["-after:notadate"], now=_NOW)
+
+
+# ── speaker: / bot: / has: filters (F-1..F-3, chunk-level) ──────────────────
+# Chunk-LEVEL semantics on purpose: a chunk containing any line by NAME passes
+# speaker:NAME. Not per-line attribution — that's documented, not oversold.
+
+def _enriched(speakers=(), bot=False, code=False, table=False, link=False):
+    r = _hit(_ts("2026-07-05T03:00"))
+    r.metadata.update({
+        "speakers": list(speakers), "has_bot_speaker": bot,
+        "has_code": code, "has_table": table, "has_link": link,
+    })
+    return r
+
+
+def test_speaker_filter_case_insensitive_membership() -> None:
+    r = _enriched(speakers=["alice", "helper_bot [bot]"])
+    assert _passes_filters(r, ["speaker:alice"])
+    assert _passes_filters(r, ["speaker:ALICE"])
+    assert not _passes_filters(r, ["speaker:mac"])
+
+
+def test_speaker_filter_tolerates_bot_suffix() -> None:
+    """speaker:helper_bot matches the archiver's 'helper_bot [bot]'
+    — nobody types the suffix by hand."""
+    r = _enriched(speakers=["helper_bot [bot]"])
+    assert _passes_filters(r, ["speaker:helper_bot"])
+    assert _passes_filters(r, ["author:helper_bot"])  # alias
+
+
+def test_speaker_filter_fails_closed_on_unenriched_chunk() -> None:
+    """Pre-enrichment chunks (no speakers key) fail a speaker: filter — hard
+    constraint, same discipline as the time filters."""
+    r = _hit(_ts("2026-07-05T03:00"))  # no enrichment keys at all
+    assert not _passes_filters(r, ["speaker:alice"])
+
+
+def test_bot_filter() -> None:
+    assert _passes_filters(_enriched(bot=True), ["bot:true"])
+    assert not _passes_filters(_enriched(bot=False), ["bot:true"])
+    assert _passes_filters(_enriched(bot=False), ["bot:false"])
+    assert not _passes_filters(_enriched(bot=True), ["bot:false"])
+
+
+def test_has_filters() -> None:
+    assert _passes_filters(_enriched(code=True), ["has:code"])
+    assert not _passes_filters(_enriched(code=False), ["has:code"])
+    assert _passes_filters(_enriched(table=True), ["has:table"])
+    assert _passes_filters(_enriched(link=True), ["has:link"])
+    # unknown shape name fails closed (recognized form, bad value)
+    assert not _passes_filters(_enriched(code=True), ["has:gifs"])
+
+
+def test_negated_speaker_and_has() -> None:
+    r = _enriched(speakers=["alice"], code=True)
+    assert not _passes_filters(r, ["-speaker:alice"])
+    assert not _passes_filters(r, ["-has:code"])
+    assert _passes_filters(r, ["-speaker:mac", "-has:table"])

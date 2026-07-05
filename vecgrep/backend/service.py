@@ -30,6 +30,7 @@ from .assembly import (
     split_full_and_stubs,
 )
 from .embed.cache import CachedBackend, EmbedCache
+from .ingestion.enrich import chunk_enrichment
 from .ingestion.adapters import (
     AdapterError,
     Document,
@@ -387,7 +388,9 @@ class VecgrepService:
                     "chunk_start": c.start,
                     "chunk_end": c.end,
                     "text": c.text,
-                    "metadata": doc.metadata,
+                    # Doc metadata + per-chunk enrichment (speakers, bot flag,
+                    # content shapes) — powers speaker:/bot:/has: filters.
+                    "metadata": {**doc.metadata, **chunk_enrichment(c.text)},
                     # Document's own date (epoch seconds) when discoverable.
                     # Powers optional recency decay at search time. None is fine.
                     "doc_timestamp": doc.timestamp,
@@ -1047,22 +1050,44 @@ class VecgrepService:
                         k: sorted(str(x) for x in vals) for k, vals in sorted(meta_values.items())
                     },
                 },
+                "speaker": {
+                    "form": "speaker:NAME (alias author:NAME)",
+                    "description": "chunk contains a transcript line by NAME "
+                                   "(case-insensitive, ' [bot]' suffix optional; "
+                                   "chunk-level, not per-line attribution)",
+                },
+                "bot": {
+                    "form": "bot:true|false",
+                    "description": "chunk does/doesn't contain a bot speaker "
+                                   "(archiver '[bot]' marker)",
+                },
+                "has": {
+                    "form": "has:code|table|link",
+                    "description": "chunk contains a fenced code block / "
+                                   "markdown table / URL",
+                },
+                "negation": {
+                    "form": "-<any filter>",
+                    "description": "leading '-' inverts: -corpus:scratch, "
+                                   "-channel:cl-6, -speaker:NAME …",
+                },
             },
             "has_doc_timestamp": has_timestamp,
         }
         if has_timestamp:
             # Time filters only make sense on corpora whose chunks carry dates.
             out["filters"]["date"] = {
-                "form": "date:YYYY-MM-DD",
+                "form": "date:YYYY-MM-DD | date:today | date:yesterday",
                 "description": "doc_timestamp inside that UTC day (hard constraint)",
             }
             out["filters"]["after"] = {
-                "form": "after:ISO",
-                "description": "doc_timestamp >= ISO date/datetime",
+                "form": "after:ISO | after:7d|24h|30m|2w",
+                "description": "doc_timestamp >= ISO date/datetime, or a "
+                               "relative window back from now",
             }
             out["filters"]["before"] = {
-                "form": "before:ISO",
-                "description": "doc_timestamp < ISO date/datetime",
+                "form": "before:ISO | before:today|7d…",
+                "description": "doc_timestamp < ISO date/datetime or relative",
             }
         return out
 
@@ -1496,6 +1521,32 @@ def _filter_matches(
         want = f[len("channel:"):].strip()
         have = str(result.metadata.get("channel", "")).strip().strip("\"'")
         return have == want
+    if f.startswith("speaker:") or f.startswith("author:"):
+        # Chunk-level membership: a chunk containing ANY line by NAME passes.
+        # Case-insensitive; the archiver's " [bot]" suffix is stripped on both
+        # sides so `speaker:claude_host-a` matches "claude_host-a [bot]".
+        # Chunks without enrichment (pre-reindex) fail closed — hard filter.
+        want = f.split(":", 1)[1].strip().lower().removesuffix(" [bot]").strip()
+        if not want:
+            return _INVALID
+        speakers = result.metadata.get("speakers")
+        if not isinstance(speakers, list):
+            return False
+        return any(
+            str(s).strip().lower().removesuffix(" [bot]").strip() == want
+            for s in speakers
+        )
+    if f.startswith("bot:"):
+        val = f[len("bot:"):].strip().lower()
+        if val not in ("true", "false", "1", "0", "yes", "no"):
+            return _INVALID
+        want_bot = val in ("true", "1", "yes")
+        return bool(result.metadata.get("has_bot_speaker")) is want_bot
+    if f.startswith("has:"):
+        shape = f[len("has:"):].strip().lower()
+        if shape not in ("code", "table", "link"):
+            return _INVALID
+        return bool(result.metadata.get(f"has_{shape}"))
     if f.startswith("meta."):
         key_value = f[len("meta."):]
         if "=" not in key_value:
