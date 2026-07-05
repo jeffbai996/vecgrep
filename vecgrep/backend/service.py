@@ -158,6 +158,25 @@ class SearchResult:
         if self.explain is None:
             self.explain = {}
 
+    @property
+    def relevance_pct(self) -> float:
+        """The going-forward name for the calibrated display percent.
+        `similarity_pct` remains as a compatibility alias of the same value."""
+        return self.similarity_pct
+
+    @property
+    def relevance_label(self) -> str:
+        """Qualitative bucket so callers don't have to interpret percentages:
+        exact >= 95, strong >= 75, related >= 40, else weak."""
+        pct = self.similarity_pct
+        if pct >= 95.0:
+            return "exact"
+        if pct >= 75.0:
+            return "strong"
+        if pct >= 40.0:
+            return "related"
+        return "weak"
+
 
 class VecgrepService:
     def __init__(self, settings: Settings | None = None, ephemeral: bool = False) -> None:
@@ -1387,12 +1406,18 @@ def _cosine_to_pct(
 # the SAME formula for every hit regardless of which retriever surfaced it.
 #
 # Empirically (bge-reranker-base on this corpus): the noise floor sits ~0.50-0.53,
-# genuine-but-weak hits ~0.57, strong hits 0.66-0.73. Center 0.57, slope 35 maps:
-#   0.51 → ~12%   (noise)
+# genuine-but-weak hits ~0.57, strong hits 0.66-0.75. Center 0.57, slope 18 maps:
+#   0.51 → ~25%   (noise)
 #   0.57 → 50%    (uncertain boundary)
-#   0.66 → ~96%   (strong)
+#   0.66 → ~84%   (strong)
+#   0.75 → ~96%   (very strong)
+# Slope 18 (was 35): the steeper sigmoid saturated everything strong into a
+# 99.x cluster, so 99.6-vs-99.2 carried no information. The flatter curve
+# keeps the anchors (noise low, boundary 50%) while spreading the strong
+# range across ~84-96 — differences are visible again. Ranking is unaffected
+# (monotonic remap; order comes from the rerank score itself).
 RERANK_CALIBRATION_CENTER = 0.57
-RERANK_CALIBRATION_SLOPE = 35.0
+RERANK_CALIBRATION_SLOPE = 18.0
 
 
 def _rerank_to_pct(prob: float) -> float:

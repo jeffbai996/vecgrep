@@ -14,6 +14,14 @@ filters, timeline reconstruction, clearer score output, and alias/entity
 expansion. See `docs/superpowers/specs/` for the design.
 
 ### Added
+- **Clearer score output**: results now carry `relevance_pct` (going-forward
+  name; `similarity_pct` stays as a compatibility alias) and a qualitative
+  `relevance_label` (exact ≥95 / strong ≥75 / related ≥40 / weak) on the
+  service, API, MCP and CLI surfaces. Raw component scores (vector cosine,
+  BM25, RRF, decay, rerank) were already attached to every result. The
+  rerank display sigmoid is flattened (slope 35 → 18) so strong hits stop
+  bunching at 99.x — 0.66 vs 0.75 rerank scores now read ~84% vs ~96%
+  instead of 96/99.8. Ranking order is unchanged (monotonic remap).
 - **Date / path / time filters as hard constraints**: `date:YYYY-MM-DD`,
   `after:<iso>`, `before:<iso>`, `channel:<name>` (quote-tolerant against
   archiver frontmatter), `source_path:<glob>` (alias of `source:`) join the
