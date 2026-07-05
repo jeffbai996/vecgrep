@@ -19,7 +19,7 @@ import json
 import sys
 import time
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -206,6 +206,119 @@ def index(
     click.echo(_format(out))
 
 
+def _run_budget_search(
+    query: str,
+    corpus: str | None,
+    mode: str,
+    rerank: bool,
+    rerank_model: str | None,
+    filter_list: list[str],
+    explain: bool,
+    json_out: bool,
+    full_k: int,
+    token_ceiling: int,
+) -> None:
+    """--budget flow: full head + stub tail, via API when up, else local."""
+    if _api_alive():
+        out = _post(
+            "/api/search",
+            {
+                "query": query,
+                "corpus": corpus,
+                "mode": mode,
+                "rerank": rerank,
+                "rerank_model": rerank_model,
+                "filters": filter_list,
+                "explain": explain,
+                "budget": True,
+                "full_k": full_k,
+                "token_ceiling": token_ceiling,
+            },
+        )
+        hits, stubs = out["hits"], out.get("stubs", [])
+    else:
+        svc = VecgrepService(ephemeral=False)
+        try:
+            full, stub_objs = svc.search_budgeted(
+                query, corpus, full_k=full_k, token_ceiling=token_ceiling,
+                mode=mode, rerank=rerank, rerank_model=rerank_model,
+                filters=filter_list or None, explain=explain,
+            )
+        except (CorpusError, EmbedBackendError) as e:
+            raise click.ClickException(str(e))
+        hits = [
+            {
+                "similarity_pct": r.similarity_pct,
+                "chunk": r.chunk,
+                "context_before": r.context_before,
+                "context_after": r.context_after,
+                "source_id": r.source_id,
+                "corpus": r.corpus,
+                "metadata": r.metadata,
+                "matched_by": r.matched_by,
+                "explain": r.explain or {},
+            }
+            for r in full
+        ]
+        stubs = [
+            {
+                "chunk_id": s.chunk_id,
+                "corpus": s.corpus,
+                "source_id": s.source_id,
+                "doc_timestamp": s.doc_timestamp,
+                "snippet": s.snippet,
+                "similarity_pct": s.similarity_pct,
+            }
+            for s in stub_objs
+        ]
+    if json_out:
+        click.echo(json.dumps({"hits": hits, "stubs": stubs}, indent=2))
+        return
+    _print_results(hits, False)
+    if stubs:
+        click.echo(f"\n--- {len(stubs)} more (stubs — expand with `vecgrep chunk <corpus> <chunk_id>`) ---")
+        for s in stubs:
+            ts = ""
+            if s.get("doc_timestamp"):
+                # UTC, matching how ingestion parsed the source date — local tz
+                # would shift a date-only timestamp to the previous day.
+                ts = datetime.fromtimestamp(
+                    s["doc_timestamp"], tz=timezone.utc
+                ).strftime(" %Y-%m-%d")
+            click.echo(
+                f"{s['similarity_pct']:5.1f}%  {s['source_id']}{ts}  "
+                f"{s['snippet'][:100]}  [{s['chunk_id']}]"
+            )
+
+
+@cli.command()
+@click.argument("corpus")
+@click.argument("chunk_id")
+@click.option(
+    "--window", default=400, type=int, show_default=True,
+    help="Context chars each side (-1 = whole source).",
+)
+@click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
+def chunk(corpus: str, chunk_id: str, window: int, json_out: bool) -> None:
+    """Expand a chunk (e.g. a --budget stub) to its surrounding context."""
+    svc = VecgrepService(ephemeral=False)
+    try:
+        win = svc.get_chunk_window(corpus, chunk_id, window)
+    except CorpusError as e:
+        raise click.ClickException(str(e))
+    if win is None:
+        raise click.ClickException(f"chunk not found: {corpus}/{chunk_id}")
+    if json_out:
+        click.echo(json.dumps(win, indent=2))
+        return
+    click.echo(f"# {win['source_id']}  [{win['chunk_id']}]")
+    if win.get("before"):
+        click.echo(click.style(win["before"], dim=True))
+    click.echo(win["chunk"])
+    if win.get("after"):
+        click.echo(click.style(win["after"], dim=True))
+
+
 @cli.command()
 @click.argument("query")
 @click.option("--corpus", default=None, help="Search one corpus (default: all).")
@@ -254,6 +367,22 @@ def index(
     show_default=True,
     help="Seconds between re-runs in --watch mode.",
 )
+@click.option(
+    "--budget",
+    is_flag=True,
+    help=(
+        "Breadth mode: top --full-k hits with context plus a one-line stub "
+        "tail (token-capped). Expand a stub with `vecgrep chunk`."
+    ),
+)
+@click.option(
+    "--full-k", "full_k", default=8, type=int, show_default=True,
+    help="Budget mode: how many hits keep full context.",
+)
+@click.option(
+    "--token-ceiling", "token_ceiling", default=4000, type=int, show_default=True,
+    help="Budget mode: approx token cap for the stub tail.",
+)
 def search(
     query: str,
     corpus: str | None,
@@ -266,9 +395,21 @@ def search(
     json_out: bool,
     watch: bool,
     interval: float,
+    budget: bool,
+    full_k: int,
+    token_ceiling: int,
 ) -> None:
     """Semantic search across one or all corpora."""
     filter_list = list(filters)
+
+    if budget:
+        if watch:
+            raise click.ClickException("--budget and --watch are mutually exclusive.")
+        _run_budget_search(
+            query, corpus, mode, rerank, rerank_model, filter_list,
+            explain, json_out, full_k, token_ceiling,
+        )
+        return
 
     def run_once() -> list[dict[str, Any]]:
         if _api_alive():

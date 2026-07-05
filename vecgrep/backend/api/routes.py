@@ -22,6 +22,7 @@ from .schemas import (
     SearchHit,
     SearchRequest,
     SearchResponse,
+    SearchStub,
 )
 
 
@@ -142,22 +143,61 @@ def index(req: IndexRequest) -> IndexResponse:
     return IndexResponse(docs=docs, chunks=chunks, skipped=skipped)
 
 
+def _hit_out(r) -> SearchHit:
+    return SearchHit(
+        similarity_pct=r.similarity_pct,
+        chunk=r.chunk,
+        context_before=r.context_before,
+        context_after=r.context_after,
+        source_id=r.source_id,
+        corpus=r.corpus,
+        metadata=r.metadata,
+        chunk_id=r.chunk_id,
+        matched_by=r.matched_by,
+        doc_timestamp=r.doc_timestamp,
+        explain=r.explain or {},
+    )
+
+
 @router.post("/search", response_model=SearchResponse)
 def search(req: SearchRequest) -> SearchResponse:
     svc = _service()
     if req.mode not in ("hybrid", "vector", "bm25"):
         raise HTTPException(status_code=400, detail=f"Unknown search mode: {req.mode}")
+    common = dict(
+        mode=req.mode,
+        rerank=req.rerank,
+        rerank_model=req.rerank_model,
+        filters=req.filters or None,
+        explain=req.explain,
+    )
     try:
-        results = svc.search(
-            req.query,
-            req.corpus,
-            req.top_k,
-            mode=req.mode,
-            rerank=req.rerank,
-            rerank_model=req.rerank_model,
-            filters=req.filters or None,
-            explain=req.explain,
-        )
+        if req.budget:
+            # Breadth mode: full head + one-line stub tail. Expand a stub via
+            # GET /api/chunk/{corpus}/{chunk_id}.
+            full, stubs = svc.search_budgeted(
+                req.query,
+                req.corpus,
+                full_k=req.full_k,
+                token_ceiling=req.token_ceiling,
+                **common,
+            )
+            return SearchResponse(
+                hits=[_hit_out(r) for r in full],
+                stubs=[
+                    SearchStub(
+                        chunk_id=s.chunk_id,
+                        corpus=s.corpus,
+                        source_id=s.source_id,
+                        doc_timestamp=s.doc_timestamp,
+                        snippet=s.snippet,
+                        similarity_pct=s.similarity_pct,
+                    )
+                    for s in stubs
+                ],
+                calibration=Calibration(**svc.calibration(req.corpus)),
+            )
+        results = svc.search(req.query, req.corpus, req.top_k, **common)
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except EmbedBackendError as e:
@@ -165,21 +205,7 @@ def search(req: SearchRequest) -> SearchResponse:
     except RerankerError as e:
         raise HTTPException(status_code=503, detail=str(e))
     return SearchResponse(
-        hits=[
-            SearchHit(
-                similarity_pct=r.similarity_pct,
-                chunk=r.chunk,
-                context_before=r.context_before,
-                context_after=r.context_after,
-                source_id=r.source_id,
-                corpus=r.corpus,
-                metadata=r.metadata,
-                chunk_id=r.chunk_id,
-                matched_by=r.matched_by,
-                explain=r.explain or {},
-            )
-            for r in results
-        ],
+        hits=[_hit_out(r) for r in results],
         calibration=Calibration(**svc.calibration(req.corpus)),
     )
 

@@ -17,7 +17,15 @@ from typing import Literal
 
 from .config import Settings, get_settings
 from .embed import EmbedBackend, EmbedBackendError, get_embed_backend
-from .assembly import dedup_near_duplicates, mmr_select
+from .assembly import (
+    DEFAULT_FULL_K,
+    DEFAULT_MAX_TOTAL,
+    DEFAULT_STUB_TOKEN_CEILING,
+    ResultStub,
+    dedup_near_duplicates,
+    mmr_select,
+    split_full_and_stubs,
+)
 from .embed.cache import CachedBackend, EmbedCache
 from .ingestion.adapters import (
     AdapterError,
@@ -136,6 +144,10 @@ class SearchResult:
     chunk_id: str
     # Which retrievers placed this result. "vector", "bm25", or both.
     matched_by: list[str]
+    # The source document's own date (epoch seconds), when ingestion could
+    # extract one. Drives the stub tier's timestamp column, date filters, and
+    # timeline ordering. None for undated sources.
+    doc_timestamp: float | None = None
     # Per-retriever score breakdown — populated when --explain is on.
     # Empty dict otherwise. Keys: vector_cosine, vector_rank, bm25_score,
     # bm25_rank, rrf, rerank_score (when reranked).
@@ -388,7 +400,9 @@ class VecgrepService:
         # Pull a wider pool than top_k whenever post-retrieval steps can shrink
         # the set — filtering, reranking, OR dedup — so we don't return fewer
         # than top_k results just because the top hits got filtered/collapsed.
-        per_corpus_k = CANDIDATE_POOL
+        # Budgeted searches ask for top_k > CANDIDATE_POOL; widen so the pool
+        # itself never silently clips the requested breadth.
+        per_corpus_k = max(CANDIDATE_POOL, top_k)
 
         results: list[SearchResult] = []
         for c in corpora:
@@ -423,6 +437,30 @@ class VecgrepService:
             # can trust their eyes (a higher % is always above a lower %).
             results.sort(key=lambda r: r.similarity_pct, reverse=True)
         return results
+
+    def search_budgeted(
+        self,
+        query: str,
+        corpus_name: str | None = None,
+        full_k: int = DEFAULT_FULL_K,
+        max_total: int = DEFAULT_MAX_TOTAL,
+        token_ceiling: int = DEFAULT_STUB_TOKEN_CEILING,
+        **kwargs,
+    ) -> tuple[list[SearchResult], list[ResultStub]]:
+        """Breadth search: (full head, stub tail).
+
+        Runs a normal search() with top_k=max_total (dedup + MMR apply, so
+        the widened budget is spent on distinct evidence), then splits: the
+        top full_k results keep context windows, the rest degrade to
+        one-line stubs until `token_ceiling` estimated tokens. Stubs carry
+        chunk_id — expand any of them via get_chunk_window / /api/chunk /
+        MCP get_chunk. Extra kwargs pass through to search() (mode, rerank,
+        filters, ...).
+        """
+        results = self.search(query, corpus_name, top_k=max_total, **kwargs)
+        return split_full_and_stubs(
+            results, full_k=full_k, max_total=max_total, token_ceiling=token_ceiling
+        )
 
     def _apply_rerank(
         self,
@@ -1348,6 +1386,7 @@ def _payload_to_result(
     source_id = payload.get("source_id", "") or ""
     chunk_index = int(payload.get("chunk_index", 0))
     cid = _chunk_id(corpus_name, source_id, chunk_index) if corpus_name and source_id else ""
+    doc_ts = payload.get("doc_timestamp")
     return SearchResult(
         score=score,
         similarity_pct=pct,
@@ -1361,4 +1400,5 @@ def _payload_to_result(
         metadata=payload.get("metadata", {}) or {},
         chunk_id=cid,
         matched_by=matched_by,
+        doc_timestamp=float(doc_ts) if doc_ts is not None else None,
     )
