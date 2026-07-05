@@ -151,6 +151,11 @@ class SearchResult:
     # extract one. Drives the stub tier's timestamp column, date filters, and
     # timeline ordering. None for undated sources.
     doc_timestamp: float | None = None
+    # Precise source anchors: 1-based inclusive line range of the chunk in
+    # its source document, so a caller can cite/re-open the exact region.
+    # None when the source text wasn't available at conversion time.
+    line_start: int | None = None
+    line_end: int | None = None
     # Per-retriever score breakdown — populated when --explain is on.
     # Empty dict otherwise. Keys: vector_cosine, vector_rank, bm25_score,
     # bm25_rank, rrf, rerank_score (when reranked).
@@ -159,6 +164,16 @@ class SearchResult:
     def __post_init__(self) -> None:
         if self.explain is None:
             self.explain = {}
+
+    @property
+    def anchor(self) -> str:
+        """Compact citation: 'source_id#L<start>-L<end>' (or just #L<start>
+        for one-line chunks; bare source_id when lines are unknown)."""
+        if self.line_start is None:
+            return self.source_id
+        if self.line_end and self.line_end != self.line_start:
+            return f"{self.source_id}#L{self.line_start}-L{self.line_end}"
+        return f"{self.source_id}#L{self.line_start}"
 
     @property
     def relevance_pct(self) -> float:
@@ -513,17 +528,86 @@ class VecgrepService:
         slice with no events. Extra kwargs pass to search() (mode, filters…).
         """
         anchors = self.search(query, corpus_name, top_k=top_k, **kwargs)
-
-        def _payload_for(r: SearchResult) -> dict | None:
-            corpus = self.registry.get(r.corpus)
-            payload = self.store.get_by_id(_collection_for(corpus.name), r.chunk_id)
-            if payload is None:
-                payload = self.bm25.get_by_id(corpus.name, r.chunk_id)
-            return payload
-
         return build_timeline(
-            anchors, _payload_for, max_groups=max_groups, padding=padding
+            anchors,
+            self._payload_for_result,
+            max_groups=max_groups,
+            padding=padding,
         )
+
+    def incident(
+        self,
+        query: str,
+        corpus_name: str | None = None,
+        **kwargs,
+    ) -> dict | None:
+        """One structured answer for "what happened?" — pure assembly over
+        the existing primitives (search anchors → timeline groups), no new
+        retrieval.
+
+        Returns None when nothing matches; otherwise:
+          title             — the caller's question, verbatim (no invention)
+          confidence        — best anchor's relevance label
+          sources           — every file contributing evidence
+          participants      — distinct speakers across all events
+          time_range        — {"start","end"}: "<YYYY-MM-DD> <HH:MM>" bounds
+          primary_source    — the file holding the strongest evidence
+          primary_timeline  — that file's chronological events
+          related           — the other timeline groups, kept separate so
+                              context never blends into the primary narrative
+        """
+        anchors = self.search(query, corpus_name, top_k=ANCHOR_TOP_K, **kwargs)
+        if not anchors:
+            return None
+        groups = build_timeline(
+            anchors,
+            lambda r: self._payload_for_result(r),
+        )
+        if not groups:
+            return None
+
+        primary_sid = max(anchors, key=lambda a: a.score).source_id
+        primary = next(
+            (g for g in groups if g["source_id"] == primary_sid), groups[0]
+        )
+        related = [g for g in groups if g is not primary]
+
+        def _day(g: dict) -> str:
+            if not g["doc_timestamp"]:
+                return ""
+            return datetime.fromtimestamp(
+                g["doc_timestamp"], tz=timezone.utc
+            ).strftime("%Y-%m-%d")
+
+        stamps = [
+            f"{_day(g)} {e['time']}".strip()
+            for g in groups
+            for e in g["events"]
+        ]
+        participants = sorted(
+            {e["speaker"] for g in groups for e in g["events"]}
+        )
+        return {
+            "title": query,
+            "confidence": anchors[0].relevance_label,
+            "sources": [g["source_id"] for g in groups],
+            "participants": participants,
+            "time_range": {
+                "start": min(stamps) if stamps else "",
+                "end": max(stamps) if stamps else "",
+            },
+            "primary_source": primary["source_id"],
+            "primary_timeline": primary["events"],
+            "related": related,
+        }
+
+    def _payload_for_result(self, r: SearchResult) -> dict | None:
+        """Stored payload (with source_text) for a result's chunk."""
+        corpus = self.registry.get(r.corpus)
+        payload = self.store.get_by_id(_collection_for(corpus.name), r.chunk_id)
+        if payload is None:
+            payload = self.bm25.get_by_id(corpus.name, r.chunk_id)
+        return payload
 
     def _apply_rerank(
         self,
@@ -1525,6 +1609,14 @@ def _payload_to_result(
     chunk_index = int(payload.get("chunk_index", 0))
     cid = _chunk_id(corpus_name, source_id, chunk_index) if corpus_name and source_id else ""
     doc_ts = payload.get("doc_timestamp")
+    # Line anchors: 1-based inclusive range, computed from the source text
+    # while we still have it. chunk_end is exclusive, so the end line is
+    # counted at the last char INSIDE the span (end-1) — otherwise a chunk
+    # ending exactly at a newline would claim the next line too.
+    line_start = line_end = None
+    if source_text and chunk_end > chunk_start:
+        line_start = source_text.count("\n", 0, chunk_start) + 1
+        line_end = source_text.count("\n", 0, max(chunk_start, chunk_end - 1)) + 1
     return SearchResult(
         score=score,
         similarity_pct=pct,
@@ -1539,4 +1631,6 @@ def _payload_to_result(
         chunk_id=cid,
         matched_by=matched_by,
         doc_timestamp=float(doc_ts) if doc_ts is not None else None,
+        line_start=line_start,
+        line_end=line_end,
     )

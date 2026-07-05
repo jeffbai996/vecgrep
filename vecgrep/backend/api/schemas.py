@@ -46,6 +46,11 @@ class SearchHit(BaseModel):
     chunk_id: str = ""
     matched_by: list[str] = []
     doc_timestamp: float | None = None
+    # Precise anchors: 1-based inclusive line range + compact citation string
+    # ("path#L12-L24") so a caller can cite/re-open the exact region.
+    line_start: int | None = None
+    line_end: int | None = None
+    anchor: str = ""
     # Going-forward names: relevance_pct == similarity_pct (compat alias);
     # relevance_label is the qualitative bucket (exact/strong/related/weak).
     relevance_pct: float = 0.0

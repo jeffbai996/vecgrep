@@ -14,6 +14,16 @@ filters, timeline reconstruction, clearer score output, and alias/entity
 expansion. See `docs/superpowers/specs/` for the design.
 
 ### Added
+- **Precise source anchors**: every result carries a 1-based inclusive
+  `line_start`/`line_end` range and a compact `anchor` citation
+  (`path#L12-L24`) alongside the stable `chunk_id`, on the service, API and
+  MCP surfaces — an assistant can cite and re-open the exact region.
+- **Incident object**: `service.incident()` + MCP `incident` tool — one
+  structured answer for an incident question (title, sources, participants,
+  time range, primary chronological timeline with related context kept
+  separate, confidence label), assembled purely from the search + timeline
+  primitives. Returns nothing rather than inventing structure when no
+  evidence matches.
 - **MCP OAuth** (re-integrated from the parked `feat/mcp-oauth` branch):
   optional OAuth 2.1 on the `/mcp` endpoint (`VECGREP_OAUTH_ENABLED=1` +
   `VECGREP_OAUTH_ISSUER_URL=<public url>`). Embedded authorization server
