@@ -1533,9 +1533,9 @@ class VecgrepService:
             # Restore qdrant collection. If we're renaming, the stored
             # directory still has the old name; rename it on copy.
             src_qdrant = staging / "qdrant" / "collection"
+            old_collection = _collection_for(meta["name"])
+            new_collection = _collection_for(target_name)
             if src_qdrant.is_dir():
-                old_collection = _collection_for(meta["name"])
-                new_collection = _collection_for(target_name)
                 src_collection_dir = src_qdrant / old_collection
                 if src_collection_dir.is_dir():
                     dest_collection_dir = (
@@ -1543,6 +1543,28 @@ class VecgrepService:
                     )
                     dest_collection_dir.parent.mkdir(parents=True, exist_ok=True)
                     _copytree(src_collection_dir, dest_collection_dir)
+
+            # Register the restored collection in Qdrant's meta.json. Embedded
+            # QdrantLocal builds get_collections() PURELY from meta.json at open
+            # time — so copying the collection DIRECTORY isn't enough; without its
+            # meta.json entry the collection is invisible and every search against
+            # the restored corpus returns nothing (silent data-loss on round-trip;
+            # Jeff 2026-07-06). The export ships the source meta.json, so we read
+            # the old collection's config out of it, re-key it to the (possibly
+            # renamed) target, and merge it into the live meta.json.
+            src_meta = staging / "qdrant" / "meta.json"
+            dst_meta = self.settings.qdrant_path / "meta.json"
+            if src_meta.is_file():
+                src_collections = json.loads(src_meta.read_text()).get("collections", {})
+                entry = src_collections.get(old_collection)
+                if entry is not None:
+                    if dst_meta.is_file():
+                        dst = json.loads(dst_meta.read_text())
+                    else:
+                        dst = {"collections": {}, "aliases": {}}
+                    dst.setdefault("collections", {})[new_collection] = entry
+                    dst_meta.parent.mkdir(parents=True, exist_ok=True)
+                    dst_meta.write_text(json.dumps(dst))
 
             # SECURITY: do NOT import the tarball's bm25.pkl — loading an
             # attacker-supplied pickle is arbitrary code execution. The BM25
@@ -1571,6 +1593,41 @@ class VecgrepService:
             None if self.ephemeral else self.settings.qdrant_path,
             url=None if self.ephemeral else self.settings.qdrant_url,
         )
+
+        # Rebuild the BM25 index from the restored points. We deliberately did NOT
+        # import the tarball's bm25.pkl (loading an attacker-supplied pickle is
+        # RCE), and the "rebuilt on next index" the old comment promised never
+        # happens on a plain round-trip — so without this, a restored corpus has
+        # NO keyword index, hybrid/bm25 search returns nothing, and a vector-only
+        # hit below the model's cosine floor is silently dropped (the round-trip
+        # data-loss bug; Jeff 2026-07-06). Scroll the collection's payloads and
+        # re-upsert them into BM25 under the target name — text + payload only, no
+        # pickle, no re-embedding.
+        try:
+            self.bm25.drop(target_name)
+            offset = None
+            ids: list[str] = []
+            texts: list[str] = []
+            payloads: list[dict] = []
+            while True:
+                points, offset = self.store.client.scroll(
+                    collection_name=new_collection, limit=256,
+                    offset=offset, with_payload=True, with_vectors=False,
+                )
+                for pt in points:
+                    pl = pt.payload or {}
+                    ids.append(str(pt.id))
+                    texts.append(pl.get("text", ""))
+                    payloads.append(pl)
+                if offset is None:
+                    break
+            if ids:
+                self.bm25.upsert(target_name, ids, texts, payloads)
+        except Exception:
+            # BM25 rebuild is best-effort — a restored corpus still works on the
+            # vector half; the next index of any doc rebuilds BM25 anyway.
+            pass
+
         return corpus
 
 
