@@ -1,20 +1,10 @@
 version: 2
+# Routine pip version-update PRs were removed: the pyproject uses `>=` floors,
+# so a fresh install already pulls the newest version and floor-bumps changed
+# nothing functional (just weekly churn). Actual Python CVEs still surface via
+# GitHub's default security-updates, which need no config here. Only
+# github-actions version updates are kept — those have no `>=` escape hatch.
 updates:
-  - package-ecosystem: pip
-    directory: /
-    schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
-      timezone: America/Los_Angeles
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: chore
-      include: scope
-    labels:
-      - dependencies
-      - python
-
   - package-ecosystem: github-actions
     directory: /
     schedule:
