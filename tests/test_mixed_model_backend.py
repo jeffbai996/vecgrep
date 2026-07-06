@@ -6,12 +6,22 @@ service query corpora embedded with different models without the old hard-error.
 """
 from __future__ import annotations
 
+import pytest
+
 from vecgrep.backend.config import Settings
-from vecgrep.backend.embed.factory import get_embed_backend
+from vecgrep.backend.embed.factory import _ollama_alive, get_embed_backend
+
+_OLLAMA_URL = "http://localhost:11434"
 
 
+@pytest.mark.skipif(
+    not _ollama_alive(_OLLAMA_URL),
+    reason=f"requires a live Ollama backend at {_OLLAMA_URL} to resolve a real "
+    "OllamaBackend — not a stub target, this test exercises the actual "
+    "reachability/resolution path in get_embed_backend()",
+)
 def test_get_embed_backend_honors_explicit_model():
-    s = Settings(ollama_url="http://localhost:11434", embed_model="nomic-embed-text")
+    s = Settings(ollama_url=_OLLAMA_URL, embed_model="nomic-embed-text")
     # Pin a different model than the settings default; backend must use it.
     b = get_embed_backend(s, prefer="ollama", model="bge-m3")
     assert b.model == "bge-m3"
