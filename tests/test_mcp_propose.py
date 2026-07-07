@@ -284,3 +284,92 @@ def test_discard_cancels_a_delete_proposal(home):
     h = os.environ["VECGREP_HOME"]
     # the doc survives — a discarded delete leaves the entry intact
     assert glob.glob(f"{h}/write/notes/notes-001.md")
+
+
+# --- propose_edit PATCH mode: surgical str-replace (Jeff 2026-07-07) ---
+# propose_edit gains an old_str/new_str patch mode: instead of re-sending the
+# whole body to fix one line, patch loads the current body, does a strict
+# single-match str-replace, and routes the result through the SAME proposal
+# path. Uniqueness is a hard error (mirrors the str_replace contract) — 0 or
+# >1 matches never silently mis-edit. content and old_str are exclusive modes.
+
+def test_propose_edit_patch_single_match(home):
+    from vecgrep.mcp import server as S
+    _seed_doc("notes", "notes-001", "the launch is July 25, ship it")
+    r = json.loads(S._run_propose(
+        "notes", None, edit_id="notes-001",
+        old_str="July 25", new_str="July 17"))
+    assert "error" not in r, r
+    assert r["is_edit"] is True and r["doc_id"] == "notes-001"
+    # the pending proposal carries the patched body, only the one token changed
+    h = os.environ["VECGREP_HOME"]
+    pend = json.loads(open(glob.glob(f"{h}/write/_pending/*.json")[0]).read())
+    assert "July 17" in pend["rendered"] and "July 25" not in pend["rendered"]
+    assert "the launch is" in pend["rendered"] and "ship it" in pend["rendered"]
+
+
+def test_propose_edit_patch_old_str_not_found(home):
+    from vecgrep.mcp import server as S
+    _seed_doc("notes", "notes-001", "nothing to see here")
+    r = json.loads(S._run_propose(
+        "notes", None, edit_id="notes-001",
+        old_str="July 25", new_str="July 17"))
+    assert "error" in r and "not found" in r["error"]
+    assert not glob.glob(f"{os.environ['VECGREP_HOME']}/write/_pending/*.json")
+
+
+def test_propose_edit_patch_old_str_not_unique(home):
+    from vecgrep.mcp import server as S
+    _seed_doc("notes", "notes-001", "date date — pick the right date")
+    r = json.loads(S._run_propose(
+        "notes", None, edit_id="notes-001",
+        old_str="date", new_str="day"))
+    assert "error" in r and "not unique" in r["error"] and "3 match" in r["error"]
+    assert not glob.glob(f"{os.environ['VECGREP_HOME']}/write/_pending/*.json")
+
+
+def test_propose_edit_patch_respects_corpus_deny(home):
+    # patch mode must hit the SAME default-deny gate as a full edit — no bypass.
+    from vecgrep.mcp import server as S
+    r = json.loads(S._run_propose(
+        "squad-shared", None, edit_id="squad-shared-007",
+        old_str="a", new_str="b"))
+    assert "error" in r and "not agent-writable" in r["error"]
+    assert not glob.glob(f"{os.environ['VECGREP_HOME']}/write/_pending/*.json")
+
+
+def test_propose_edit_rejects_content_and_old_str_together(home):
+    from vecgrep.mcp import server as S
+    _seed_doc("notes", "notes-001", "some body")
+    r = json.loads(S._run_propose(
+        "notes", "a full new body", edit_id="notes-001",
+        old_str="some", new_str="any"))
+    assert "error" in r  # ambiguous: can't both overwrite AND patch
+    assert not glob.glob(f"{os.environ['VECGREP_HOME']}/write/_pending/*.json")
+
+
+def test_propose_edit_patch_missing_target_doc(home):
+    from vecgrep.mcp import server as S  # patch of a non-existent doc → clean error
+    r = json.loads(S._run_propose(
+        "notes", None, edit_id="notes-404",
+        old_str="x", new_str="y"))
+    assert "error" in r
+    assert not glob.glob(f"{os.environ['VECGREP_HOME']}/write/_pending/*.json")
+
+
+def test_propose_edit_patch_confirm_round_trip(home):
+    from click.testing import CliRunner
+    from vecgrep.cli.main import cli
+    from vecgrep.mcp import server as S
+    _seed_doc("notes", "notes-001", "release date is July 25 for sure")
+    r = json.loads(S._run_propose(
+        "notes", None, edit_id="notes-001",
+        old_str="July 25", new_str="July 17"))
+    pid = r["proposal_id"]
+    c = CliRunner().invoke(cli, ["confirm", pid])
+    assert c.exit_code == 0, c.output
+    h = os.environ["VECGREP_HOME"]
+    body = open(f"{h}/write/notes/notes-001.md").read()
+    assert "July 17" in body and "July 25" not in body
+    # frontmatter (the id line) survived the body-only patch
+    assert "id: notes-001" in body
