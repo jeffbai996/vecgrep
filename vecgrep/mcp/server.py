@@ -393,9 +393,46 @@ def _pending_store():
     return _C.ProposalStore(get_settings().home / "write" / "_pending")
 
 
-def _run_propose(corpus: str, content: str, edit_id: str | None = None,
+def _doc_body(corpus: str, doc_id: str) -> str | None:
+    """The current BODY (content minus frontmatter) of an existing doc, or None
+    if it isn't on disk. Used by propose_edit's patch mode to str-replace the
+    body without the caller re-sending it. Reads from where the corpus's docs
+    physically live (same resolver the edit existence-check uses)."""
+    from ..backend.ingestion.adapters.markdown import parse_frontmatter
+    path = _corpus_doc_dir(corpus) / f"{doc_id}.md"
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8")
+    # Strip a leading frontmatter block the same way parse_frontmatter detects
+    # one, so the patch operates on body only (frontmatter is regenerated from
+    # meta on render). No frontmatter → the whole file is body.
+    if text.startswith("---") and parse_frontmatter(text):
+        end = text[3:].find("\n---")
+        if end != -1:
+            after = text[3 + end + 4:]        # past the closing '---'
+            after = after.split("\n", 1)[1] if "\n" in after else ""
+            return after.strip("\n")
+    return text.strip("\n")
+
+
+def _apply_patch(body: str, old_str: str, new_str: str) -> str:
+    """Strict single-occurrence str-replace (mirrors the str_replace contract:
+    a non-unique match is a hard error, never a silent wrong-edit). Raises
+    ValueError on 0 or >1 matches."""
+    n = body.count(old_str)
+    if n == 0:
+        raise ValueError("old_str not found in the doc body")
+    if n > 1:
+        raise ValueError(
+            f"old_str not unique ({n} matches) — add surrounding context so it "
+            f"identifies exactly one location")
+    return body.replace(old_str, new_str, 1)
+
+
+def _run_propose(corpus: str, content: str | None, edit_id: str | None = None,
                  source_kind: str | None = None, tags: list[str] | None = None,
-                 origin: str = "bot-suggested") -> str:
+                 origin: str = "bot-suggested",
+                 old_str: str | None = None, new_str: str | None = None) -> str:
     """PROPOSE an entry (or edit) — WRITES NOTHING. Stores a pending proposal a
     human confirms later (`vecgrep confirm <id>`).
 
@@ -403,7 +440,14 @@ def _run_propose(corpus: str, content: str, edit_id: str | None = None,
     so a direct write would be a prompt-injection → memory-poisoning vector. A
     proposal is inert until a human reviews + confirms it off-protocol. origin
     is 'bot-suggested' here (the wall: bots propose, humans authorize). Returns
-    JSON {proposal_id, doc_id, is_edit, preview} or {error}."""
+    JSON {proposal_id, doc_id, is_edit, preview} or {error}.
+
+    PATCH mode (edit only): pass old_str + new_str INSTEAD of content to fix one
+    span without re-sending the whole body. The current body is loaded, the
+    single unique occurrence of old_str is replaced, and the result flows
+    through this exact same path (same corpus gate, size cap, proposal, confirm
+    step). Body-only; frontmatter is preserved. A non-unique old_str is a hard
+    error, never a silent mis-edit."""
     from ..backend.write import proposal as _P
 
     # Enforce the wall at the TOOL boundary, BEFORE creating any directory or
@@ -416,6 +460,35 @@ def _run_propose(corpus: str, content: str, edit_id: str | None = None,
             f"Allowed: {sorted(allowed)}. An operator widens this with "
             f"VECGREP_PROPOSE_ALLOWED_CORPORA. This guard keeps an agent from "
             f"landing a proposal in a shared corpus.")})
+
+    # Patch mode: old_str/new_str (edit only, mutually exclusive with content).
+    # Resolve `content` to the patched body here, then fall through to the exact
+    # same proposal path a full edit takes — no forked approval logic.
+    is_patch = old_str is not None or new_str is not None
+    if is_patch:
+        if content is not None:
+            return json.dumps({"error": (
+                "pass EITHER content (full overwrite) OR old_str+new_str "
+                "(surgical patch), not both.")})
+        if not edit_id:
+            return json.dumps({"error": "patch mode (old_str/new_str) requires "
+                                        "an edit target (doc_id)."})
+        if old_str is None or new_str is None:
+            return json.dumps({"error": "patch mode needs both old_str and "
+                                        "new_str."})
+        body = _doc_body(corpus, edit_id)
+        if body is None:
+            return json.dumps({"error": (
+                f"doc {edit_id!r} not found in corpus {corpus!r} — can't patch "
+                f"a doc that doesn't exist.")})
+        try:
+            content = _apply_patch(body, old_str, new_str)
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+    elif content is None:
+        return json.dumps({"error": "propose needs content (or old_str/new_str "
+                                    "for a patch)."})
+
     n_bytes = len(content.encode("utf-8"))
     if n_bytes > MAX_PROPOSAL_CONTENT_BYTES:
         return json.dumps({"error": (
@@ -815,18 +888,26 @@ def build_mcp_server() -> Any:
                 name="propose_edit",
                 description=(
                     "PROPOSE an edit to an existing entry by id. Writes "
-                    "NOTHING until a human confirms. Returns the proposal_id."
+                    "NOTHING until a human confirms. Returns the proposal_id. "
+                    "Pass `content` to overwrite the whole body, OR "
+                    "`old_str`+`new_str` for a surgical str-replace patch of one "
+                    "unique span (fails if old_str is absent or non-unique)."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "doc_id": {"type": "string"},
-                        "content": {"type": "string"},
+                        "content": {"type": "string",
+                                    "description": "full new body (overwrite mode)"},
+                        "old_str": {"type": "string",
+                                    "description": "patch mode: the unique span to replace"},
+                        "new_str": {"type": "string",
+                                    "description": "patch mode: its replacement"},
                         "corpus": {"type": "string"},
                         "source_kind": {"type": "string"},
                         "tags": {"type": "array", "items": {"type": "string"}},
                     },
-                    "required": ["doc_id", "content"],
+                    "required": ["doc_id"],
                 },
             ),
             Tool(
@@ -904,8 +985,9 @@ def build_mcp_server() -> Any:
                     doc_id.rsplit("-", 1)[0] if "-" in doc_id else doc_id
                 )
                 text = _run_propose(
-                    corpus, args.get("content", ""), doc_id,
+                    corpus, args.get("content"), doc_id,
                     args.get("source_kind"), args.get("tags"),
+                    old_str=args.get("old_str"), new_str=args.get("new_str"),
                 )
             elif name == "propose_delete":
                 doc_id = args.get("doc_id", "")
@@ -1290,17 +1372,30 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
         description=(
             "PROPOSE an edit to an existing entry (by id, e.g. notes-007). Writes "
             "NOTHING — creates a pending proposal a human confirms before it "
-            "overwrites. Returns the proposal_id."
+            "overwrites. Returns the proposal_id.\n"
+            "Two modes: pass `content` to replace the whole body, OR pass "
+            "`old_str`+`new_str` for a SURGICAL PATCH — a str-replace of one "
+            "unique span, so you don't re-send the whole doc to fix one line. "
+            "The patch fails if old_str is missing or appears more than once "
+            "(add surrounding context to make it unique). Patch touches the "
+            "body only; frontmatter is preserved. content and old_str are "
+            "mutually exclusive."
         )
     )
-    def propose_edit(doc_id: str, content: str, corpus: str | None = None,
+    def propose_edit(doc_id: str, content: str | None = None,
+                     corpus: str | None = None,
                      source_kind: str | None = None,
-                     tags: list[str] | None = None) -> str:
-        """doc_id: existing id. content: new text. corpus: inferred from id
-        prefix if omitted. Proposal only — a human must confirm."""
+                     tags: list[str] | None = None,
+                     old_str: str | None = None,
+                     new_str: str | None = None) -> str:
+        """doc_id: existing id. content: new full body (overwrite mode).
+        old_str/new_str: surgical patch mode (str-replace one unique span).
+        corpus: inferred from id prefix if omitted. Proposal only — a human
+        must confirm."""
         if corpus is None:
             corpus = doc_id.rsplit("-", 1)[0] if "-" in doc_id else doc_id
-        return _run_propose(corpus, content, doc_id, source_kind, tags)
+        return _run_propose(corpus, content, doc_id, source_kind, tags,
+                            old_str=old_str, new_str=new_str)
 
     @fmcp.tool(
         description=(

@@ -7,6 +7,14 @@ patch = fixes). The version is a single source of truth in
 
 ## [Unreleased]
 
+### Added
+- **`propose_edit` patch mode** (both MCP transports): pass `old_str` + `new_str`
+  instead of `content` for a surgical str-replace of one *unique* span, instead
+  of re-sending the whole body to fix one line. Non-unique or missing `old_str`
+  is a hard error (never a silent mis-edit); body-only, frontmatter preserved.
+  Reuses the exact proposal/confirm/corpus-gate path — no forked approval logic.
+  `content` and `old_str` are mutually exclusive.
+
 ## [1.1.0] — 2026-07-04
 
 Tool-surface follow-up to v1.0, from a post-release audit.
