@@ -353,9 +353,6 @@ class VecgrepService:
 
         total_docs = 0
         total_chunks = 0
-        # When a source is being re-indexed, subtract its old chunk count so
-        # the corpus total stays accurate after we replace it.
-        chunks_freed = 0
         skipped = 0
         for doc in _expand(source, adapter, include=include):
             chunks = chunker.chunk(doc.text)
@@ -367,8 +364,6 @@ class VecgrepService:
                 # Already indexed at this exact content — skip embed call.
                 skipped += 1
                 continue
-
-            chunks_freed += _count_chunks_for_source(self.bm25, corpus_name, doc.source_id)
 
             # Wipe any prior version of this source so re-indexing is idempotent.
             self.store.delete_by_source(collection, doc.source_id)
@@ -408,7 +403,11 @@ class VecgrepService:
             corpus.source_hashes[doc.source_id] = doc_hash
 
         corpus.doc_count = len(corpus.sources)
-        corpus.chunk_count = corpus.chunk_count - chunks_freed + total_chunks
+        # Recount from Qdrant (source of truth) rather than accumulating a delta.
+        # The old `chunk_count - chunks_freed + total_chunks` drifted permanently
+        # once `chunks_freed` (derived from BM25) diverged from the vector store —
+        # e.g. after a collection was wiped out-of-band. Recounting self-heals.
+        corpus.chunk_count = self.store.count(_collection_for(corpus_name))
         corpus.updated_at = time.time()
         # Persist via upsert (reload-merge-save) so a concurrent writer's other
         # corpora aren't clobbered. Ephemeral runs only touch the in-memory map.
@@ -1148,14 +1147,14 @@ class VecgrepService:
     def delete_source(self, corpus_name: str, source_id: str) -> None:
         corpus = self.registry.get(corpus_name)
         collection = _collection_for(corpus.name)
-        chunks_freed = _count_chunks_for_source(self.bm25, corpus.name, source_id)
         self.store.delete_by_source(collection, source_id)
         self.bm25.delete_by_source(corpus.name, source_id)
         if source_id in corpus.sources:
             corpus.sources.remove(source_id)
         corpus.source_hashes.pop(source_id, None)
         corpus.doc_count = len(corpus.sources)
-        corpus.chunk_count = max(0, corpus.chunk_count - chunks_freed)
+        # Recount from Qdrant (source of truth), not a stale accumulator delta.
+        corpus.chunk_count = self.store.count(collection)
         corpus.updated_at = time.time()
         if self.ephemeral:
             self.registry._corpora[corpus.name] = corpus
@@ -1851,12 +1850,6 @@ def _passes_filters(
         if not verdict:
             return False
     return True
-
-
-def _count_chunks_for_source(bm25: BM25Store, corpus_name: str, source_id: str) -> int:
-    # BM25 store carries the by_source map; cheaper than asking Qdrant.
-    idx = bm25._load(corpus_name)
-    return len(idx.by_source.get(source_id, []))
 
 
 def _expand(source: str, adapter, include: str | None = None) -> list[Document]:
