@@ -1164,6 +1164,89 @@ class VecgrepService:
     def list_corpora(self) -> list[Corpus]:
         return self.registry.list()
 
+    def diagnose(self) -> list[dict]:
+        """Reconcile the registry against the vector store — the check that
+        catches a corpus a Qdrant flap wiped, a count that drifted, or an
+        orphan collection with no registry entry. One dict per issue found:
+
+          {corpus, kind, detail, fixable}
+
+        kind is one of:
+          - "missing_collection": registry has the corpus but Qdrant has no
+            points (0 or a 404'd collection). The classic post-flap data loss.
+            Fixable iff every recorded source still exists on disk.
+          - "count_drift": registry chunk_count != live Qdrant point count.
+            Always fixable (recount, or re-index if sources exist).
+          - "orphan_collection": a vecgrep__* collection with points but no
+            registry entry — searchable via Qdrant but invisible to the app.
+
+        Read-only. `reconcile()` acts on what this reports."""
+        issues: list[dict] = []
+        registered = {c.name: c for c in self.registry.list()}
+
+        for name, c in registered.items():
+            live = self.store.count(_collection_for(name))
+            if live == 0 and c.chunk_count > 0:
+                srcs = list(c.sources or [])
+                have = [s for s in srcs if _source_exists(s)]
+                issues.append({
+                    "corpus": name,
+                    "kind": "missing_collection",
+                    "detail": f"registry has {c.chunk_count} chunks, vector store has 0"
+                              + (f"; {len(have)}/{len(srcs)} sources on disk" if srcs else "; no source paths recorded"),
+                    "fixable": bool(srcs) and len(have) == len(srcs),
+                })
+            elif live != c.chunk_count:
+                issues.append({
+                    "corpus": name,
+                    "kind": "count_drift",
+                    "detail": f"registry {c.chunk_count} vs vector store {live}",
+                    "fixable": True,
+                })
+
+        # Orphan collections: in Qdrant under our prefix, absent from registry.
+        for coll in self.store.list_collections():
+            cname = _corpus_from_collection(coll)
+            if cname and cname not in registered and self.store.count(coll) > 0:
+                issues.append({
+                    "corpus": cname,
+                    "kind": "orphan_collection",
+                    "detail": f"{self.store.count(coll)} points in vector store, no registry entry",
+                    "fixable": False,  # needs the source to rebuild the registry row
+                })
+        return issues
+
+    def reconcile(self, *, reindex: bool = False) -> list[dict]:
+        """Repair what diagnose() finds. Returns the actions taken (one dict per
+        issue: {corpus, kind, action}).
+
+        - count_drift → recount chunk_count from Qdrant (cheap, always safe).
+        - missing_collection → only re-index from recorded sources when
+          `reindex=True` AND every source still exists (embeds — not free).
+          Otherwise reported as "needs_reindex" so a human decides.
+        - orphan_collection → left alone (rebuilding the registry row needs the
+          original source; reported for a human to `vecgrep index` it back)."""
+        actions: list[dict] = []
+        for issue in self.diagnose():
+            name, kind = issue["corpus"], issue["kind"]
+            if kind == "count_drift":
+                c = self.registry.get(name)
+                c.chunk_count = self.store.count(_collection_for(name))
+                c.updated_at = time.time()
+                self.registry.upsert(c)
+                actions.append({"corpus": name, "kind": kind, "action": "recounted"})
+            elif kind == "missing_collection":
+                if reindex and issue["fixable"]:
+                    c = self.registry.get(name)
+                    for src in list(c.sources or []):
+                        self.index(src, name, force=True)
+                    actions.append({"corpus": name, "kind": kind, "action": "reindexed"})
+                else:
+                    actions.append({"corpus": name, "kind": kind, "action": "needs_reindex"})
+            else:  # orphan_collection
+                actions.append({"corpus": name, "kind": kind, "action": "needs_manual_index"})
+        return actions
+
     def calibration(self, corpus_name: str | None) -> dict:
         """The display calibration the UI must mirror to reproduce a search's
         similarity_pct for THIS corpus's embed model.
@@ -1631,8 +1714,30 @@ class VecgrepService:
 
 
 # ----- helpers ------------------------------------------------------------------
+_COLLECTION_PREFIX = "vecgrep__"
+
+
 def _collection_for(corpus_name: str) -> str:
-    return f"vecgrep__{corpus_name}"
+    return f"{_COLLECTION_PREFIX}{corpus_name}"
+
+
+def _corpus_from_collection(collection: str) -> str | None:
+    """Inverse of _collection_for. None for a collection we don't own."""
+    if collection.startswith(_COLLECTION_PREFIX):
+        return collection[len(_COLLECTION_PREFIX):]
+    return None
+
+
+def _source_exists(source_id: str) -> bool:
+    """A recorded source is on disk (so a wiped corpus can be rebuilt from it).
+    URLs are treated as present — we can't cheaply verify them, and re-indexing
+    a URL just re-fetches it."""
+    if source_id.startswith(("http://", "https://")):
+        return True
+    try:
+        return Path(source_id).exists()
+    except OSError:
+        return False
 
 
 def _chunk_id(corpus_name: str, source_id: str, chunk_index: int) -> str:

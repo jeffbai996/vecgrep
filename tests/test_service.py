@@ -96,6 +96,50 @@ def test_chunk_count_self_heals_after_collection_wiped(svc, make_doc):
     assert svc.list_corpora()[0].chunk_count > 0
 
 
+def test_diagnose_flags_wiped_collection_and_reconcile_rebuilds(svc, make_doc):
+    """diagnose() surfaces a corpus whose collection was wiped out-of-band, and
+    reconcile(reindex=True) rebuilds it from the recorded source. This is the
+    prevention path for the Qdrant-flap data loss."""
+    from vecgrep.backend.service import _collection_for
+
+    p = make_doc("doc.md", "Alpha sentence. Beta sentence. Gamma sentence.")
+    svc.index(str(p), "test")
+    assert svc.diagnose() == []  # healthy right after index
+
+    # Wipe the collection but keep the registry row (the flap).
+    svc.store.drop_collection(_collection_for("test"))
+    issues = svc.diagnose()
+    kinds = {i["kind"] for i in issues}
+    assert "missing_collection" in kinds
+    miss = next(i for i in issues if i["kind"] == "missing_collection")
+    assert miss["fixable"] is True  # the source file still exists
+
+    # Repair rebuilds from source; the corpus is searchable + reconciled again.
+    svc.reconcile(reindex=True)
+    assert svc.diagnose() == []
+    assert svc.list_corpora()[0].chunk_count == svc.store.count(_collection_for("test"))
+    assert svc.search("beta", "test", top_k=3)
+
+
+def test_diagnose_flags_count_drift_and_reconcile_recounts(svc, make_doc):
+    """A registry chunk_count that diverges from Qdrant is flagged and recounted
+    without needing a re-embed."""
+    p = make_doc("doc.md", "One. Two. Three. Four.")
+    svc.index(str(p), "test")
+    c = svc.list_corpora()[0]
+    # Corrupt the registry count to simulate historical drift.
+    c.chunk_count = 999
+    svc.registry.upsert(c)
+
+    issues = svc.diagnose()
+    assert any(i["kind"] == "count_drift" for i in issues)
+
+    svc.reconcile()  # recount only, no reindex flag needed
+    from vecgrep.backend.service import _collection_for
+    assert svc.list_corpora()[0].chunk_count == svc.store.count(_collection_for("test"))
+    assert svc.diagnose() == []
+
+
 def test_hybrid_search_includes_both_retrievers(svc, make_doc):
     p = make_doc(
         "doc.md",

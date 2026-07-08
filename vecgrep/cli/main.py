@@ -1083,6 +1083,54 @@ def status(json_out: bool) -> None:
 
 
 @cli.command()
+@click.option("--fix", is_flag=True, help="Repair count drift + re-index wiped corpora from their sources.")
+@click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
+def doctor(fix: bool, json_out: bool) -> None:
+    """Reconcile the corpus registry against the vector store.
+
+    Catches the three ways they drift apart: a corpus a Qdrant restart wiped
+    (registry says N chunks, store has 0), a chunk_count that drifted, and an
+    orphan collection with no registry entry. Read-only by default — pass --fix
+    to recount drift and re-index any wiped corpus from its recorded sources
+    (orphans are reported for a manual `vecgrep index`, since rebuilding the
+    registry row needs the original source).
+
+    Run it after a Qdrant/host restart, or on a timer, so a wiped corpus
+    surfaces immediately instead of silently returning nothing at search time.
+    """
+    svc = VecgrepService()
+    issues = svc.diagnose()
+    actions = svc.reconcile(reindex=True) if fix else []
+
+    if json_out:
+        click.echo(json.dumps({"issues": issues, "actions": actions}, indent=2, default=str))
+        return
+
+    if not issues:
+        click.echo("healthy — registry and vector store agree.")
+        return
+
+    click.echo(f"found {len(issues)} issue(s):")
+    for i in issues:
+        mark = "○" if i["fixable"] else "●"
+        click.echo(f"  {mark} [{i['kind']}] {i['corpus']}: {i['detail']}")
+    if fix:
+        click.echo("")
+        click.echo("actions:")
+        for a in actions:
+            click.echo(f"  → {a['corpus']}: {a['action']}")
+        stuck = [a for a in actions if a["action"] in ("needs_reindex", "needs_manual_index")]
+        if stuck:
+            click.echo("")
+            click.echo("still needs a hand (source missing / orphan):")
+            for a in stuck:
+                click.echo(f"  vecgrep index <source> --corpus {a['corpus']}")
+    else:
+        click.echo("")
+        click.echo("run `vecgrep doctor --fix` to repair (○ = auto-fixable).")
+
+
+@cli.command()
 @click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
 def config(json_out: bool) -> None:
     """Show current resolved configuration."""
