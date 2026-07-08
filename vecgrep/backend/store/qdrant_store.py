@@ -78,6 +78,19 @@ class QdrantStore:
         if name in existing:
             self.client.delete_collection(name)
 
+    def count(self, name: str) -> int:
+        """Live point count for a collection — the ground truth for chunk_count.
+
+        Returns 0 for a missing collection so callers can recount unconditionally
+        without a separate existence check. Used to re-derive corpus.chunk_count
+        from Qdrant after an index instead of accumulating a delta, which drifts
+        the moment the BM25-derived `chunks_freed` diverges from reality (e.g. a
+        collection wiped out-of-band leaves a stale accumulator forever wrong)."""
+        existing = {c.name for c in self.client.get_collections().collections}
+        if name not in existing:
+            return 0
+        return self.client.count(collection_name=name, exact=True).count
+
     # Max points per upsert request. We store the full source_text on every
     # chunk, so a large document's chunks can sum to >256MB — Qdrant's default
     # request-payload ceiling — and a single all-points upsert 400s. Batching

@@ -71,6 +71,31 @@ def test_force_reindexes_unchanged(svc, make_doc):
     assert StubEmbed.calls > pre
 
 
+def test_chunk_count_self_heals_after_collection_wiped(svc, make_doc):
+    """chunk_count is recounted from the vector store, so a collection wiped
+    out-of-band (the real Qdrant-flap-on-reboot scenario) doesn't leave a
+    permanently inflated count. Regression for the delta-accumulator bug."""
+    from vecgrep.backend.service import _collection_for
+
+    p = make_doc("doc.md", "First sentence. Second sentence. Third sentence.")
+    svc.index(str(p), "test")
+    coll = _collection_for("test")
+    live = svc.store.count(coll)
+    assert svc.list_corpora()[0].chunk_count == live
+
+    # Simulate the flap: the vector collection vanishes but the registry keeps
+    # its (now stale) chunk_count. The old delta math would compound this error.
+    svc.store.drop_collection(coll)
+    assert svc.store.count(coll) == 0
+
+    # Re-index the still-present source. chunk_count must reflect reality, not
+    # old_count - freed + added.
+    docs, _, _ = svc.index(str(p), "test", force=True)
+    assert docs == 1
+    assert svc.list_corpora()[0].chunk_count == svc.store.count(coll)
+    assert svc.list_corpora()[0].chunk_count > 0
+
+
 def test_hybrid_search_includes_both_retrievers(svc, make_doc):
     p = make_doc(
         "doc.md",
