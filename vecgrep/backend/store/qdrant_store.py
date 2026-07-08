@@ -78,6 +78,11 @@ class QdrantStore:
         if name in existing:
             self.client.delete_collection(name)
 
+    def list_collections(self) -> list[str]:
+        """Every collection name the store holds — used to find orphans (a
+        collection with no registry entry)."""
+        return [c.name for c in self.client.get_collections().collections]
+
     def count(self, name: str) -> int:
         """Live point count for a collection — the ground truth for chunk_count.
 
