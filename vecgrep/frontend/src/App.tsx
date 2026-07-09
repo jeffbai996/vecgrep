@@ -8,6 +8,7 @@ import Legend from "./components/Legend";
 import HowSearchWorks from "./components/HowSearchWorks";
 import AboutFooter from "./components/AboutFooter";
 import TuningPanel from "./components/TuningPanel";
+import AdminPanel from "./components/AdminPanel";
 import {
   loadTuning,
   saveTuning,
@@ -17,6 +18,7 @@ import {
 } from "./tuning";
 
 export default function App() {
+  const [view, setView] = useState<"search" | "admin">("search");
   const [corpora, setCorpora] = useState<Corpus[]>([]);
   const [selectedCorpus, setSelectedCorpus] = useState<string | null>(null);
   const [hits, setHits] = useState<SearchHit[] | null>(null);
@@ -78,6 +80,17 @@ export default function App() {
           <span className="text-zinc-500 text-sm">grep for meaning, not keywords.</span>
         </div>
         <div className="flex items-center gap-4">
+          <nav className="flex border border-zinc-800 rounded p-0.5" aria-label="Primary">
+            {(["search", "admin"] as const).map((item) => (
+              <button
+                key={item}
+                onClick={() => setView(item)}
+                className={`px-3 h-7 text-xs font-mono rounded ${view === item ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"}`}
+              >
+                {item[0].toUpperCase() + item.slice(1)}
+              </button>
+            ))}
+          </nav>
           {/* Optional companion-app link, only renders if VITE_COMPANION_URL */}
           {/* is set at build time. Empty by default to keep OSS builds clean   */}
           {/* (no internal hostnames in source per CLAUDE.md "OSS — no PII").   */}
@@ -98,7 +111,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="flex-1 grid grid-cols-12 gap-6 px-6 py-6 max-w-7xl mx-auto w-full">
+      {view === "search" ? <main className="flex-1 grid grid-cols-12 gap-6 px-6 py-6 max-w-7xl mx-auto w-full">
         <aside className="col-span-12 md:col-span-3 space-y-6">
           <IndexPanel onIndexed={refresh} />
           <CorpusList
@@ -127,7 +140,7 @@ export default function App() {
           <ResultList hits={hits} searching={searching} tuning={tuning} />
           <AboutFooter />
         </section>
-      </main>
+      </main> : <main className="flex-1 px-6 py-6 max-w-7xl mx-auto w-full"><AdminPanel /></main>}
     </div>
   );
 }

@@ -27,7 +27,7 @@ import click
 import httpx
 
 from .. import __version__
-from ..backend.config import get_settings
+from ..backend.config import ConfigError, get_settings, update_config
 from ..backend.embed import EmbedBackendError
 from ..backend.ingestion.adapters import AdapterError
 from ..backend.service import VecgrepService
@@ -42,6 +42,11 @@ def _api_base() -> str:
 
 def _auth_headers() -> dict:
     token = get_settings().api_token
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _admin_headers() -> dict:
+    token = get_settings().admin_token
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
@@ -85,6 +90,17 @@ def _delete(path: str) -> Any:
     )
     _raise_for_status(r)
     return r.json()
+
+
+def _admin_post(path: str, payload: dict | None = None) -> Any:
+    response = httpx.post(
+        f"{_api_base()}/api/admin{path}",
+        json=payload,
+        timeout=1800.0,
+        headers=_admin_headers(),
+    )
+    _raise_for_status(response)
+    return response.json()
 
 
 # ----- output helpers --------------------------------------------------------
@@ -140,6 +156,108 @@ def _print_results(hits: list[dict], json_out: bool) -> None:
 @click.version_option(__version__, prog_name="vecgrep")
 def cli() -> None:
     """grep for meaning, not keywords."""
+
+
+@cli.command("init")
+@click.option("--ollama-url", default=None, help="Ollama API URL.")
+@click.option("--model", default=None, help="Embedding model name.")
+@click.option("--pull-model", is_flag=True, help="Ask Ollama to pull the selected model.")
+@click.option("--yes", is_flag=True, help="Write without an interactive confirmation.")
+def init_config(ollama_url: str | None, model: str | None, pull_model: bool, yes: bool) -> None:
+    """Create or update the local vecgrep configuration."""
+    settings = get_settings()
+    values = {
+        "ollama_url": ollama_url or settings.ollama_url,
+        "embed_model": model or settings.embed_model,
+    }
+    if not yes and not click.confirm(
+        f"Write {settings.config_file} using {values['embed_model']} at {values['ollama_url']}?"
+    ):
+        raise click.Abort()
+    try:
+        update_config(values)
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if pull_model:
+        try:
+            response = httpx.post(
+                f"{values['ollama_url'].rstrip('/')}/api/pull",
+                json={"name": values["embed_model"], "stream": False},
+                timeout=1800.0,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise click.ClickException(f"configuration saved, but model pull failed: {exc}") from exc
+    click.echo(f"configured {settings.config_file}")
+
+
+@cli.group("backup")
+def backup_group() -> None:
+    """Create, inspect, verify, and restore whole-instance backups."""
+
+
+@backup_group.command("create")
+@click.argument("destination", required=False, type=click.Path(path_type=Path))
+def backup_create(destination: Path | None) -> None:
+    from ..backend.backup import BackupError, BackupManager
+
+    try:
+        path = BackupManager(get_settings()).create(destination, origin="manual")
+    except BackupError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(path)
+
+
+@backup_group.command("list")
+@click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
+def backup_list(json_out: bool) -> None:
+    from ..backend.backup import BackupManager
+
+    items = BackupManager(get_settings()).list()
+    if json_out:
+        click.echo(json.dumps(items, indent=2))
+        return
+    if not items:
+        click.echo("no backups.")
+        return
+    for item in items:
+        if item.get("invalid"):
+            click.echo(f"invalid  {item['path']}")
+        else:
+            click.echo(
+                f"{item['backup_id']}  {item['origin']:<11} "
+                f"{item['created_at']}  {item['size']} bytes"
+            )
+
+
+@backup_group.command("verify")
+@click.argument("archive", type=click.Path(exists=True, path_type=Path))
+def backup_verify(archive: Path) -> None:
+    from ..backend.backup import BackupError, BackupManager
+
+    try:
+        result = BackupManager(get_settings()).verify(archive)
+    except BackupError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"valid {result['backup_id']} ({len(result.get('corpora', []))} corpora)")
+
+
+@backup_group.command("restore")
+@click.argument("archive", type=click.Path(exists=True, path_type=Path))
+@click.option("--confirm", required=True, help="Exact backup ID shown by verify/list.")
+def backup_restore(archive: Path, confirm: str) -> None:
+    from ..backend.backup import BackupError, BackupManager
+
+    try:
+        result = BackupManager(get_settings()).restore(archive, confirm=confirm)
+    except BackupError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if _api_alive():
+        try:
+            _admin_post("/config/reload")
+        except click.ClickException:
+            pass
+    click.echo(f"restored {result['restored']}; safety backup: {result['safety_backup']}")
 
 
 @cli.command()
@@ -785,11 +903,20 @@ def corpora_decay(name: str, half_life: float | None, off: bool) -> None:
 @click.option("--host", default=None, help="Override host.")
 @click.option("--port", default=None, type=int, help="Override port.")
 @click.option("--reload", is_flag=True, help="Auto-reload on code changes (dev).")
-def serve(host: str | None, port: int | None, reload: bool) -> None:
+@click.option("--open", "open_browser", is_flag=True, help="Open the web UI in a browser.")
+def serve(host: str | None, port: int | None, reload: bool, open_browser: bool) -> None:
     """Start the FastAPI backend (and serve the web UI if built)."""
     import uvicorn
 
     s = get_settings()
+    actual_host = host or s.api_host
+    actual_port = port or s.api_port
+    if open_browser:
+        import threading
+        import webbrowser
+
+        browser_host = "127.0.0.1" if actual_host in {"0.0.0.0", "::"} else actual_host
+        threading.Timer(0.8, lambda: webbrowser.open(f"http://{browser_host}:{actual_port}")).start()
     # `timeout_keep_alive` defaults to 5s in uvicorn — long-running index
     # calls (which can take minutes on large repos) silently get the
     # connection axed before the registry-write response is delivered.
@@ -797,8 +924,8 @@ def serve(host: str | None, port: int | None, reload: bool) -> None:
     # and the registry never records the new corpus. Bump to 15 min.
     uvicorn.run(
         "vecgrep.backend.main:app",
-        host=host or s.api_host,
-        port=port or s.api_port,
+        host=actual_host,
+        port=actual_port,
         reload=reload,
         timeout_keep_alive=900,
     )

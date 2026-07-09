@@ -7,6 +7,40 @@ patch = fixes). The version is a single source of truth in
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-07-09
+
+Operational safety and self-hosting release. Search and ranking behavior are
+unchanged.
+
+### Added
+- Verified whole-instance backups for embedded and server-mode Qdrant, with
+  schema-versioned manifests, SHA-256 checksums, non-secret config, aliases,
+  write documents, corpus metadata, and per-collection snapshots.
+- Restore preflight, exact-ID confirmation, a cross-process mutation lock,
+  automatic pre-restore safety backups, rollback on failure, BM25 rebuild, and
+  post-restore registry/vector diagnostics.
+- `vecgrep backup create|list|verify|restore`, `vecgrep init`, and
+  `vecgrep serve --open`.
+- Admin API and web controls for backup creation, verification, download,
+  restore, and a persisted disabled-by-default daily/weekly scheduler.
+  Scheduled retention never deletes manual or pre-restore backups.
+- Tag-triggered GitHub release automation that tests Python, builds the React
+  UI, produces wheel/sdist artifacts, and smoke-installs the wheel in a clean
+  environment.
+
+## [1.1.2] — 2026-07-09
+
+### Added
+- A loopback-safe administration API and web UI for non-secret runtime
+  configuration. Values show default/file/environment provenance; environment
+  overrides are read-only and secrets expose presence only.
+- Atomic, validation-first `config.json` updates that preserve unknown keys,
+  require typed confirmation before switching Qdrant, and report whether a
+  service restart is required.
+- Hot reload for embedding endpoints/models and default result count, including
+  invalidation of API and MCP service caches. Existing corpus model pins are
+  preserved and called out explicitly.
+
 ## [1.1.1] — 2026-07-09
 
 Forward-only maintenance release collecting the work shipped after v1.1.0.
@@ -206,7 +240,9 @@ versioned as part of adopting a real release cadence toward v1.
 
 - First tagged release.
 
-[Unreleased]: https://github.com/jeffbai996/vecgrep/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/jeffbai996/vecgrep/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/jeffbai996/vecgrep/compare/v1.1.2...v1.2.0
+[1.1.2]: https://github.com/jeffbai996/vecgrep/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/jeffbai996/vecgrep/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/jeffbai996/vecgrep/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/jeffbai996/vecgrep/compare/v0.7.0...v1.0.0
