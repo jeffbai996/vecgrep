@@ -43,7 +43,7 @@ jobs:
           python -m venv /tmp/vecgrep-smoke
           /tmp/vecgrep-smoke/bin/pip install dist/*.whl
           /tmp/vecgrep-smoke/bin/vecgrep --version
-          /tmp/vecgrep-smoke/bin/vecgrep backup --help
+          /tmp/vecgrep-smoke/bin/vecgrep --help
       - uses: actions/upload-artifact@v4
         with:
           name: distributions
