@@ -2,7 +2,7 @@
 
 > grep for meaning, not keywords
 
-**v1.0.0** · stable CLI + HTTP API surface · see [CHANGELOG.md](CHANGELOG.md) for release history
+**v1.1.1** · stable CLI + HTTP API surface · see [CHANGELOG.md](CHANGELOG.md) for release history
 
 `vecgrep` is a local-first semantic search engine for any corpus you throw at it. Drop in documents — text, markdown, PDFs, URLs — and search by concept instead of exact words. Runs on your machine, no cloud roundtrip required.
 
@@ -50,7 +50,7 @@ The closest equivalents — `txtai`, `chroma`, `LlamaIndex` — are libraries yo
 
 ## Status
 
-Alpha (`v0.7.x`). What's shipped:
+Stable (`v1.1.x`). What's shipped:
 
 - **Retrieval** — hybrid (BM25 + vector + RRF, BM25-weighted by default), cross-encoder rerank, optional per-corpus recency decay.
 - **Serving** — MCP server (stdio + streamable HTTP), named corpora, optional bearer-token auth. Corpora embedded with *different* models can be served side by side — each queries with its own model.
@@ -58,17 +58,26 @@ Alpha (`v0.7.x`). What's shipped:
 - **UI** — web UI with confidence-tier coloring + V/K/VK match badges.
 - **Adapters** — plaintext, markdown, PDF, URLs, Discord JSONL, Claude export, ChatGPT export.
 
-The public API (HTTP + CLI flags) is unstable until v1.0 — expect breaking changes within v0.x.
+The public CLI and HTTP API have been stable since v1.0. Breaking changes are
+reserved for a future major release.
 
 ## Install
 
+The `vecgrep` project on PyPI is unrelated. Install this project directly from
+GitHub with [uv](https://docs.astral.sh/uv/):
+
 ```bash
-pip install vecgrep                # base — Ollama embedding, hybrid search
-pip install "vecgrep[openai]"      # also: OpenAI embedding fallback
-pip install "vecgrep[rerank]"      # also: cross-encoder reranking (~hundreds of MB, torch)
-pip install "vecgrep[watch]"       # also: file watcher for `vecgrep watch`
-pip install "vecgrep[mcp]"         # also: MCP server for Claude Desktop / Cursor
+uv tool install "vecgrep[mcp] @ git+https://github.com/jeffbai996/vecgrep"
 ```
+
+For an isolated one-shot invocation:
+
+```bash
+uvx --from "vecgrep[mcp] @ git+https://github.com/jeffbai996/vecgrep" vecgrep --help
+```
+
+Optional extras are `openai`, `rerank`, `watch`, `mcp`, and `dev`. Combine
+them in the bracketed list when installing from GitHub.
 
 You also need [Ollama](https://ollama.com) running locally for the default embedding backend:
 
