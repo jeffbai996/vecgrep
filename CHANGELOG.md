@@ -7,13 +7,33 @@ patch = fixes). The version is a single source of truth in
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-07-09
+
+Forward-only maintenance release collecting the work shipped after v1.1.0.
+
 ### Added
+- **Retrieval controls**: relative time filters, negated filters, enriched
+  speaker/bot/content filters, and a wider default budget of 10 full results
+  plus up to 90 stubs. The enrichment and reindex runbooks document how to
+  apply the new metadata to existing corpora.
+- **Insight and OAuth administration tools**: related-item discovery,
+  comparison, corpus statistics, extractive summaries, and an OAuth status /
+  client-revocation surface.
 - **`propose_edit` patch mode** (both MCP transports): pass `old_str` + `new_str`
   instead of `content` for a surgical str-replace of one *unique* span, instead
   of re-sending the whole body to fix one line. Non-unique or missing `old_str`
   is a hard error (never a silent mis-edit); body-only, frontmatter preserved.
   Reuses the exact proposal/confirm/corpus-gate path — no forked approval logic.
   `content` and `old_str` are mutually exclusive.
+- **Integrity diagnostics**: `vecgrep doctor` reconciles the corpus registry
+  with the active vector store and reports embedded/server split-brain
+  configurations.
+
+### Fixed
+- Corpus imports restore all data required for an immediately searchable
+  corpus instead of leaving gaps in the registry or BM25 state.
+- Corpus chunk counts are read from Qdrant rather than maintained as a
+  potentially drifting delta.
 
 ## [1.1.0] — 2026-07-04
 
@@ -186,7 +206,10 @@ versioned as part of adopting a real release cadence toward v1.
 
 - First tagged release.
 
-[Unreleased]: https://github.com/jeffbai996/vecgrep/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/jeffbai996/vecgrep/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/jeffbai996/vecgrep/compare/v1.1.0...v1.1.1
+[1.1.0]: https://github.com/jeffbai996/vecgrep/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/jeffbai996/vecgrep/compare/v0.7.0...v1.0.0
 [0.7.0]: https://github.com/jeffbai996/vecgrep/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jeffbai996/vecgrep/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jeffbai996/vecgrep/compare/v0.4.0...v0.5.0
