@@ -63,12 +63,12 @@ function _authHeaders(): Record<string, string> {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(path, {
+    ...init,
     headers: {
       "Content-Type": "application/json",
       ..._authHeaders(),
       ...((init.headers as Record<string, string>) || {}),
     },
-    ...init,
   });
   if (!res.ok) {
     let detail = res.statusText;
@@ -81,6 +81,22 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new Error(detail);
   }
   return res.json();
+}
+
+async function adminRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  let token = "";
+  try {
+    token = window.localStorage.getItem("vecgrep_admin_token") || "";
+  } catch {
+    /* loopback access does not need a token */
+  }
+  return request<T>(path, {
+    ...init,
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...((init.headers as Record<string, string>) || {}),
+    },
+  });
 }
 
 export const api = {
@@ -106,10 +122,75 @@ export const api = {
       body: JSON.stringify({ query, corpus, top_k, mode, rerank }),
     }),
   config: () => request<Record<string, unknown>>("/api/config"),
+  adminConfig: () => adminRequest<AdminConfig>("/api/admin/config"),
+  updateAdminConfig: (values: Record<string, unknown>, confirm_qdrant?: string) =>
+    adminRequest<AdminConfigUpdate>("/api/admin/config", {
+      method: "PATCH",
+      body: JSON.stringify({ values, confirm_qdrant }),
+    }),
+  reloadAdminConfig: () =>
+    adminRequest<AdminConfig & { reloaded: boolean }>("/api/admin/config/reload", {
+      method: "POST",
+    }),
+  listBackups: () => adminRequest<Backup[]>("/api/admin/backups"),
+  createBackup: () => adminRequest<Backup>("/api/admin/backups", { method: "POST" }),
+  verifyBackup: (id: string) =>
+    adminRequest<Backup>(`/api/admin/backups/${encodeURIComponent(id)}/verify`, { method: "POST" }),
+  downloadBackup: async (id: string) => {
+    let token = "";
+    try { token = window.localStorage.getItem("vecgrep_admin_token") || ""; } catch { /* loopback */ }
+    const response = await fetch(`/api/admin/backups/${encodeURIComponent(id)}/download`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!response.ok) throw new Error(`Download failed: HTTP ${response.status}`);
+    return response.blob();
+  },
+  restoreBackup: (id: string, confirm: string) =>
+    adminRequest<{ restored: string; safety_backup: string }>(`/api/admin/backups/${encodeURIComponent(id)}/restore`, {
+      method: "POST", body: JSON.stringify({ confirm }),
+    }),
+  backupSchedule: () => adminRequest<BackupSchedule>("/api/admin/backup-schedule"),
+  updateBackupSchedule: (values: Partial<BackupSchedule>) =>
+    adminRequest<BackupSchedule>("/api/admin/backup-schedule", {
+      method: "PATCH", body: JSON.stringify({ values }),
+    }),
   getChunk: (corpus: string, chunkId: string, window: number | "full" = 2000) =>
     request<ChunkWindow>(
       `/api/chunk/${encodeURIComponent(corpus)}/${encodeURIComponent(chunkId)}?window=${window}`
     ),
+};
+
+export type AdminConfig = {
+  values: Record<string, string | number | boolean | null>;
+  home: string;
+  provenance: Record<string, "default" | "file" | "env">;
+  read_only: string[];
+  secrets: Record<string, boolean>;
+};
+
+export type AdminConfigUpdate = AdminConfig & {
+  restart_required: boolean;
+  warnings: string[];
+};
+
+export type Backup = {
+  backup_id: string;
+  created_at: string;
+  origin: "manual" | "scheduled" | "pre-restore";
+  storage_mode: "embedded" | "server";
+  path: string;
+  size: number;
+  corpora: Array<{ name: string; chunk_count: number }>;
+  invalid?: boolean;
+};
+
+export type BackupSchedule = {
+  backup_enabled: boolean;
+  backup_frequency: "daily" | "weekly";
+  backup_time: string;
+  backup_weekday: number;
+  backup_destination: string | null;
+  backup_retention: number;
 };
 
 export type ChunkWindow = {

@@ -1,0 +1,46 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: vecgrep/frontend/package-lock.json
+      - name: Install Python dependencies
+        run: python -m pip install -e ".[dev,mcp]" build
+      - name: Test
+        run: python -m pytest tests
+      - name: Build frontend
+        working-directory: vecgrep/frontend
+        run: npm ci && npm run build
+      - name: Build distributions
+        run: python -m build
+      - name: Smoke install wheel
+        run: |
+          python -m venv /tmp/vecgrep-smoke
+          /tmp/vecgrep-smoke/bin/pip install dist/*.whl
+          /tmp/vecgrep-smoke/bin/vecgrep --version
+          /tmp/vecgrep-smoke/bin/vecgrep backup --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/*
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --generate-notes --verify-tag

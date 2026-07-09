@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Callable
@@ -18,6 +19,7 @@ from starlette.routing import Mount, Route
 
 from .. import __version__
 from .api.routes import public_router, router
+from .api.admin import router as admin_router
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
@@ -76,11 +78,38 @@ def create_app() -> FastAPI:
         # group — its lifespan must be entered for the /mcp endpoint to
         # serve. When mcp_http_app is None (extra not installed), we
         # still need a no-op lifespan so the app boots cleanly.
-        if mcp_http_app is not None:
-            async with mcp_http_app.router.lifespan_context(mcp_http_app):
+        stop = threading.Event()
+
+        def _backup_loop() -> None:
+            from .backup import BackupManager, BackupScheduler
+            from .config import get_settings
+
+            while not stop.wait(30):
+                settings = get_settings()
+                scheduler = BackupScheduler(
+                    BackupManager(settings),
+                    enabled=settings.backup_enabled,
+                    frequency=settings.backup_frequency,
+                    local_time=settings.backup_time,
+                    weekday=settings.backup_weekday,
+                    retention=settings.backup_retention,
+                )
+                try:
+                    scheduler.run_if_due()
+                except Exception as exc:
+                    logger.error("scheduled backup failed: %s", exc)
+
+        backup_thread = threading.Thread(target=_backup_loop, name="vecgrep-backups", daemon=True)
+        backup_thread.start()
+        try:
+            if mcp_http_app is not None:
+                async with mcp_http_app.router.lifespan_context(mcp_http_app):
+                    yield
+            else:
                 yield
-        else:
-            yield
+        finally:
+            stop.set()
+            backup_thread.join(timeout=2)
 
     app = FastAPI(title="vecgrep", version=__version__, lifespan=lifespan)
 
@@ -96,6 +125,7 @@ def create_app() -> FastAPI:
 
     app.include_router(public_router)
     app.include_router(router)
+    app.include_router(admin_router)
 
     if mcp_http_app is not None:
         # Mount the MCP sub-app under /mcp so ALL its sub-paths resolve — not

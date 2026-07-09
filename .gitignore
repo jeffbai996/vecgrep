@@ -27,6 +27,11 @@ vecgrep/frontend/node_modules/
 vecgrep/frontend/dist/
 vecgrep/frontend/.vite/
 
+# The built SPA ships inside wheels and source installs. Keep its production
+# output in git so `uv tool install git+...` does not require Node.
+!vecgrep/frontend/dist/
+!vecgrep/frontend/dist/**
+
 # IDE / OS
 .vscode/
 .idea/

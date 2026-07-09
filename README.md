@@ -2,7 +2,7 @@
 
 > grep for meaning, not keywords
 
-**v1.1.1** · stable CLI + HTTP API surface · see [CHANGELOG.md](CHANGELOG.md) for release history
+**v1.2.0** · stable CLI + HTTP API surface · see [CHANGELOG.md](CHANGELOG.md) for release history
 
 `vecgrep` is a local-first semantic search engine for any corpus you throw at it. Drop in documents — text, markdown, PDFs, URLs — and search by concept instead of exact words. Runs on your machine, no cloud roundtrip required.
 
@@ -40,6 +40,7 @@ The closest equivalents — `txtai`, `chroma`, `LlamaIndex` — are libraries yo
 - [How it works](#how-it-works)
 - [Storage layout](#storage-layout)
 - [Configuration](#configuration)
+- [Backup and recovery](#backup-and-recovery)
 - [Web UI](#web-ui)
 - [MCP server](#mcp-server)
 - [Roadmap](#roadmap)
@@ -228,6 +229,7 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 | `VECGREP_API_HOST` | `127.0.0.1` | API bind host |
 | `VECGREP_API_PORT` | `8765` | API port |
 | `VECGREP_API_TOKEN` | unset | If set, `/api/*` requires `Authorization: Bearer <token>` (health stays public) |
+| `VECGREP_ADMIN_TOKEN` | unset | Separate bearer token for `/api/admin/*`. Without it, admin access requires both a loopback peer and loopback Host header. |
 | `VECGREP_TOP_K` | `5` | Default `--top` value |
 | `VECGREP_ALIASES_FILE` | `$VECGREP_HOME/aliases.json` | Entity alias map (personal data — keep it out of any repo). See `docs/aliases.example.json`. Missing = no expansion. |
 | `VECGREP_OAUTH_ENABLED` | unset | `1` enables OAuth 2.1 on `/mcp` (embedded auth server: /authorize, /token, /.well-known). |
@@ -235,6 +237,31 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 | `VECGREP_BM25_WEIGHT` | `1.5` | Weight on BM25 contribution to RRF fusion. >1 boosts literal-keyword matches over semantic noise on short queries. Set to `1.0` for pure RRF, higher for keyword-leaning ranking. |
 | `VECGREP_BM25_COVERAGE_MODE` | `penalty` | How BM25 treats docs that match only some query tokens. `penalty` keeps them but demotes the score by `(matched/total)²`; `filter` drops anything below a coverage threshold (higher precision, but can zero out the BM25 half of a multi-token query). |
 | `VECGREP_EMBED_CACHE_MAX_ROWS` | `50000` | Row cap on the sqlite embedding cache (~1 GB at a 1024-dim model). Oldest entries are evicted first once over the cap. Set `<= 0` to disable the cap. |
+
+Non-secret settings can also live in `~/.vecgrep/config.json`; environment
+variables override the file. The Admin tab shows each value's provenance and
+makes environment-owned fields read-only. Run `vecgrep init --yes` for an
+initial file or edit it through `vecgrep serve --open`.
+
+## Backup and recovery
+
+Whole-instance backups contain per-corpus Qdrant snapshots, the corpus
+registry, non-secret configuration, aliases, and write-through documents.
+Embedding caches and BM25 pickles are excluded; BM25 is rebuilt from trusted
+Qdrant payloads after restore.
+
+```bash
+vecgrep backup create
+vecgrep backup list
+vecgrep backup verify ~/.vecgrep/backups/vecgrep-<id>.vgbak
+vecgrep backup restore ~/.vecgrep/backups/vecgrep-<id>.vgbak --confirm <id>
+```
+
+Restore verifies every checksum, requires the exact backup ID, creates a
+pre-restore safety backup, and rolls back automatically on failure. The Admin
+tab exposes the same operations and a disabled-by-default daily or weekly
+scheduler. Retention applies only to scheduled backups; manual and safety
+backups are never pruned.
 
 ## Memory-retrieval mode (v1.0)
 
@@ -300,7 +327,7 @@ The sidebar carries a legend mapping V / K / VK and confidence colors, plus a co
 `vecgrep` ships an MCP server so Claude Desktop, Cursor, or any MCP-aware client can search your corpora as a tool. Install with the extra and run over stdio:
 
 ```bash
-pip install "vecgrep[mcp]"
+uv tool install "vecgrep[mcp] @ git+https://github.com/jeffbai996/vecgrep"
 vecgrep mcp
 ```
 
