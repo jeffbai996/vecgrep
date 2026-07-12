@@ -59,3 +59,52 @@ def test_mixed_model_corpora_coexist_in_registry(tmp_path):
     assert by_name["legacy"].embed_model == "nomic-embed-text"
     assert by_name["upgraded"].embed_model == "bge-m3"
     assert by_name["upgraded"].dim == 1024
+
+
+def test_corrupt_registry_raises_instead_of_wiping(tmp_path):
+    """A torn/corrupt corpora.json must NOT load as empty — because the next
+    upsert would then save that empty registry over the good data, silently
+    dropping every corpus. The recurring "corpora vanished" bug. Loading a
+    corrupt file raises so the mutation aborts and disk data survives."""
+    import pytest
+    from vecgrep.backend.store.corpora import CorpusError
+
+    path = tmp_path / "corpora.json"
+    reg = CorpusRegistry(path)
+    reg.upsert(_corpus("keep_me"))
+    assert path.exists()
+
+    # Simulate a torn write: valid-JSON-prefix, truncated mid-object.
+    path.write_text('{"keep_me": {"name": "keep_me", "embed_backend": "oll')
+
+    # A fresh handle must refuse to load an empty registry over the file.
+    with pytest.raises(CorpusError):
+        CorpusRegistry(path)
+
+
+def test_save_is_atomic_no_partial_file(tmp_path, monkeypatch):
+    """_save writes via a temp file + os.replace, so an interrupted serialize
+    never leaves a truncated corpora.json. If the replace step blows up, the
+    original file is untouched (not half-written)."""
+    import os
+    path = tmp_path / "corpora.json"
+    reg = CorpusRegistry(path)
+    reg.upsert(_corpus("first"))
+    good = path.read_text()
+
+    # Force os.replace to fail during the next save; the original must survive.
+    real_replace = os.replace
+    def boom(src, dst):
+        raise OSError("simulated crash during replace")
+    monkeypatch.setattr(os, "replace", boom)
+    try:
+        reg.upsert(_corpus("second"))
+    except OSError:
+        pass
+    monkeypatch.setattr(os, "replace", real_replace)
+
+    # File is still the intact pre-crash version (never truncated), and no
+    # stray .tmp litter remains.
+    assert path.read_text() == good
+    leftovers = [q.name for q in tmp_path.iterdir() if q.name.endswith(".tmp")]
+    assert not leftovers, f"temp files left behind: {leftovers}"
