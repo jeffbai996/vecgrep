@@ -7,7 +7,9 @@ refuse to mix models within one corpus.
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -57,8 +59,17 @@ class CorpusRegistry:
             return
         try:
             data = json.loads(self.path.read_text())
-        except json.JSONDecodeError:
-            data = {}
+        except json.JSONDecodeError as exc:
+            # The file exists but is unparseable — almost always a torn read of a
+            # concurrent (previously non-atomic) write. DO NOT fall back to {}:
+            # an empty load here would let the next upsert save an empty registry
+            # over good data, silently dropping every corpus. Raise so the caller
+            # aborts the mutation and the on-disk registry stays intact. Paired
+            # with the atomic _save below, a torn read is now transient, not fatal.
+            raise CorpusError(
+                f"corpus registry at {self.path} is unreadable ({exc}); "
+                "refusing to load an empty registry over it"
+            ) from exc
         for name, payload in data.items():
             self._corpora[name] = Corpus(**payload)
 
@@ -76,7 +87,27 @@ class CorpusRegistry:
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {name: asdict(c) for name, c in self._corpora.items()}
-        self.path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        # Atomic write: serialize to a temp file in the same dir, fsync, then
+        # os.replace (atomic on POSIX). A crashed/half-finished save can no
+        # longer leave a truncated corpora.json for the next reader to choke on
+        # — the root of the recurring "corpora vanished" losses. Mirrors
+        # config._atomic_write_json, which this used to lack.
+        text = json.dumps(payload, indent=2, sort_keys=True)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(self.path.parent), prefix=self.path.name + ".", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_name, self.path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
     @staticmethod
     def validate_name(name: str) -> None:
