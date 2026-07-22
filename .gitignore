@@ -40,3 +40,4 @@ Thumbs.db
 
 # Qdrant local storage if anyone runs it from repo root
 qdrant_storage/
+*.tsbuildinfo
