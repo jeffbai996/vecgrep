@@ -3,12 +3,13 @@ import { api, Corpus, SearchHit, SearchMode } from "./api";
 import SearchBar from "./components/SearchBar";
 import IndexPanel from "./components/IndexPanel";
 import CorpusList from "./components/CorpusList";
+import CorpusHealth from "./components/CorpusHealth";
 import ResultList from "./components/ResultList";
 import Legend from "./components/Legend";
 import HowSearchWorks from "./components/HowSearchWorks";
 import AboutFooter from "./components/AboutFooter";
 import TuningPanel from "./components/TuningPanel";
-import AdminPanel from "./components/AdminPanel";
+import TimelinePanel from "./components/TimelinePanel";
 import {
   loadTuning,
   saveTuning,
@@ -18,7 +19,7 @@ import {
 } from "./tuning";
 
 export default function App() {
-  const [view, setView] = useState<"search" | "admin">("search");
+  const [view, setView] = useState<"search" | "timeline">("search");
   const [corpora, setCorpora] = useState<Corpus[]>([]);
   const [selectedCorpus, setSelectedCorpus] = useState<string | null>(null);
   const [hits, setHits] = useState<SearchHit[] | null>(null);
@@ -52,12 +53,13 @@ export default function App() {
     query: string,
     topK: number,
     mode: SearchMode,
-    rerank: boolean
+    rerank: boolean,
+    filters: string[]
   ) => {
     setError(null);
     setSearching(true);
     try {
-      const r = await api.search(query, selectedCorpus, topK, mode, rerank);
+      const r = await api.search(query, selectedCorpus, topK, mode, rerank, filters);
       setHits(r.hits);
       // Seed the tuning sliders from the server's actual calibration for this
       // corpus's model — but only while the user hasn't customized them.
@@ -81,7 +83,7 @@ export default function App() {
         </div>
         <div className="flex items-center gap-4">
           <nav className="flex border border-zinc-800 rounded p-0.5" aria-label="Primary">
-            {(["search", "admin"] as const).map((item) => (
+            {(["search", "timeline"] as const).map((item) => (
               <button
                 key={item}
                 onClick={() => setView(item)}
@@ -111,36 +113,47 @@ export default function App() {
         </div>
       </header>
 
-      {view === "search" ? <main className="flex-1 grid grid-cols-12 gap-6 px-6 py-6 max-w-7xl mx-auto w-full">
+      <main className="flex-1 grid grid-cols-12 gap-6 px-6 py-6 max-w-7xl mx-auto w-full">
         <aside className="col-span-12 md:col-span-3 space-y-6">
-          <IndexPanel onIndexed={refresh} />
+          {view === "search" && <IndexPanel onIndexed={refresh} />}
           <CorpusList
             corpora={corpora}
             selected={selectedCorpus}
             onSelect={setSelectedCorpus}
             onDeleted={refresh}
           />
-          <Legend />
-          <HowSearchWorks />
+          {selectedCorpus && <CorpusHealth corpus={selectedCorpus} />}
+          {view === "search" && (
+            <>
+              <Legend />
+              <HowSearchWorks />
+            </>
+          )}
         </aside>
 
-        <section className="col-span-12 md:col-span-9 space-y-4">
-          <SearchBar
-            onSearch={onSearch}
-            disabled={searching}
-            corpus={selectedCorpus}
-            corpusCount={corpora.length}
-          />
-          <TuningPanel tuning={tuning} onChange={updateTuning} />
-          {error && (
-            <div className="text-sm text-red-400 font-mono whitespace-pre-wrap border border-red-800 bg-red-950/40 rounded p-3">
-              {error}
-            </div>
-          )}
-          <ResultList hits={hits} searching={searching} tuning={tuning} />
-          <AboutFooter />
-        </section>
-      </main> : <main className="flex-1 px-6 py-6 max-w-7xl mx-auto w-full"><AdminPanel /></main>}
+        {view === "search" ? (
+          <section className="col-span-12 md:col-span-9 space-y-4">
+            <SearchBar
+              onSearch={onSearch}
+              disabled={searching}
+              corpus={selectedCorpus}
+              corpusCount={corpora.length}
+            />
+            <TuningPanel tuning={tuning} onChange={updateTuning} />
+            {error && (
+              <div className="text-sm text-red-400 font-mono whitespace-pre-wrap border border-red-800 bg-red-950/40 rounded p-3">
+                {error}
+              </div>
+            )}
+            <ResultList hits={hits} searching={searching} tuning={tuning} />
+            <AboutFooter />
+          </section>
+        ) : (
+          <section className="col-span-12 md:col-span-9 space-y-4">
+            <TimelinePanel corpus={selectedCorpus} corpusCount={corpora.length} />
+          </section>
+        )}
+      </main>
     </div>
   );
 }
