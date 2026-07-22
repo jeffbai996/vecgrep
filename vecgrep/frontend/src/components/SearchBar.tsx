@@ -2,7 +2,7 @@ import { useState } from "react";
 import { SearchMode } from "../api";
 
 type Props = {
-  onSearch: (query: string, topK: number, mode: SearchMode, rerank: boolean) => void;
+  onSearch: (query: string, topK: number, mode: SearchMode, rerank: boolean, filters: string[]) => void;
   disabled: boolean;
   corpus: string | null;
   corpusCount: number;
@@ -34,11 +34,14 @@ export default function SearchBar({ onSearch, disabled, corpus, corpusCount }: P
   const [topK, setTopK] = useState(25);
   const [mode, setMode] = useState<SearchMode>("hybrid");
   const [rerank, setRerank] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [filtersRaw, setFiltersRaw] = useState("");
 
   const onSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!query.trim() || corpusCount === 0) return;
-    onSearch(query.trim(), topK, mode, rerank);
+    const filters = filtersOpen && filtersRaw.trim() ? filtersRaw.trim().split(/\s+/) : [];
+    onSearch(query.trim(), topK, mode, rerank, filters);
   };
 
   const placeholder =
@@ -104,7 +107,27 @@ export default function SearchBar({ onSearch, disabled, corpus, corpusCount }: P
           />
           <span className="uppercase tracking-wider">rerank</span>
         </label>
+        <button
+          type="button"
+          onClick={() => setFiltersOpen((v) => !v)}
+          className={`uppercase tracking-wider transition-colors ${
+            filtersOpen || filtersRaw.trim()
+              ? "text-zinc-200"
+              : "text-zinc-600 hover:text-zinc-300"
+          }`}
+        >
+          filters{filtersRaw.trim() && !filtersOpen ? " *" : ""}
+        </button>
       </div>
+      {filtersOpen && (
+        <input
+          type="text"
+          value={filtersRaw}
+          onChange={(e) => setFiltersRaw(e.target.value)}
+          placeholder="after:2026-07-01 before:2026-07-15 speaker:NAME source:GLOB has:code|table|link meta.KEY=VALUE"
+          className="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-1.5 font-mono text-xs text-zinc-400 placeholder:text-zinc-700 focus:outline-none focus:border-zinc-600"
+        />
+      )}
     </form>
   );
 }
