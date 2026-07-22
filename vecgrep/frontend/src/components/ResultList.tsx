@@ -249,6 +249,7 @@ export default function ResultList({ hits, searching, tuning }: Props) {
               {isOpen ? (
                 <ExpandedView
                   exp={exp!}
+                  hit={h}
                   fallback={
                     <>
                       {h.context_before && (
@@ -296,9 +297,11 @@ export default function ResultList({ hits, searching, tuning }: Props) {
 
 function ExpandedView({
   exp,
+  hit,
   fallback,
 }: {
   exp: ExpandState;
+  hit: SearchHit;
   // Fallback content (the inline preview from the search hit) is shown while
   // the wider window is in flight, so the user never sees the chunk disappear.
   fallback: React.ReactNode;
@@ -349,7 +352,85 @@ function ExpandedView({
         </mark>
         {d.after && <span className="text-zinc-500">{d.after}</span>}
       </div>
+      <RelatedChunks hit={hit} />
     </>
+  );
+}
+
+// Query-by-example: nearest neighbours of the expanded chunk, fetched on
+// demand. Mirrors `vecgrep related` — useful for "what else is like this?"
+// without composing a new query.
+function RelatedChunks({ hit }: { hit: SearchHit }) {
+  const [state, setState] = useState<
+    | { kind: "idle" }
+    | { kind: "loading" }
+    | { kind: "error"; message: string }
+    | { kind: "loaded"; hits: SearchHit[] }
+  >({ kind: "idle" });
+
+  async function load(e: React.MouseEvent) {
+    e.stopPropagation(); // the parent row toggles collapse on click
+    setState({ kind: "loading" });
+    try {
+      const r = await api.related(hit.corpus, hit.chunk_id);
+      // The chunk is its own nearest neighbour; drop it.
+      setState({
+        kind: "loaded",
+        hits: r.hits.filter((n) => n.chunk_id !== hit.chunk_id),
+      });
+    } catch (err) {
+      setState({
+        kind: "error",
+        message: err instanceof Error ? err.message : "failed to fetch",
+      });
+    }
+  }
+
+  if (state.kind === "idle") {
+    return (
+      <button
+        type="button"
+        onClick={load}
+        className="mt-2 text-[10px] font-mono uppercase tracking-wider text-zinc-600 hover:text-zinc-300 transition-colors"
+      >
+        related chunks ▸
+      </button>
+    );
+  }
+  if (state.kind === "loading") {
+    return (
+      <div className="mt-2 text-[10px] font-mono text-zinc-500 flex items-center gap-2">
+        <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-500 animate-pulse" />
+        finding neighbours…
+      </div>
+    );
+  }
+  if (state.kind === "error") {
+    return (
+      <div className="mt-2 text-[10px] font-mono text-red-400">related: {state.message}</div>
+    );
+  }
+  if (!state.hits.length) {
+    return <div className="mt-2 text-[10px] font-mono text-zinc-600">no neighbours found.</div>;
+  }
+  return (
+    <div
+      className="mt-3 border-t border-zinc-800/70 pt-2 space-y-1.5"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="text-[10px] font-mono uppercase tracking-wider text-zinc-600">
+        related chunks
+      </div>
+      {state.hits.map((n) => (
+        <div key={n.chunk_id} className="text-xs font-mono flex items-baseline gap-2 min-w-0">
+          <span className="text-zinc-500 shrink-0">{n.similarity_pct.toFixed(0)}%</span>
+          <span className="text-zinc-600 shrink-0 truncate max-w-[180px]" title={n.source_id}>
+            {shortSource(n.source_id)}
+          </span>
+          <span className="text-zinc-400 truncate">{n.chunk.slice(0, 160)}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 
