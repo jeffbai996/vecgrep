@@ -83,22 +83,6 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return res.json();
 }
 
-async function adminRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
-  let token = "";
-  try {
-    token = window.localStorage.getItem("vecgrep_admin_token") || "";
-  } catch {
-    /* loopback access does not need a token */
-  }
-  return request<T>(path, {
-    ...init,
-    headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...((init.headers as Record<string, string>) || {}),
-    },
-  });
-}
-
 export const api = {
   listCorpora: () => request<Corpus[]>("/api/corpora"),
   deleteCorpus: (name: string) =>
@@ -115,82 +99,62 @@ export const api = {
     corpus: string | null,
     top_k: number,
     mode: SearchMode = "hybrid",
-    rerank = false
+    rerank = false,
+    filters: string[] = []
   ) =>
     request<{ hits: SearchHit[]; calibration?: Calibration }>("/api/search", {
       method: "POST",
-      body: JSON.stringify({ query, corpus, top_k, mode, rerank }),
+      body: JSON.stringify({ query, corpus, top_k, mode, rerank, filters }),
     }),
-  config: () => request<Record<string, unknown>>("/api/config"),
-  adminConfig: () => adminRequest<AdminConfig>("/api/admin/config"),
-  updateAdminConfig: (values: Record<string, unknown>, confirm_qdrant?: string) =>
-    adminRequest<AdminConfigUpdate>("/api/admin/config", {
-      method: "PATCH",
-      body: JSON.stringify({ values, confirm_qdrant }),
-    }),
-  reloadAdminConfig: () =>
-    adminRequest<AdminConfig & { reloaded: boolean }>("/api/admin/config/reload", {
+  timeline: (
+    query: string,
+    corpus: string | null,
+    maxGroups = 4,
+    filters: string[] = []
+  ) =>
+    request<TimelineGroup[]>("/api/timeline", {
       method: "POST",
+      body: JSON.stringify({ query, corpus, max_groups: maxGroups, filters }),
     }),
-  listBackups: () => adminRequest<Backup[]>("/api/admin/backups"),
-  createBackup: () => adminRequest<Backup>("/api/admin/backups", { method: "POST" }),
-  verifyBackup: (id: string) =>
-    adminRequest<Backup>(`/api/admin/backups/${encodeURIComponent(id)}/verify`, { method: "POST" }),
-  downloadBackup: async (id: string) => {
-    let token = "";
-    try { token = window.localStorage.getItem("vecgrep_admin_token") || ""; } catch { /* loopback */ }
-    const response = await fetch(`/api/admin/backups/${encodeURIComponent(id)}/download`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    if (!response.ok) throw new Error(`Download failed: HTTP ${response.status}`);
-    return response.blob();
-  },
-  restoreBackup: (id: string, confirm: string) =>
-    adminRequest<{ restored: string; safety_backup: string }>(`/api/admin/backups/${encodeURIComponent(id)}/restore`, {
-      method: "POST", body: JSON.stringify({ confirm }),
-    }),
-  backupSchedule: () => adminRequest<BackupSchedule>("/api/admin/backup-schedule"),
-  updateBackupSchedule: (values: Partial<BackupSchedule>) =>
-    adminRequest<BackupSchedule>("/api/admin/backup-schedule", {
-      method: "PATCH", body: JSON.stringify({ values }),
-    }),
+  related: (corpus: string, chunkId: string, topK = 8) =>
+    request<{ hits: SearchHit[] }>(
+      `/api/related/${encodeURIComponent(corpus)}/${encodeURIComponent(chunkId)}?top_k=${topK}`
+    ),
+  stats: (corpus: string) =>
+    request<CorpusStats>(`/api/stats/${encodeURIComponent(corpus)}`),
+  config: () => request<Record<string, unknown>>("/api/config"),
   getChunk: (corpus: string, chunkId: string, window: number | "full" = 2000) =>
     request<ChunkWindow>(
       `/api/chunk/${encodeURIComponent(corpus)}/${encodeURIComponent(chunkId)}?window=${window}`
     ),
 };
 
-export type AdminConfig = {
-  values: Record<string, string | number | boolean | null>;
-  home: string;
-  provenance: Record<string, "default" | "file" | "env">;
-  read_only: string[];
-  secrets: Record<string, boolean>;
+export type TimelineEvent = {
+  speaker: string;
+  time: string;
+  text: string;
 };
 
-export type AdminConfigUpdate = AdminConfig & {
-  restart_required: boolean;
-  warnings: string[];
+export type TimelineGroup = {
+  corpus: string;
+  source_id: string;
+  doc_timestamp: number | null;
+  slice_start: number;
+  slice_end: number;
+  events: TimelineEvent[];
+  // Set only when the source is not a transcript (no parseable events).
+  slice_text: string;
 };
 
-export type Backup = {
-  backup_id: string;
-  created_at: string;
-  origin: "manual" | "scheduled" | "pre-restore";
-  storage_mode: "embedded" | "server";
-  path: string;
-  size: number;
-  corpora: Array<{ name: string; chunk_count: number }>;
-  invalid?: boolean;
-};
-
-export type BackupSchedule = {
-  backup_enabled: boolean;
-  backup_frequency: "daily" | "weekly";
-  backup_time: string;
-  backup_weekday: number;
-  backup_destination: string | null;
-  backup_retention: number;
+export type CorpusStats = {
+  corpus: string;
+  chunks: number;
+  docs: number;
+  date_span: { first: string | null; last: string | null };
+  days_covered: number;
+  gap_days: number;
+  sources: Record<string, number>;
+  sources_truncated: boolean;
 };
 
 export type ChunkWindow = {
