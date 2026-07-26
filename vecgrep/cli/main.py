@@ -15,6 +15,7 @@ Examples:
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import sys
 import time
@@ -991,14 +992,50 @@ def watch(path: str, corpus: str, chunker: str, debounce: float, include: str | 
                     continue
                 try:
                     if change_kind.name == "deleted":
+                        _WATCH_SEEN_HASHES.pop(p, None)
                         _do_delete_source(p, corpus)
                     else:
+                        # Skip BEFORE dispatching: an event on a byte-identical
+                        # file must not cost an index round-trip (see
+                        # _watch_should_index — this is the runaway-loop fix).
+                        if not _watch_should_index(p):
+                            continue
                         _do_index(p, corpus, chunker, force=False, include=include)
                 except click.ClickException as e:
                     # Don't kill the watcher on a transient error — log and keep going.
                     click.echo(f"  error: {e.message}", err=True)
     except KeyboardInterrupt:
         click.echo("\nstopped.")
+
+
+# Content hashes of files this watcher has already dispatched, so a
+# filesystem event on a byte-identical file costs a local re-hash instead of a
+# full index round-trip. Keyed by absolute path.
+_WATCH_SEEN_HASHES: dict[str, str] = {}
+
+
+def _watch_should_index(path: str) -> bool:
+    """True when `path`'s CONTENT differs from what we last dispatched.
+
+    Incident 2026-07-26: the watcher fired on filesystem events and dispatched
+    an index call per event. The "nothing changed" decision lived on the far
+    side of that call, so a recorder rewriting files with identical content
+    produced a full round-trip every time — a re-index loop that ran 501 times
+    in 6 hours, peaked at 1.4GB and pushed 2GB into swap, thrashing the box.
+
+    Hashing here makes an unchanged file cost only a local read. Unreadable or
+    vanished files return True so a real change is never silently dropped —
+    the downstream index path already handles the error.
+    """
+    try:
+        with open(path, "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return True
+    if _WATCH_SEEN_HASHES.get(path) == digest:
+        return False
+    _WATCH_SEEN_HASHES[path] = digest
+    return True
 
 
 def _do_delete_source(source: str, corpus: str) -> None:
