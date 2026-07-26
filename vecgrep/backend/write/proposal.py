@@ -18,7 +18,12 @@ from pathlib import Path
 
 # Schema field vocabularies (see spec). Validated at propose time so a bad
 # value is caught before it ever reaches a write.
-ORIGINS = ("human", "bot-suggested")
+# 'agent-direct' = committed by an agent with no human confirm, via the
+# operator-enabled single-corpus direct-write path. Distinct from 'bot-suggested'
+# (proposed, then a human approved it) so an audit can always separate reviewed
+# writes from unreviewed ones. It is NEVER accepted by propose()/confirm() — the
+# human wall there still requires human/bot-suggested.
+ORIGINS = ("human", "bot-suggested", "agent-direct")
 TIERS = ("normal", "protected")
 SOURCE_KINDS = ("insight", "fact", "correction", "journal", "decision",
                 "memory", "todo")
@@ -74,9 +79,11 @@ def next_doc_id(corpus_dir: Path, corpus: str) -> str:
 
 def render_doc(doc_id: str, content: str, meta: dict) -> str:
     """Render a doc as YAML-frontmatter + body, deterministic key order."""
+    # WHITELIST, not a passthrough: a key absent here is silently dropped from
+    # the rendered doc. Add new frontmatter keys to this list or they vanish.
     order = [
         "id", "title", "status", "created_at", "origin", "confirmed_by",
-        "confirmed_at", "tier", "corpus", "source_kind", "tags",
+        "confirmed_at", "edited_at", "tier", "corpus", "source_kind", "tags",
     ]
     fm = {**meta, "id": doc_id}
     lines = ["---"]
