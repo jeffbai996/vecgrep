@@ -35,6 +35,9 @@ def test_build_mcp_server_registers_tools() -> None:
         "related", "compare", "stats", "summarize_corpus",
         # write path — parity with the HTTP transport as of v1.1
         "propose_write", "propose_edit", "propose_delete",
+        # direct (unconfirmed) write path — single operator-designated corpus,
+        # inert unless VECGREP_DIRECT_WRITE_CORPUS is set
+        "write", "edit",
     }
 
 

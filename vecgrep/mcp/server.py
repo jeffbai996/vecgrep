@@ -556,6 +556,256 @@ def _run_propose_delete(corpus: str, delete_id: str,
     return json.dumps(result)
 
 
+# ── Direct write: the ONE unconfirmed write surface ──────────────────────────
+# Everything above is propose-only for a reason (an agent ingesting untrusted
+# content must not be able to write). This is the operator's deliberate exception
+# for the opposite case: the operator themselves saying "save this", where a
+# confirm tap per note is pure friction. It is narrow by construction --
+# single corpus, append-only, capped -- so the worst case is junk docs in one
+# searchable corpus, never a mutation of anything else.
+# Read at CALL time, not import time: the MCP server is long-lived, so an
+# operator changing a cap should take effect on service restart without a code
+# change -- and import-time capture would also make these untestable.
+def _direct_write_max_bytes() -> int:
+    return int(_os.environ.get("VECGREP_DIRECT_WRITE_MAX_BYTES", str(256_000)))
+
+
+def _direct_write_max_per_hour() -> int:
+    return int(_os.environ.get("VECGREP_DIRECT_WRITE_MAX_PER_HOUR", str(60)))
+
+
+def _direct_write_corpus() -> str | None:
+    """The single corpus direct writes land in, or None (feature off).
+
+    DEFAULT-OFF: vecgrep is public OSS, so a fresh clone must expose no
+    unconfirmed write path at all. The operator opts in per-deployment."""
+    return _os.environ.get("VECGREP_DIRECT_WRITE_CORPUS", "").strip() or None
+
+
+def _direct_write_rate_ok(corpus_dir) -> bool:
+    """True if fewer than the hourly cap of direct writes exist in the last hour.
+
+    Counts mtimes in the corpus dir rather than keeping a counter file -- the docs
+    ARE the ledger, so the cap survives a restart and can't drift out of sync.
+    Runaway-loop protection only; a human note-taker never approaches it."""
+    import time as _t
+    if not corpus_dir.exists():
+        return True
+    cutoff = _t.time() - 3600
+    recent = sum(1 for p in corpus_dir.glob("*.md")
+                 if p.stat().st_mtime >= cutoff)
+    return recent < _direct_write_max_per_hour()
+
+
+def _run_direct_write(content: str, source_kind: str | None = None,
+                      tags: list[str] | None = None,
+                      title: str | None = None) -> str:
+    """WRITE an entry immediately, no human confirm, into the ONE corpus the
+    operator designated via VECGREP_DIRECT_WRITE_CORPUS.
+
+    NOTE THE SIGNATURE: there is deliberately no `corpus` parameter, and no
+    edit/delete/patch target. A blocked parameter can be argued around by a
+    determined caller; an absent one cannot be expressed at all. So this tool
+    can only ever append to one corpus, and can never modify or remove anything.
+
+    Everything else stays propose-only (see _run_propose): for any other corpus,
+    an agent proposes and a human confirms. This path exists because the operator
+    is the one asking -- 'save this note' -- not because writes became safe.
+
+    Stamped `origin: agent-direct` so an audit can always tell an unreviewed
+    write from a human-confirmed one."""
+    from ..backend.write import proposal as _P
+
+    corpus = _direct_write_corpus()
+    if not corpus:
+        return json.dumps({"error": (
+            "direct write is not enabled. An operator enables it for exactly one "
+            "corpus with VECGREP_DIRECT_WRITE_CORPUS=<corpus>. Use propose_write "
+            "instead — it works for any agent-writable corpus and lands after a "
+            "human confirm.")})
+
+    # A write-through routes a CONFIRMED op into an upstream store of record.
+    # Pairing that with an unconfirmed write would let an agent mutate that
+    # upstream with no human in the loop -- exactly the wall this whole module
+    # exists to hold. Refuse before touching anything.
+    from ..backend.write.confirm import _writethrough_cmd
+    if _writethrough_cmd(corpus) is not None:
+        return json.dumps({"error": (
+            f"corpus {corpus!r} has a write-through configured, so an "
+            f"unconfirmed write would mutate an upstream store with no human "
+            f"review. Direct write refuses such a corpus. Point "
+            f"VECGREP_DIRECT_WRITE_CORPUS at a plain local corpus, or use "
+            f"propose_write for this one.")})
+
+    if not content or not content.strip():
+        return json.dumps({"error": "direct write needs non-empty content."})
+
+    n_bytes = len(content.encode("utf-8"))
+    if n_bytes > _direct_write_max_bytes():
+        return json.dumps({"error": (
+            f"content is {n_bytes} bytes, over the {_direct_write_max_bytes()}-byte "
+            f"direct-write cap. Split it, or use propose_write for a large entry.")})
+
+    corpus_dir = _write_dir(corpus)
+    if not _direct_write_rate_ok(corpus_dir):
+        return json.dumps({"error": (
+            f"rate cap reached ({_direct_write_max_per_hour()} direct writes/hour "
+            f"for {corpus!r}). This is runaway-loop protection; wait, or raise "
+            f"VECGREP_DIRECT_WRITE_MAX_PER_HOUR.")})
+
+    from datetime import datetime as _datetime, timezone as _timezone
+
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    doc_id = _P.next_doc_id(corpus_dir, corpus)
+    meta = {
+        "origin": "agent-direct",
+        "status": "active",
+        "tier": "normal",
+        "corpus": corpus,
+        "created_at": _datetime.now(_timezone.utc).isoformat(timespec="seconds"),
+    }
+    if title:
+        meta["title"] = title
+    if source_kind:
+        meta["source_kind"] = source_kind
+    if tags:
+        meta["tags"] = list(tags)
+    try:
+        _P._validate_meta(meta)
+    except _P.ProposalError as e:
+        return json.dumps({"error": str(e)})
+
+    rendered = _P.render_doc(doc_id, content, meta)
+    target = corpus_dir / f"{doc_id}.md"
+    target.write_text(rendered)
+
+    # Embed immediately so the entry is searchable now -- the whole point is
+    # "save this and be able to find it". Same incremental single-file index the
+    # confirm path uses. A failure here leaves a findable doc on disk (truth), so
+    # it is reported rather than fatal; a later reindex reconciles.
+    index_note = ""
+    try:
+        _svc().index(str(target), corpus)
+    except Exception as e:  # noqa: BLE001 - never lose the write over an embed
+        index_note = (f" (not yet searchable: {e}; "
+                      f"`vecgrep index` will reconcile)")
+
+    return json.dumps({
+        "committed": True, "doc_id": doc_id, "corpus": corpus,
+        "path": str(target),
+        "status": f"written and indexed{index_note}",
+    })
+
+
+def _run_direct_edit(doc_id: str, content: str | None = None,
+                     old_str: str | None = None,
+                     new_str: str | None = None) -> str:
+    """EDIT an existing entry immediately, no human confirm, in the ONE corpus the
+    operator designated. Counterpart to propose_edit.
+
+    Two modes, same as propose_edit: `content` replaces the whole body, or
+    old_str + new_str patches one unique span.
+
+    An edit is more dangerous than an append -- an append is noise, an overwrite
+    DESTROYS. So this path keeps two guards the write path doesn't need:
+      1. a `.bak` of the previous file before every edit, so an unreviewed
+         overwrite is always recoverable
+      2. `tier: protected` docs are refused outright (human-only, even here)
+
+    Deletes are deliberately absent: propose_delete stays the only route, for
+    every corpus. Losing an entry should always cross a human."""
+    from ..backend.write import proposal as _P
+
+    corpus = _direct_write_corpus()
+    if not corpus:
+        return json.dumps({"error": (
+            "direct edit is not enabled. An operator enables it for exactly one "
+            "corpus with VECGREP_DIRECT_WRITE_CORPUS=<corpus>. Use propose_edit "
+            "instead — it works for any agent-writable corpus and lands after a "
+            "human confirm.")})
+
+    from ..backend.write.confirm import _writethrough_cmd
+    if _writethrough_cmd(corpus) is not None:
+        return json.dumps({"error": (
+            f"corpus {corpus!r} has a write-through configured, so an "
+            f"unconfirmed edit would mutate an upstream store with no human "
+            f"review. Direct edit refuses such a corpus; use propose_edit.")})
+
+    is_patch = old_str is not None or new_str is not None
+    if is_patch and content is not None:
+        return json.dumps({"error": (
+            "pass EITHER content (full overwrite) OR old_str+new_str "
+            "(surgical patch), not both.")})
+    if is_patch and (old_str is None or new_str is None):
+        return json.dumps({"error": "patch mode needs both old_str and new_str."})
+    if not is_patch and content is None:
+        return json.dumps({"error": (
+            "direct edit needs content (or old_str/new_str for a patch).")})
+
+    # Resolve the target INSIDE this corpus only. _write_dir(corpus) is the sole
+    # directory consulted, so a doc_id belonging to another corpus simply doesn't
+    # exist here -- the corpus boundary is structural, not a check to forget.
+    target = _write_dir(corpus) / f"{doc_id}.md"
+    if not target.exists():
+        return json.dumps({"error": (
+            f"doc {doc_id!r} not found in corpus {corpus!r} — direct edit only "
+            f"touches its own corpus. (Nothing was changed.)")})
+
+    on_disk = target.read_text()
+    if "tier: protected" in on_disk:
+        return json.dumps({"error": (
+            f"{doc_id} is tier: protected — human-only. Use propose_edit so a "
+            f"human confirms it with the exact-id ack.")})
+
+    body = _doc_body(corpus, doc_id)
+    if body is None:
+        return json.dumps({"error": f"could not read the body of {doc_id!r}."})
+
+    if is_patch:
+        try:
+            new_body = _apply_patch(body, old_str, new_str)
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+    else:
+        new_body = content
+
+    n_bytes = len(new_body.encode("utf-8"))
+    if n_bytes > _direct_write_max_bytes():
+        return json.dumps({"error": (
+            f"result is {n_bytes} bytes, over the {_direct_write_max_bytes()}-byte "
+            f"direct-write cap.")})
+
+    # Back up BEFORE mutating: this write had no human review, so the previous
+    # body must stay recoverable. Timestamped so repeated edits don't clobber
+    # each other's history.
+    import time as _t
+    bak = target.with_suffix(f".md.bak-{int(_t.time())}")
+    bak.write_text(on_disk)
+
+    # Preserve the existing frontmatter, swap only the body, and record that an
+    # unreviewed edit touched it (and when) for audit.
+    from ..backend.ingestion.adapters.markdown import parse_frontmatter
+    meta = dict(parse_frontmatter(on_disk) or {})
+    meta.update({"corpus": corpus, "origin": "agent-direct"})
+    from datetime import datetime as _datetime, timezone as _timezone
+    meta["edited_at"] = _datetime.now(_timezone.utc).isoformat(timespec="seconds")
+    rendered = _P.render_doc(doc_id, new_body, meta)
+    target.write_text(rendered)
+
+    index_note = ""
+    try:
+        _svc().index(str(target), corpus)
+    except Exception as e:  # noqa: BLE001 - the file on disk is the truth
+        index_note = (f" (index stale: {e}; `vecgrep index` will reconcile)")
+
+    return json.dumps({
+        "committed": True, "doc_id": doc_id, "corpus": corpus,
+        "path": str(target), "backup": str(bak),
+        "mode": "patch" if is_patch else "overwrite",
+        "status": f"edited and re-indexed{index_note}",
+    })
+
+
 def _fire_propose_hook(pr) -> None:
     """Optionally notify an external command that a proposal was created.
 
@@ -867,6 +1117,48 @@ def build_mcp_server() -> Any:
                 },
             ),
             Tool(
+                name="write",
+                description=(
+                    "WRITE a new entry immediately — no human confirm. Only "
+                    "available for the single corpus the operator opened up "
+                    "(VECGREP_DIRECT_WRITE_CORPUS); there is no corpus "
+                    "parameter, and it cannot edit or delete anything. Use this "
+                    "when the USER asks you to save something. For any other "
+                    "corpus use propose_write."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string"},
+                        "title": {"type": "string"},
+                        "source_kind": {"type": "string"},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["content"],
+                },
+            ),
+            Tool(
+                name="edit",
+                description=(
+                    "EDIT an existing entry immediately — no human confirm. Same "
+                    "single operator-designated corpus as `write`; no corpus "
+                    "parameter. Two modes: `content` replaces the whole body, or "
+                    "`old_str`+`new_str` patches one unique span. The previous "
+                    "body is backed up automatically. Protected entries are "
+                    "refused. Cannot delete — use propose_delete."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "doc_id": {"type": "string"},
+                        "content": {"type": "string"},
+                        "old_str": {"type": "string"},
+                        "new_str": {"type": "string"},
+                    },
+                    "required": ["doc_id"],
+                },
+            ),
+            Tool(
                 name="propose_write",
                 description=(
                     "PROPOSE a new entry for a corpus. Writes NOTHING — "
@@ -973,6 +1265,17 @@ def build_mcp_server() -> Any:
                 text = _run_summarize(args)
             elif name == "list_aliases":
                 text = _run_list_aliases()
+            elif name == "write":
+                text = _run_direct_write(
+                    args.get("content", ""),
+                    source_kind=args.get("source_kind"),
+                    tags=args.get("tags"), title=args.get("title"),
+                )
+            elif name == "edit":
+                text = _run_direct_edit(
+                    args.get("doc_id", ""), content=args.get("content"),
+                    old_str=args.get("old_str"), new_str=args.get("new_str"),
+                )
             elif name == "propose_write":
                 text = _run_propose(
                     args.get("corpus") or DEFAULT_PROPOSE_CORPUS,
@@ -1352,6 +1655,42 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
 
     @fmcp.tool(
         description=(
+            "WRITE a new entry immediately — no human confirm needed. Lands in "
+            "the single corpus the operator opened up for direct writes; there "
+            "is no corpus parameter, and this tool cannot edit or delete "
+            "anything. USE THIS when the user says 'save this' / 'remember "
+            "this' / 'note this down'. For any other corpus, use propose_write."
+        )
+    )
+    def write(content: str, title: str | None = None,
+              source_kind: str | None = None,
+              tags: list[str] | None = None) -> str:
+        """content: entry text. title: optional heading. source_kind:
+        insight|fact|correction|journal|decision|memory|todo. tags: optional.
+        Commits immediately and returns the doc_id."""
+        return _run_direct_write(content, source_kind=source_kind,
+                                 tags=tags, title=title)
+
+    @fmcp.tool(
+        description=(
+            "EDIT an existing entry immediately — no human confirm needed. Same "
+            "single direct-write corpus as `write`; no corpus parameter. Two "
+            "modes: pass `content` to replace the whole body, OR "
+            "`old_str`+`new_str` to patch one unique span without re-sending the "
+            "doc. The previous body is backed up automatically, so an edit is "
+            "always recoverable. Protected entries are refused; cannot delete "
+            "(use propose_delete). For any other corpus, use propose_edit."
+        )
+    )
+    def edit(doc_id: str, content: str | None = None,
+             old_str: str | None = None, new_str: str | None = None) -> str:
+        """doc_id: the entry's id (e.g. external-123). Either content (full
+        overwrite) or old_str+new_str (surgical patch), not both."""
+        return _run_direct_edit(doc_id, content=content,
+                                old_str=old_str, new_str=new_str)
+
+    @fmcp.tool(
+        description=(
             "PROPOSE a new entry for a corpus. Writes NOTHING — creates a pending "
             "proposal a human reviews + confirms before it's saved. Use for "
             "durable notes/facts/decisions worth recalling later. Returns the "
@@ -1361,10 +1700,11 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
     def propose_write(content: str, corpus: str | None = None,
                       source_kind: str | None = None,
                       tags: list[str] | None = None) -> str:
-        """content: entry text. corpus: target (default the agent's own
-        'claude-ai' corpus). source_kind: insight|fact|correction|journal|
-        decision|memory|todo. tags: optional. Returns the pending proposal
-        (nothing is written until a human confirms)."""
+        """content: entry text. corpus: target (defaults to the agent's own
+        propose corpus, VECGREP_DEFAULT_PROPOSE_CORPUS). source_kind:
+        insight|fact|correction|journal|decision|memory|todo. tags: optional.
+        Returns the pending proposal (nothing is written until a human
+        confirms)."""
         return _run_propose(corpus or DEFAULT_PROPOSE_CORPUS, content, None,
                             source_kind, tags)
 
