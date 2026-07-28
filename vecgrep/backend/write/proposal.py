@@ -28,7 +28,11 @@ TIERS = ("normal", "protected")
 SOURCE_KINDS = ("insight", "fact", "correction", "journal", "decision",
                 "memory", "todo")
 
-_ID_RE = re.compile(r"^[a-z][a-z0-9_]*-(\d+)$")
+# Suffix is digits (native corpora: epoch-nanos ids) or a short alnum hash
+# (mirror corpora whose upstream store uses hash ids). Either way a single
+# path-safe token — no dots or separators — so the corpus-boundary guard
+# (no traversal via edit_id/delete_id) holds unchanged.
+_ID_RE = re.compile(r"^[a-z][a-z0-9_]*-([a-z0-9]+)$")
 
 
 class ProposalError(ValueError):

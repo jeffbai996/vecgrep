@@ -203,6 +203,9 @@ def _run_browse(args: dict) -> str:
             channel=args.get("channel"),
             date=args.get("date"),
             source_path=args.get("source_path"),
+            since=args.get("since"),
+            until=args.get("until"),
+            tail=args.get("tail"),
         )
     except ValueError as e:
         return json.dumps({"error": str(e)})
@@ -464,6 +467,7 @@ def _run_propose(corpus: str, content: str | None, edit_id: str | None = None,
     # Patch mode: old_str/new_str (edit only, mutually exclusive with content).
     # Resolve `content` to the patched body here, then fall through to the exact
     # same proposal path a full edit takes — no forked approval logic.
+    meta_only = False
     is_patch = old_str is not None or new_str is not None
     if is_patch:
         if content is not None:
@@ -486,8 +490,23 @@ def _run_propose(corpus: str, content: str | None, edit_id: str | None = None,
         except ValueError as e:
             return json.dumps({"error": str(e)})
     elif content is None:
-        return json.dumps({"error": "propose needs content (or old_str/new_str "
-                                    "for a patch)."})
+        # META-ONLY mode: no content, no patch — but tags/source_kind present.
+        # The doc's current body is reused untouched; only frontmatter changes.
+        if not (tags or source_kind):
+            return json.dumps({"error": "propose needs content (or old_str/"
+                                        "new_str for a patch, or tags/"
+                                        "source_kind for a meta-only edit)."})
+        if not edit_id:
+            return json.dumps({"error": "a meta-only edit (tags/source_kind "
+                                        "without content) requires an edit "
+                                        "target (doc_id)."})
+        body = _doc_body(corpus, edit_id)
+        if body is None:
+            return json.dumps({"error": (
+                f"doc {edit_id!r} not found in corpus {corpus!r} — can't retag "
+                f"a doc that doesn't exist.")})
+        content = body
+        meta_only = True
 
     n_bytes = len(content.encode("utf-8"))
     if n_bytes > MAX_PROPOSAL_CONTENT_BYTES:
@@ -505,6 +524,10 @@ def _run_propose(corpus: str, content: str | None, edit_id: str | None = None,
         meta["source_kind"] = source_kind
     if tags:
         meta["tags"] = list(tags)
+    if meta_only:
+        # Internal routing marker: render_doc's whitelist keeps it out of the
+        # written file; the writethrough payload's meta carries it upstream.
+        meta["meta_only"] = True
     try:
         pr = _P.propose(corpus, content, corpus_dir, meta=meta, edit_id=edit_id)
     except _P.ProposalError as e:
@@ -1004,9 +1027,11 @@ def build_mcp_server() -> Any:
                 name="browse",
                 description=(
                     "Location-first reading, no query: the full event "
-                    "sequence for a channel and/or day and/or path glob. "
-                    "Use when you know WHERE/WHEN rather than what words "
-                    "to search for. Requires at least one selector."
+                    "sequence for a channel and/or day / date-range / path "
+                    "glob. Use when you know WHERE/WHEN rather than what "
+                    "words to search for. tail=N returns only the newest N "
+                    "events of the selection (the 'last N messages' view). "
+                    "Requires at least one selector."
                 ),
                 inputSchema={
                     "type": "object",
@@ -1014,6 +1039,9 @@ def build_mcp_server() -> Any:
                         "corpus": {"type": "string"},
                         "channel": {"type": "string"},
                         "date": {"type": "string", "description": "YYYY-MM-DD (UTC day)"},
+                        "since": {"type": "string", "description": "YYYY-MM-DD — first day included"},
+                        "until": {"type": "string", "description": "YYYY-MM-DD — last day included"},
+                        "tail": {"type": "integer", "description": "keep only the newest N events"},
                         "source_path": {"type": "string", "description": "fnmatch glob on source_id"},
                     },
                     "required": ["corpus"],
@@ -1543,13 +1571,21 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
         channel: str | None = None,
         date: str | None = None,
         source_path: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        tail: int | None = None,
     ) -> str:
-        """Requires at least one selector (channel/date/source_path)."""
+        """At least one selector (channel/date/since/until/source_path).
+        since/until: inclusive YYYY-MM-DD day range. tail: keep only the
+        newest N events of the selection — the 'last N messages' view."""
         return _run_browse({
             "corpus": corpus,
             "channel": channel,
             "date": date,
             "source_path": source_path,
+            "since": since,
+            "until": until,
+            "tail": tail,
         })
 
     @fmcp.tool(
@@ -1719,7 +1755,9 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
             "The patch fails if old_str is missing or appears more than once "
             "(add surrounding context to make it unique). Patch touches the "
             "body only; frontmatter is preserved. content and old_str are "
-            "mutually exclusive."
+            "mutually exclusive. THIRD mode: pass ONLY tags (and/or "
+            "source_kind) with no content for a META-ONLY retag — the body "
+            "stays untouched, only the metadata changes."
         )
     )
     def propose_edit(doc_id: str, content: str | None = None,
