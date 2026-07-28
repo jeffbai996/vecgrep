@@ -1006,16 +1006,21 @@ def watch(path: str, corpus: str, chunker: str, debounce: float,
     try:
         for changes in _watch(str(target), step=int(debounce * 1000),
                               rust_timeout=sweep_ms, yield_on_timeout=True):
-            if changes:
-                kinds = {kind.name for kind, _ in changes}
-                paths = sorted({p for _, p in changes})
+            # Respect the include glob on per-file events too, so a sibling
+            # raw file changing doesn't get indexed into a markdown-only
+            # corpus. Filter BEFORE logging: a recorder's bookkeeping file
+            # (.state.json) fires events every few seconds, and logging
+            # "processing" for batches that are entirely glob-skipped made a
+            # healthy watcher look like a runaway loop (incident 2026-07-27 —
+            # the noise sent the diagnosis to the wrong file for a while).
+            relevant = [(k, p) for k, p in changes
+                        if not include or fnmatch.fnmatch(Path(p).name, include)]
+            if relevant:
+                kinds = {kind.name for kind, _ in relevant}
+                paths = sorted({p for _, p in relevant})
                 click.echo(
                     f"  ! {len(paths)} change(s) [{','.join(sorted(kinds))}] — processing")
-            for change_kind, p in changes:
-                # Respect the include glob on per-file events too, so a sibling
-                # raw file changing doesn't get indexed into a markdown-only corpus.
-                if include and not fnmatch.fnmatch(Path(p).name, include):
-                    continue
+            for change_kind, p in relevant:
                 try:
                     if change_kind.name == "deleted":
                         _WATCH_SEEN_HASHES.pop(p, None)
