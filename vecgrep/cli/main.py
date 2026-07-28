@@ -988,16 +988,23 @@ def watch(path: str, corpus: str, chunker: str, debounce: float,
 
     filt = f" (include: {include})" if include else ""
     click.echo(f"watching {target} -> corpus '{corpus}'{filt} (Ctrl+C to stop)")
-    # Initial pass picks up everything currently on disk.
-    _do_index(str(target), corpus, chunker, force=False, include=include)
+    # Initial pass picks up everything currently on disk. It must not be
+    # fatal: an embed backend timing out under load killed the process here,
+    # systemd restarted it, and the pass began again from zero under the
+    # same load — a restart treadmill (NRestarts=90 on one unit,
+    # 2026-07-27). Files the pass missed are healed by later events and the
+    # pending sweep; a dead watcher heals nothing.
+    try:
+        _do_index(str(target), corpus, chunker, force=False, include=include)
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:
+        click.echo(
+            f"  error: initial pass incomplete ({type(e).__name__}: {e}) — "
+            "watching anyway", err=True)
 
     def _index_one(p: str) -> None:
-        # Skip BEFORE dispatching: an event on a byte-identical file must
-        # not cost an index round-trip (see _watch_should_index — the
-        # identical-rewrite runaway-loop fix, incident 2026-07-26).
-        if not _watch_should_index(p):
-            return
-        _do_index(p, corpus, chunker, force=False, include=include)
+        _watch_index_resilient(p, corpus, chunker, include)
 
     # No filesystem event fires after a session stops writing, so the sweep
     # cannot ride on events alone — wake up at least this often to check
@@ -1021,31 +1028,31 @@ def watch(path: str, corpus: str, chunker: str, debounce: float,
                 click.echo(
                     f"  ! {len(paths)} change(s) [{','.join(sorted(kinds))}] — processing")
             for change_kind, p in relevant:
-                try:
-                    if change_kind.name == "deleted":
-                        _WATCH_SEEN_HASHES.pop(p, None)
-                        _WATCH_PENDING.discard(p)
+                if change_kind.name == "deleted":
+                    _WATCH_SEEN_HASHES.pop(p, None)
+                    _WATCH_PENDING.discard(p)
+                    try:
                         _do_delete_source(p, corpus)
-                    elif not _watch_is_quiet(p, quiet_period):
-                        # A live session is still writing this file. Indexing
-                        # now would re-embed the whole document per append,
-                        # forever (incident 2026-07-27: 93% swap, 23% IO
-                        # stall). Park it; the sweep below indexes the final
-                        # state once the writer goes quiet.
-                        if p not in _WATCH_PENDING:
-                            click.echo(f"  ~ deferred (live): {p}")
-                        _WATCH_PENDING.add(p)
-                    else:
-                        _index_one(p)
-                except click.ClickException as e:
-                    # Don't kill the watcher on a transient error — log and keep going.
-                    click.echo(f"  error: {e.message}", err=True)
+                    except KeyboardInterrupt:
+                        raise
+                    except click.ClickException as e:
+                        click.echo(f"  error: {e.message}", err=True)
+                    except Exception as e:
+                        click.echo(f"  error: {type(e).__name__}: {e}", err=True)
+                elif not _watch_is_quiet(p, quiet_period):
+                    # A live session is still writing this file. Indexing
+                    # now would re-embed the whole document per append,
+                    # forever (incident 2026-07-27: 93% swap, 23% IO
+                    # stall). Park it; the sweep below indexes the final
+                    # state once the writer goes quiet.
+                    if p not in _WATCH_PENDING:
+                        click.echo(f"  ~ deferred (live): {p}")
+                    _WATCH_PENDING.add(p)
+                else:
+                    _index_one(p)
             for p in _watch_due_pending(quiet_period):
                 click.echo(f"  ~ quiet now, indexing: {p}")
-                try:
-                    _index_one(p)
-                except click.ClickException as e:
-                    click.echo(f"  error: {e.message}", err=True)
+                _index_one(p)
     except KeyboardInterrupt:
         click.echo("\nstopped.")
 
@@ -1082,6 +1089,35 @@ def _watch_is_quiet(path: str, quiet_period: float, now: float | None = None) ->
     except OSError:
         return True
     return (now if now is not None else time.time()) - mtime >= quiet_period
+
+
+def _watch_index_resilient(p: str, corpus: str, chunker: str,
+                           include: str | None) -> bool:
+    """Index one file; never raise (except KeyboardInterrupt).
+
+    An embed backend under load raising through the watch loop killed the
+    whole watcher, and systemd's restart re-ran the expensive initial pass
+    under the same load (2026-07-27). Failures are logged and reported —
+    and the seen-hash entry is dropped, because _watch_should_index records
+    it BEFORE dispatch: a failed file's next byte-identical event must index,
+    not skip.
+    """
+    try:
+        # Skip BEFORE dispatching: an event on a byte-identical file must
+        # not cost an index round-trip (see _watch_should_index — the
+        # identical-rewrite runaway-loop fix, incident 2026-07-26).
+        if not _watch_should_index(p):
+            return True
+        _do_index(p, corpus, chunker, force=False, include=include)
+        return True
+    except KeyboardInterrupt:
+        raise
+    except click.ClickException as e:
+        click.echo(f"  error: {e.message}", err=True)
+    except Exception as e:
+        click.echo(f"  error: {type(e).__name__}: {e}", err=True)
+    _WATCH_SEEN_HASHES.pop(p, None)
+    return False
 
 
 def _watch_due_pending(quiet_period: float, now: float | None = None) -> list[str]:
