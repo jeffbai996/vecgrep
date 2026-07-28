@@ -616,6 +616,9 @@ class VecgrepService:
         channel: str | None = None,
         date: str | None = None,
         source_path: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        tail: int | None = None,
     ) -> list[dict]:
         """Location-first reading: no query, no ranking — the full event
         sequence of the sources matching channel / date / path glob.
@@ -626,14 +629,21 @@ class VecgrepService:
         Groups come back oldest → newest, events chronological (document
         order). Non-transcript sources return raw text, no events.
         """
-        if not (channel or date or source_path):
+        if not (channel or date or source_path or since or until):
             raise ValueError(
-                "browse needs at least one selector: channel, date, or source_path"
+                "browse needs at least one selector: channel, date, "
+                "since/until, or source_path"
             )
         corpus = self.registry.get(corpus_name)
         day_start = _parse_filter_time(date) if date else None
         if date and day_start is None:
             raise ValueError(f"unparseable date: {date!r} (want YYYY-MM-DD)")
+        since_ts = _parse_filter_time(since) if since else None
+        if since and since_ts is None:
+            raise ValueError(f"unparseable since: {since!r} (want YYYY-MM-DD)")
+        until_ts = _parse_filter_time(until) if until else None
+        if until and until_ts is None:
+            raise ValueError(f"unparseable until: {until!r} (want YYYY-MM-DD)")
 
         idx = self.bm25._load(corpus.name)
         groups: list[dict] = []
@@ -656,6 +666,13 @@ class VecgrepService:
                 source_id, source_path
             ):
                 continue
+            # since/until: inclusive day range (until covers its whole day).
+            if since_ts is not None and (ts is None or float(ts) < since_ts):
+                continue
+            if until_ts is not None and (
+                ts is None or float(ts) >= until_ts + _SECONDS_IN_DAY
+            ):
+                continue
             source_text = payload.get("source_text", "") or ""
             events = parse_events(source_text)
             groups.append(
@@ -673,6 +690,27 @@ class VecgrepService:
         groups.sort(
             key=lambda g: (g["doc_timestamp"] is None, g["doc_timestamp"] or 0.0)
         )
+        # tail=N: keep only the NEWEST N events across the matched sources —
+        # "the last N messages", not the last N days. Walk newest-first,
+        # trimming the oldest events of the boundary group; groups that fall
+        # entirely outside the window are dropped. A non-transcript source
+        # (no parsed events) counts as one slot.
+        if tail is not None and int(tail) > 0:
+            remaining = int(tail)
+            kept: list[dict] = []
+            for g in reversed(groups):
+                evs = g["events"]
+                if evs:
+                    if len(evs) > remaining:
+                        g["events"] = evs[-remaining:]
+                    remaining -= len(g["events"])
+                else:
+                    remaining -= 1
+                kept.append(g)
+                if remaining <= 0:
+                    break
+            kept.reverse()
+            groups = kept
         return groups
 
     def get_source(self, corpus_name: str, source_id: str) -> dict | None:
