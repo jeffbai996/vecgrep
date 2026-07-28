@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import os
 import json
 import sys
 import time
@@ -954,7 +955,17 @@ def serve(host: str | None, port: int | None, reload: bool, open_browser: bool) 
     help="Only index files whose name matches this glob (e.g. '*.md' to skip "
     "sibling raw files). Applies to the initial pass and to change events.",
 )
-def watch(path: str, corpus: str, chunker: str, debounce: float, include: str | None) -> None:
+@click.option(
+    "--quiet-period",
+    default=300.0,
+    show_default=True,
+    type=float,
+    help="Defer indexing a file until it has gone unmodified for this many "
+    "seconds. A file a live session keeps appending to would otherwise be "
+    "re-embedded in full on every append, forever. 0 disables.",
+)
+def watch(path: str, corpus: str, chunker: str, debounce: float,
+          include: str | None, quiet_period: float) -> None:
     """Watch a directory and re-index on change.
 
     Re-indexes incrementally — only sources whose content hash changed get
@@ -980,11 +991,26 @@ def watch(path: str, corpus: str, chunker: str, debounce: float, include: str | 
     # Initial pass picks up everything currently on disk.
     _do_index(str(target), corpus, chunker, force=False, include=include)
 
+    def _index_one(p: str) -> None:
+        # Skip BEFORE dispatching: an event on a byte-identical file must
+        # not cost an index round-trip (see _watch_should_index — the
+        # identical-rewrite runaway-loop fix, incident 2026-07-26).
+        if not _watch_should_index(p):
+            return
+        _do_index(p, corpus, chunker, force=False, include=include)
+
+    # No filesystem event fires after a session stops writing, so the sweep
+    # cannot ride on events alone — wake up at least this often to check
+    # whether deferred files have gone quiet.
+    sweep_ms = int(min(quiet_period or 60, 60) * 1000)
     try:
-        for changes in _watch(str(target), step=int(debounce * 1000)):
-            kinds = {kind.name for kind, _ in changes}
-            paths = sorted({p for _, p in changes})
-            click.echo(f"  ! {len(paths)} change(s) [{','.join(sorted(kinds))}] — processing")
+        for changes in _watch(str(target), step=int(debounce * 1000),
+                              rust_timeout=sweep_ms, yield_on_timeout=True):
+            if changes:
+                kinds = {kind.name for kind, _ in changes}
+                paths = sorted({p for _, p in changes})
+                click.echo(
+                    f"  ! {len(paths)} change(s) [{','.join(sorted(kinds))}] — processing")
             for change_kind, p in changes:
                 # Respect the include glob on per-file events too, so a sibling
                 # raw file changing doesn't get indexed into a markdown-only corpus.
@@ -993,16 +1019,27 @@ def watch(path: str, corpus: str, chunker: str, debounce: float, include: str | 
                 try:
                     if change_kind.name == "deleted":
                         _WATCH_SEEN_HASHES.pop(p, None)
+                        _WATCH_PENDING.discard(p)
                         _do_delete_source(p, corpus)
+                    elif not _watch_is_quiet(p, quiet_period):
+                        # A live session is still writing this file. Indexing
+                        # now would re-embed the whole document per append,
+                        # forever (incident 2026-07-27: 93% swap, 23% IO
+                        # stall). Park it; the sweep below indexes the final
+                        # state once the writer goes quiet.
+                        if p not in _WATCH_PENDING:
+                            click.echo(f"  ~ deferred (live): {p}")
+                        _WATCH_PENDING.add(p)
                     else:
-                        # Skip BEFORE dispatching: an event on a byte-identical
-                        # file must not cost an index round-trip (see
-                        # _watch_should_index — this is the runaway-loop fix).
-                        if not _watch_should_index(p):
-                            continue
-                        _do_index(p, corpus, chunker, force=False, include=include)
+                        _index_one(p)
                 except click.ClickException as e:
                     # Don't kill the watcher on a transient error — log and keep going.
+                    click.echo(f"  error: {e.message}", err=True)
+            for p in _watch_due_pending(quiet_period):
+                click.echo(f"  ~ quiet now, indexing: {p}")
+                try:
+                    _index_one(p)
+                except click.ClickException as e:
                     click.echo(f"  error: {e.message}", err=True)
     except KeyboardInterrupt:
         click.echo("\nstopped.")
@@ -1012,6 +1049,43 @@ def watch(path: str, corpus: str, chunker: str, debounce: float, include: str | 
 # filesystem event on a byte-identical file costs a local re-hash instead of a
 # full index round-trip. Keyed by absolute path.
 _WATCH_SEEN_HASHES: dict[str, str] = {}
+
+# Files deferred because a live session was still writing them. Deferred is
+# not dropped: the watch loop sweeps this set and indexes each file once its
+# mtime has gone quiet — the last write always lands in the index even though
+# no filesystem event fires after the writer stops.
+_WATCH_PENDING: set[str] = set()
+
+
+def _watch_is_quiet(path: str, quiet_period: float, now: float | None = None) -> bool:
+    """True when `path` has gone unmodified for at least `quiet_period` seconds.
+
+    Incident 2026-07-27: live session transcripts are appended every turn.
+    Each append is a genuine content change, so the byte-identical guard
+    passes it, and the watcher re-embeds the entire 100-150 chunk file —
+    taking longer than the interval between appends. The loop never
+    converged; the sustained qdrant write volume pushed the box to 93% swap
+    and ~23% IO stall. A file still being written is not ready to index.
+
+    A missing/unstat-able file counts as quiet so it flows to the downstream
+    path (which reports the error) instead of parking in pending forever.
+    """
+    if quiet_period <= 0:
+        return True
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return True
+    return (now if now is not None else time.time()) - mtime >= quiet_period
+
+
+def _watch_due_pending(quiet_period: float, now: float | None = None) -> list[str]:
+    """Deferred files whose writers have gone quiet, removed from pending."""
+    due = sorted(p for p in _WATCH_PENDING
+                 if _watch_is_quiet(p, quiet_period, now))
+    for p in due:
+        _WATCH_PENDING.discard(p)
+    return due
 
 
 def _watch_should_index(path: str) -> bool:
