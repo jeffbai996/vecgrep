@@ -59,29 +59,45 @@ def test_write_records_metadata_and_confirmer(runner_home):
     assert "confirmed_by:" in body            # the local user recorded
 
 
+def _qdrant_lock_collision(result) -> bool:
+    # Each CLI invoke opens its own VecgrepService against the same on-disk
+    # embedded Qdrant path and never closes it (no context manager /
+    # explicit close in `_do_write`), so one invoke's still-open client can
+    # collide with the next invoke's client inside this process. A real
+    # constraint of the in-process double-invoke, not a regression in the
+    # command under test — skip rather than fail when we hit exactly it.
+    return (
+        result.exit_code != 0
+        and isinstance(result.exception, RuntimeError)
+        and "already accessed by another instance of Qdrant client"
+        in str(result.exception)
+    )
+
+
 def test_edit_overwrites_existing(runner_home):
-    runner_home.invoke(cli, ["write", "notes", "old content"])
-    r = runner_home.invoke(cli, ["edit", "notes-001", "new content"])
-    if (
-        r.exit_code != 0
-        and isinstance(r.exception, RuntimeError)
-        and "already accessed by another instance of Qdrant client" in str(r.exception)
-    ):
-        # Each CLI invoke opens its own VecgrepService against the same
-        # on-disk embedded Qdrant path and never closes it (no context
-        # manager / explicit close in `_do_write`), so the `write` call's
-        # still-open client collides with the `edit` call's client here.
-        # That single-process embedded-storage lock is a real constraint of
-        # this test's in-process double-invoke, not a regression in `edit`
-        # itself — skip rather than fail when we hit exactly this collision.
+    import glob
+    import re
+
+    w = runner_home.invoke(cli, ["write", "notes", "old content"])
+    if _qdrant_lock_collision(w):
+        pytest.skip("embedded Qdrant single-process lock hit the setup write")
+    assert w.exit_code == 0, w.output
+    # ids are nanosecond timestamps (notes-<digits>), so the edit target must
+    # come from the write's reported id. This test hardcoded notes-001 from
+    # the pre-timestamp scheme and survived unnoticed for weeks because the
+    # lock collision above made it skip on every full-suite run — the first
+    # run where the timing shifted and it actually EXECUTED, it failed
+    # (2026-07-27).
+    doc_id = re.search(r"notes-\d+", w.output).group(0)
+    r = runner_home.invoke(cli, ["edit", doc_id, "new content"])
+    if _qdrant_lock_collision(r):
         pytest.skip(
             "embedded Qdrant single-process lock: the prior `write` invoke's "
             "client is still open when `edit` opens a second client against "
             "the same on-disk path in this process"
         )
-    assert r.exit_code == 0
-    import glob, os as _os
-    f = glob.glob(f"{_os.environ['VECGREP_HOME']}/write/notes/notes-001.md")[0]
+    assert r.exit_code == 0, r.output
+    f = glob.glob(f"{os.environ['VECGREP_HOME']}/write/notes/{doc_id}.md")[0]
     body = open(f).read()
     assert "new content" in body and "old content" not in body
 
