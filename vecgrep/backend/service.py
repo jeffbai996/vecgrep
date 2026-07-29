@@ -1521,8 +1521,8 @@ class VecgrepService:
                 new_bm25.unlink()
             old_bm25.rename(new_bm25)
         # Drop in-memory caches for BOTH names so the rename is visible.
-        self.bm25._cache.pop(temp_name, None)
-        self.bm25._cache.pop(name, None)
+        self.bm25.evict(temp_name)
+        self.bm25.evict(name)
         # Now rewrite payloads under the new name.
         idx = self.bm25._load(name)
         for payload in idx.payloads:

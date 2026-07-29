@@ -88,6 +88,78 @@ def test_drop_removes_pickle(tmp_path):
     assert not pkl.exists()
 
 
+def test_persistent_store_bounds_loaded_corpora_by_default(tmp_path):
+    store = BM25Store(tmp_path)
+    for corpus in ("one", "two"):
+        store.upsert(
+            corpus,
+            ids=[corpus],
+            texts=[f"{corpus} searchable text"],
+            payloads=[{"source_id": f"/{corpus}"}],
+        )
+        store.search(corpus, corpus, top_k=1)
+
+    assert list(store._cache) == ["two"]
+    assert list(store._bm25_instances) == ["two"]
+
+
+def test_evicted_corpus_reloads_with_identical_results(tmp_path):
+    store = BM25Store(tmp_path)
+    store.upsert(
+        "one",
+        ids=["a", "b"],
+        texts=["alpha beta gamma", "alpha delta epsilon"],
+        payloads=[{"source_id": "/a"}, {"source_id": "/b"}],
+    )
+    before = store.search("one", "alpha beta", top_k=2)
+
+    store.upsert(
+        "two",
+        ids=["c"],
+        texts=["other corpus content"],
+        payloads=[{"source_id": "/c"}],
+    )
+    assert "one" not in store._cache
+
+    after = store.search("one", "alpha beta", top_k=2)
+    assert after == before
+
+
+def test_cache_limit_uses_least_recently_used_order(tmp_path):
+    store = BM25Store(tmp_path, max_cached_corpora=2)
+    for corpus in ("one", "two"):
+        store.upsert(
+            corpus,
+            ids=[corpus],
+            texts=[f"{corpus} searchable text"],
+            payloads=[{"source_id": f"/{corpus}"}],
+        )
+
+    store.search("one", "one", top_k=1)
+    store.upsert(
+        "three",
+        ids=["three"],
+        texts=["three searchable text"],
+        payloads=[{"source_id": "/three"}],
+    )
+
+    assert list(store._cache) == ["one", "three"]
+    assert "two" not in store._bm25_instances
+
+
+def test_ephemeral_store_keeps_all_corpora_without_persistence():
+    store = BM25Store(None)
+    for corpus in ("one", "two"):
+        store.upsert(
+            corpus,
+            ids=[corpus],
+            texts=[f"{corpus} searchable text"],
+            payloads=[{"source_id": f"/{corpus}"}],
+        )
+
+    assert list(store._cache) == ["one", "two"]
+
+
 def test_short_query_requires_full_coverage(monkeypatch: pytest.MonkeyPatch):
     """2-token query against partial-match doc should not return that doc.
 
