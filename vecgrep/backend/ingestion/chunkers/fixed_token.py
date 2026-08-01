@@ -46,7 +46,13 @@ class FixedTokenChunker(Chunker):
             char_end = char_start + len(stripped)
             chunks.append(Chunk(text=stripped, start=char_start, end=char_end, index=ordinal))
             ordinal += 1
-            char_cursor = max(char_cursor, char_end - len(stripped) // 4)
+            # Resume the next search at THIS chunk's start, not past its end.
+            # Chunks overlap by `overlap` tokens, so the next chunk's text
+            # begins before this one ends; advancing the cursor beyond that
+            # made text.find() miss the true position and fall back to the
+            # approximate offset, so start/end no longer sliced back to the
+            # chunk's own text.
+            char_cursor = char_start
             if start_tok + self.tokens >= len(ids):
                 break
         return chunks
