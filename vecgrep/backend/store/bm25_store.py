@@ -11,6 +11,8 @@ import math
 import os
 import pickle
 import re
+import tempfile
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -141,11 +143,21 @@ class _CorpusIndex:
 
 
 class BM25Store:
-    def __init__(self, root: Path | None) -> None:
+    def __init__(
+        self,
+        root: Path | None,
+        max_cached_corpora: int = 1,
+    ) -> None:
         # root=None -> ephemeral (in-memory only).
         self.root = root
-        self._cache: dict[str, _CorpusIndex] = {}
-        self._bm25_instances: dict[str, BM25Okapi] = {}
+        if max_cached_corpora < 1:
+            raise ValueError("max_cached_corpora must be at least 1")
+        # Persistent indexes can always be reloaded from disk, so retain only
+        # the most recently used corpora. Ephemeral stores have no reload path
+        # and therefore remain intentionally unbounded.
+        self.max_cached_corpora = None if root is None else max_cached_corpora
+        self._cache: OrderedDict[str, _CorpusIndex] = OrderedDict()
+        self._bm25_instances: OrderedDict[str, BM25Okapi] = OrderedDict()
         if root is not None:
             root.mkdir(parents=True, exist_ok=True)
 
@@ -156,7 +168,11 @@ class BM25Store:
 
     def _load(self, corpus: str) -> _CorpusIndex:
         if corpus in self._cache:
+            self._cache.move_to_end(corpus)
+            if corpus in self._bm25_instances:
+                self._bm25_instances.move_to_end(corpus)
             return self._cache[corpus]
+        self._make_room(corpus)
         p = self._path(corpus)
         if p and p.exists():
             try:
@@ -168,12 +184,41 @@ class BM25Store:
         self._cache[corpus] = idx
         return idx
 
+    def _make_room(self, incoming: str) -> None:
+        if self.max_cached_corpora is None or incoming in self._cache:
+            return
+        while len(self._cache) >= self.max_cached_corpora:
+            evicted, _ = self._cache.popitem(last=False)
+            self._bm25_instances.pop(evicted, None)
+
+    def evict(self, corpus: str) -> None:
+        """Release one corpus's expanded index and BM25 scoring structure."""
+        self._cache.pop(corpus, None)
+        self._bm25_instances.pop(corpus, None)
+
     def _persist(self, corpus: str) -> None:
         p = self._path(corpus)
         if p is None:
             return
         idx = self._cache[corpus]
-        p.write_bytes(pickle.dumps(idx, protocol=pickle.HIGHEST_PROTOCOL))
+        # pickle.dumps() materializes a second corpus-sized bytes object before
+        # writing. Stream to a sibling temp file instead, then atomically swap
+        # it into place so reindexing neither doubles the heap nor exposes a
+        # partially written index to another process.
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=p.parent,
+                prefix=f".{p.name}.",
+                delete=False,
+            ) as fh:
+                temp_path = Path(fh.name)
+                pickle.dump(idx, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(temp_path, p)
+        finally:
+            if temp_path is not None and temp_path.exists():
+                temp_path.unlink()
 
     def upsert(self, corpus: str, ids: list[str], texts: list[str], payloads: list[dict]) -> None:
         if not ids:
@@ -220,8 +265,7 @@ class BM25Store:
         return None
 
     def drop(self, corpus: str) -> None:
-        self._cache.pop(corpus, None)
-        self._bm25_instances.pop(corpus, None)
+        self.evict(corpus)
         p = self._path(corpus)
         if p and p.exists():
             p.unlink()
