@@ -78,6 +78,21 @@ def create_app() -> FastAPI:
         # group — its lifespan must be entered for the /mcp endpoint to
         # serve. When mcp_http_app is None (extra not installed), we
         # still need a no-op lifespan so the app boots cleanly.
+        # AnyIO's default thread-pool limiter (backs FastAPI's run_in_threadpool
+        # bridge for any sync route/dependency) defaults to a size meant for a
+        # dedicated host. A live instance was observed idling at 63 threads
+        # under a few requests/minute — cap it to what this service actually
+        # needs. Must be set here, inside the running loop: the limiter is a
+        # contextvar-scoped object that doesn't exist until a loop is active,
+        # so setting it from serve() before uvicorn starts has no effect.
+        import anyio
+
+        from .config import get_settings as _get_settings
+
+        anyio.to_thread.current_default_thread_limiter().total_tokens = (
+            _get_settings().thread_pool_size
+        )
+
         stop = threading.Event()
 
         def _backup_loop() -> None:
