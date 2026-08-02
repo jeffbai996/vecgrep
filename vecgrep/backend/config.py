@@ -30,6 +30,7 @@ ENV_MAP = {
     "VECGREP_QDRANT_URL": "qdrant_url",
     "VECGREP_OAUTH_ENABLED": "oauth_enabled",
     "VECGREP_OAUTH_ISSUER_URL": "oauth_issuer_url",
+    "VECGREP_THREAD_POOL_SIZE": "thread_pool_size",
 }
 
 EDITABLE_FIELDS = {
@@ -102,6 +103,12 @@ class Settings:
     backup_weekday: int = 0
     backup_destination: str | None = None
     backup_retention: int = 7
+    # AnyIO's default worker-thread limiter for run_in_threadpool (any sync
+    # route/dependency FastAPI bridges to a thread) is sized for a dedicated
+    # host, not a lightly-loaded background service — a live instance was
+    # observed holding 63 threads under a few requests/minute. 8 comfortably
+    # covers real concurrent bursts without carrying that idle overhead.
+    thread_pool_size: int = 8
 
     @property
     def qdrant_path(self) -> Path:
@@ -139,7 +146,8 @@ def load_settings() -> Settings:
     for env_key, attr in ENV_MAP.items():
         if env_key in os.environ:
             val = os.environ[env_key]
-            if attr in {"api_port", "default_top_k", "backup_weekday", "backup_retention"}:
+            if attr in {"api_port", "default_top_k", "backup_weekday", "backup_retention",
+                        "thread_pool_size"}:
                 val = int(val)
             elif attr in {"oauth_enabled", "backup_enabled"}:
                 val = val.strip().lower() in ("1", "true", "yes", "on")
