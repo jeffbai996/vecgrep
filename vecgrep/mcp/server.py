@@ -1520,7 +1520,7 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
         corpus: str | None = None,
         top_k: int = 5,
         mode: str = "hybrid",
-        rerank: bool = False,
+        rerank: bool | None = None,
         filters: list[str] | None = None,
         budget: bool = False,
         full_k: int = 8,
@@ -1528,7 +1528,9 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
     ) -> str:
         """Natural-language query. corpus: limit to one corpus (omit = all).
         top_k: max results. mode: hybrid|vector|bm25.
-        rerank: cross-encoder rerank (slower, more accurate).
+        rerank: cross-encoder rerank — markedly better on long, fuzzy
+        queries. Omit to auto-enable on large corpora (>=10k chunks)
+        and skip it on small ones; pass true/false to force.
         filters: hard constraints — 'source:<glob>', 'source_path:<glob>',
         'corpus:<name>', 'meta.<k>=<v>', 'date:YYYY-MM-DD|today|yesterday',
         'after:<iso>|7d|24h|2w', 'before:<iso>|today', 'channel:<name>',
