@@ -614,6 +614,48 @@ def _run_propose_delete(corpus: str, delete_id: str,
     return json.dumps(result)
 
 
+def _run_propose_merge(corpus: str, doc_ids: list, content: str,
+                       tags: list | None = None) -> str:
+    """PROPOSE merging N docs into doc_ids[0] — WRITES NOTHING. Same wall as
+    the other propose tools: allowlisted corpus, size cap, human confirm."""
+    from ..backend.write import proposal as _P
+
+    allowed = _allowed_propose_corpora()
+    if corpus not in allowed:
+        return json.dumps({"error": (
+            f"corpus {corpus!r} is not agent-writable (default-deny). "
+            f"Allowed: {sorted(allowed)}.")})
+    if not content or not content.strip():
+        return json.dumps({"error": "merge needs the canonical merged content "
+                                    "— no auto-concat; a human reviews a real "
+                                    "synthesis."})
+    n_bytes = len(content.encode("utf-8"))
+    if n_bytes > MAX_PROPOSAL_CONTENT_BYTES:
+        return json.dumps({"error": (
+            f"content is {n_bytes} bytes, over the {MAX_PROPOSAL_CONTENT_BYTES}"
+            f"-byte proposal cap.")})
+    corpus_dir = _corpus_doc_dir(corpus)
+    meta = {"origin": "bot-suggested"}
+    if tags:
+        meta["tags"] = list(tags)
+    try:
+        pr = _P.propose_merge(corpus, list(doc_ids), content, corpus_dir,
+                              meta=meta)
+    except _P.ProposalError as e:
+        return json.dumps({"error": str(e)})
+    _pending_store().put(pr)
+    result = {
+        "proposal_id": pr.proposal_id, "doc_id": pr.doc_id,
+        "absorbs": pr.merge_absorbs, "corpus": corpus,
+        "status": "pending — a human must run `vecgrep confirm "
+                  f"{pr.proposal_id}` to merge",
+        "preview": (pr.rendered if len(pr.rendered) <= PROPOSE_PREVIEW_CHARS
+                    else pr.rendered[:PROPOSE_PREVIEW_CHARS] + "\n... (truncated)"),
+    }
+    _fire_propose_hook(pr)
+    return json.dumps(result)
+
+
 # ── Direct write: the ONE unconfirmed write surface ──────────────────────────
 # Everything above is propose-only for a reason (an agent ingesting untrusted
 # content must not be able to write). This is the operator's deliberate exception
@@ -1832,6 +1874,30 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
         if corpus is None:
             corpus = doc_id.rsplit("-", 1)[0] if "-" in doc_id else doc_id
         return _run_propose_delete(corpus, doc_id)
+
+    @fmcp.tool(
+        description=(
+            "PROPOSE merging several entries into ONE. Writes NOTHING — creates "
+            "a pending proposal a human confirms. The FIRST id in doc_ids is "
+            "the canonical doc: it keeps its id and gets `content` as its new "
+            "body (author a real synthesis of all the docs — no auto-concat); "
+            "the remaining ids are absorbed and DELETED on confirm, recorded "
+            "in the canonical doc's merged_from. Use to collapse near-duplicate "
+            "or fragmented entries. Returns the proposal_id."
+        )
+    )
+    def propose_merge(doc_ids: list[str], content: str,
+                      corpus: str | None = None,
+                      tags: list[str] | None = None) -> str:
+        """doc_ids: 2+ existing ids, FIRST is canonical (survives, keeps its id);
+        the rest are absorbed and deleted on confirm. content: the merged body
+        you authored. corpus: inferred from the first id's prefix if omitted.
+        Proposal only — a human must confirm before anything is written or
+        deleted."""
+        if corpus is None and doc_ids:
+            first = doc_ids[0]
+            corpus = first.rsplit("-", 1)[0] if "-" in first else first
+        return _run_propose_merge(corpus or "", list(doc_ids), content, tags)
 
     return fmcp.streamable_http_app()
 
