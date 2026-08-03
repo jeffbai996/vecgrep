@@ -153,6 +153,34 @@ def _should_rerank(svc, args: dict) -> bool:
     return False
 
 
+def _should_budget(svc, args: dict) -> bool:
+    """Breadth mode by default on large corpora; explicit `budget` wins.
+
+    Same size rule as rerank, for the same reason: on a small corpus the
+    candidate pool IS the haystack, so a stub tail adds nothing. On a big one
+    the head fills with near-duplicates and the tail is where the distinct
+    sources are. Never raises — an unreadable corpus size falls back to the
+    old default (off) rather than failing the search.
+    """
+    explicit = args.get("budget")
+    if explicit is not None:
+        return bool(explicit)
+    try:
+        name = args.get("corpus")
+        if not name:
+            return False
+        for c in svc.list_corpora():
+            if isinstance(c, dict):
+                cn, n = c.get("name"), c.get("chunk_count")
+            else:
+                cn, n = getattr(c, "name", None), getattr(c, "chunk_count", None)
+            if cn == name:
+                return bool(n and int(n) >= RERANK_AUTO_MIN_POINTS)
+    except Exception:
+        return False
+    return False
+
+
 def _run_search(args: dict) -> str:
     svc = _svc()
     common = dict(
@@ -161,7 +189,7 @@ def _run_search(args: dict) -> str:
         rerank=_should_rerank(svc, args),
         filters=args.get("filters") or None,
     )
-    if args.get("budget"):
+    if _should_budget(svc, args):
         # Breadth mode: full head + one-line stub tail under a token ceiling.
         # Stubs carry chunk_id — expand any of them with the get_chunk tool.
         full, stubs = svc.search_budgeted(
@@ -1016,12 +1044,16 @@ def build_mcp_server() -> Any:
                         "budget": {
                             "type": "boolean",
                             "description": (
-                                "Breadth mode: return the top full_k results WITH "
-                                "context plus a one-line stub tail (up to a token "
-                                "ceiling). Expand any stub via get_chunk. Best for "
-                                "pattern-spotting across many hits."
+                                "Breadth mode: top full_k results WITH context "
+                                "plus a one-line stub tail (up to a token "
+                                "ceiling) — far more distinct sources per token "
+                                "than a bigger top_k, whose tail is usually "
+                                "near-duplicates of the head. ON BY DEFAULT for "
+                                "large corpora; omit unless you specifically "
+                                "want it forced on or off. ALWAYS read the "
+                                "stubs — they are real results, and get_chunk "
+                                "expands any of them in full."
                             ),
-                            "default": False,
                         },
                         "full_k": {
                             "type": "integer",
@@ -1554,7 +1586,11 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
         description=(
             "Semantic search across vecgrep corpora. Returns ranked chunks with "
             "surrounding context. Use this instead of dumping documents into "
-            "context — index once, search per question."
+            "context — index once, search per question. On large corpora the "
+            "result is breadth mode: a few full hits plus a `stubs` list of "
+            "one-line previews. The stubs are real results, not filler — scan "
+            "them and call get_chunk on any that look right before concluding "
+            "something isn't there."
         )
     )
     def search(
@@ -1564,7 +1600,7 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
         mode: str = "hybrid",
         rerank: bool | None = None,
         filters: list[str] | None = None,
-        budget: bool = False,
+        budget: bool | None = None,
         full_k: int = 8,
         token_ceiling: int = 4000,
     ) -> str:
@@ -1581,8 +1617,10 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
         for 'today'-style questions so old lore can't leak in; speaker: for
         'what did X say'.
         budget: breadth mode — top full_k results WITH context plus a
-        one-line stub tail capped at ~token_ceiling tokens; expand any stub
-        via get_chunk. Best for pattern-spotting across many hits."""
+        one-line stub tail capped at ~token_ceiling tokens. ON BY DEFAULT for
+        large corpora (omit to let it decide). The stubs are real results:
+        scan them and expand promising ones with get_chunk rather than
+        concluding from the full hits alone."""
         return _run_search({
             "query": query,
             "corpus": corpus,
