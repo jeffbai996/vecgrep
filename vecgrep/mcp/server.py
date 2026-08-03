@@ -118,12 +118,47 @@ def _result_payload(r) -> dict:
     }
 
 
+# Corpora at or above this many points get cross-encoder rerank by default.
+# Below it the candidate pool is small enough that RRF already ranks well and
+# the extra latency buys nothing. See the module docstring on _run_search.
+RERANK_AUTO_MIN_POINTS = 10_000
+
+
+def _should_rerank(svc, args: dict) -> bool:
+    """Explicit `rerank` in the call always wins; otherwise decide on size.
+
+    Never raises: if the corpus size can't be read for any reason, fall back to
+    the old default (off) rather than failing the search.
+    """
+    explicit = args.get("rerank")
+    if explicit is not None:
+        return bool(explicit)
+    try:
+        name = args.get("corpus")
+        if not name:
+            return False          # cross-corpus search: don't pay it blind
+        for c in svc.list_corpora():
+            # list_corpora returns Corpus objects; the API mirror is a dict.
+            # Handle both, and read chunk_count — the field that actually
+            # exists (points/chunks do not, and guessing them would make this
+            # silently return False forever).
+            if isinstance(c, dict):
+                cn, n = c.get("name"), c.get("chunk_count")
+            else:
+                cn, n = getattr(c, "name", None), getattr(c, "chunk_count", None)
+            if cn == name:
+                return bool(n and int(n) >= RERANK_AUTO_MIN_POINTS)
+    except Exception:
+        return False
+    return False
+
+
 def _run_search(args: dict) -> str:
     svc = _svc()
     common = dict(
         corpus_name=args.get("corpus"),
         mode=args.get("mode", "hybrid"),
-        rerank=bool(args.get("rerank", False)),
+        rerank=_should_rerank(svc, args),
         filters=args.get("filters") or None,
     )
     if args.get("budget"):
@@ -910,8 +945,13 @@ def build_mcp_server() -> Any:
                         },
                         "rerank": {
                             "type": "boolean",
-                            "description": "Cross-encoder rerank top candidates. Slower, more accurate.",
-                            "default": False,
+                            "description": (
+                                "Cross-encoder rerank of the top candidates — "
+                                "markedly better on long, fuzzy queries. Omit "
+                                "to auto-enable on large corpora (>=10k "
+                                "chunks) and skip it on small ones; pass "
+                                "true/false to force."
+                            ),
                         },
                         "filters": {
                             "type": "array",
