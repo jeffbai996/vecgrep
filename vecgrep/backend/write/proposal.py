@@ -52,6 +52,11 @@ class Proposal:
     is_delete: bool = False   # True = REMOVE the target doc on confirm (no write).
     # Default False keeps existing on-disk pending proposals (no is_delete key)
     # deserializing cleanly via Proposal(**dict) — back-compat for the store.
+    # Merge proposals: ids absorbed INTO doc_id (deleted at confirm,
+    # after the canonical write lands). Default [] keeps pre-merge
+    # pending proposals deserializing via Proposal(**dict) — same
+    # back-compat as is_delete.
+    merge_absorbs: list = field(default_factory=list)
 
 
 def _slug_prefix(corpus: str) -> str:
@@ -87,7 +92,7 @@ def render_doc(doc_id: str, content: str, meta: dict) -> str:
     # the rendered doc. Add new frontmatter keys to this list or they vanish.
     order = [
         "id", "title", "status", "created_at", "origin", "confirmed_by",
-        "confirmed_at", "edited_at", "tier", "corpus", "source_kind", "tags",
+        "confirmed_at", "edited_at", "tier", "corpus", "source_kind", "tags", "merged_from",
     ]
     fm = {**meta, "id": doc_id}
     lines = ["---"]
@@ -250,3 +255,47 @@ def propose_delete(
         meta=meta,
         is_delete=True,
     )
+
+
+def propose_merge(
+    corpus: str,
+    doc_ids: list,
+    content: str,
+    corpus_dir: Path,
+    meta: dict | None = None,
+    proposal_id: str | None = None,
+) -> Proposal:
+    """Build a MERGE proposal — WRITES NOTHING. Confirming it (human-gated)
+    overwrites doc_ids[0] with `content` (canonical-in-place, id preserved)
+    and deletes doc_ids[1:] (the absorbed docs) AFTER the canonical write.
+
+    The canonical doc's frontmatter records merged_from=[absorbed ids] so the
+    confirm preview and the on-disk result both show exactly what was folded
+    in. Every id must be a plain doc-id inside corpus_dir (same traversal
+    guard as edit/delete) and must exist — you can't merge what isn't there.
+    """
+    if len(doc_ids) < 2:
+        raise ProposalError("merge needs at least two doc ids (canonical first)")
+    if len(set(doc_ids)) != len(doc_ids):
+        raise ProposalError("merge doc_ids contains duplicates")
+    base = corpus_dir.resolve()
+    for did in doc_ids:
+        if not _ID_RE.match(did):
+            raise ProposalError(
+                f"doc id {did!r} is not a valid doc id (expected prefix-NNN)")
+        t = (corpus_dir / f"{did}.md").resolve()
+        if base not in t.parents:
+            raise ProposalError(f"refusing target {t} outside corpus dir {base}")
+        if not t.exists():
+            raise ProposalError(f"merge source {did} does not exist in {corpus!r}")
+
+    canonical, absorbed = doc_ids[0], list(doc_ids[1:])
+    meta = dict(meta or {})
+    meta["merged_from"] = absorbed
+    # Reuse propose() for the canonical edit: same meta defaults, title
+    # derivation, validation, and boundary checks — one code path to trust.
+    pr = propose(corpus, content, corpus_dir, meta=meta, edit_id=canonical,
+                 proposal_id=proposal_id)
+    pr.merge_absorbs = absorbed
+    pr.proposal_id = proposal_id or f"prop-merge-{canonical}-{uuid.uuid4().hex[:8]}"
+    return pr

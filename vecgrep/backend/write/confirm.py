@@ -183,8 +183,10 @@ def confirm(
     #    NOT write/delete/embed locally here. Consumes the proposal on success.
     wt_cmd = _writethrough_cmd(corpus)
     if wt_cmd is not None:
-        op = "delete" if getattr(proposal, "is_delete", False) else (
-            "edit" if proposal.is_edit else "write")
+        absorbs = list(getattr(proposal, "merge_absorbs", []) or [])
+        op = ("merge" if absorbs else
+              "delete" if getattr(proposal, "is_delete", False) else
+              "edit" if proposal.is_edit else "write")
         if op in ("edit", "delete") and target.exists():
             if "tier: protected" in target.read_text() \
                     and (protected_ack or "").strip() != proposal.doc_id:
@@ -257,6 +259,13 @@ def confirm(
         proposal.is_edit and target.exists()
         and "tier: protected" in target.read_text()
     )
+    # Absorbed docs are DELETED by this merge, so a protected one must
+    # escalate too — otherwise protection is bypassable by merging it away.
+    absorbs = list(getattr(proposal, "merge_absorbs", []) or [])
+    for _did in absorbs:
+        _p = Path(corpus_dir) / f"{_did}.md"
+        if _p.exists() and "tier: protected" in _p.read_text():
+            is_protected = True
     if is_protected and (protected_ack or "").strip() != proposal.doc_id:
         raise ConfirmError(
             f"{proposal.doc_id} is protected — re-state its exact id as "
@@ -286,6 +295,29 @@ def confirm(
     searchable = _verify_searchable(svc, corpus, proposal.doc_id,
                                     proposal.rendered)
     store.delete(proposal_id)
+    if searchable and absorbs:
+        # Only now — canonical written, embedded, and retrievable. Anything
+        # that failed above already returned, leaving every source intact.
+        gone, index_notes = [], []
+        for did in absorbs:
+            p = Path(corpus_dir) / f"{did}.md"
+            # Embeddings first, file second — a crash orphans a file (a
+            # reindex reconciles), never vectors pointing at nothing.
+            try:
+                svc.delete_source(corpus, str(p))
+            except Exception as e:
+                index_notes.append(f"{did}: de-index warning: {e}")
+            try:
+                p.unlink(missing_ok=True)
+                gone.append(did)
+            except OSError as e:
+                index_notes.append(f"{did}: file remove failed: {e}")
+        note = f" ({'; '.join(index_notes)})" if index_notes else ""
+        return ConfirmResult(
+            ok=True, doc_id=proposal.doc_id, path=str(target),
+            message=(f"merged into {proposal.doc_id}; absorbed+deleted "
+                     f"{', '.join(gone)}{note}"),
+        )
     if not searchable:
         return ConfirmResult(
             ok=False, doc_id=proposal.doc_id, path=str(target),
