@@ -2,7 +2,7 @@
 
 > grep for meaning, not keywords
 
-**v1.2.0** · stable CLI + HTTP API surface · see [CHANGELOG.md](CHANGELOG.md) for release history
+**v1.2.0 + current main** · stable CLI, HTTP API, and MCP surfaces · see [CHANGELOG.md](CHANGELOG.md) for release history
 
 `vecgrep` is a local-first semantic search engine for any corpus you throw at it. Drop in documents — text, markdown, PDFs, URLs — and search by concept instead of exact words. Runs on your machine, no cloud roundtrip required.
 
@@ -41,8 +41,10 @@ The closest equivalents — `txtai`, `chroma`, `LlamaIndex` — are libraries yo
 - [Storage layout](#storage-layout)
 - [Configuration](#configuration)
 - [Backup and recovery](#backup-and-recovery)
+- [Memory retrieval](#memory-retrieval)
 - [Web UI](#web-ui)
 - [MCP server](#mcp-server)
+- [Writing through MCP](#writing-through-mcp)
 - [Roadmap](#roadmap)
 - [Why not just use X?](#why-not-just-use-x)
 - [Contributing](#contributing)
@@ -51,13 +53,14 @@ The closest equivalents — `txtai`, `chroma`, `LlamaIndex` — are libraries yo
 
 ## Status
 
-Stable (`v1.1.x`). What's shipped:
+Stable (`v1.2.0`; unreleased work on `main` is documented here too). What's shipped:
 
-- **Retrieval** — hybrid (BM25 + vector + RRF, BM25-weighted by default), cross-encoder rerank, optional per-corpus recency decay.
-- **Serving** — MCP server (stdio + streamable HTTP), named corpora, optional bearer-token auth. Corpora embedded with *different* models can be served side by side — each queries with its own model.
-- **Ops** — incremental indexing, file watcher, embedding cache, model/backend migration, `vecgrep status` diagnostic, hermetic pytest suite.
-- **UI** — web UI with confidence-tier coloring + V/K/VK match badges.
-- **Adapters** — plaintext, markdown, PDF, URLs, Discord JSONL, Claude export, ChatGPT export.
+- **Retrieval** — hybrid BM25 + vector search, MMR/dedup, hard metadata and time filters, optional recency decay, precise line anchors, timeline/incident reconstruction, query-by-example, temporal comparison, and corpus summaries.
+- **Agent surface** — 19 MCP tools over stdio or streamable HTTP: search, location-first browsing, source/chunk expansion, insight tools, corpus discovery, and guarded write/edit/proposal workflows.
+- **Serving and auth** — optional REST bearer auth, optional OAuth 2.1 for public remote MCP clients, mixed embedding models across corpora, and Qdrant server mode for concurrent processes.
+- **Ops** — incremental and resilient file watching, embedding and bounded BM25 caches, migration, export/import, verified whole-instance backup/restore, `status`, and registry/store reconciliation with `doctor`.
+- **UI** — search and timeline views, filters, corpus health, related chunks, expandable context, calibrated relevance tiers, and V/K/VK match badges.
+- **Adapters** — plaintext, Markdown, PDF, URLs, Discord JSONL, Claude exports, and ChatGPT exports.
 
 The public CLI and HTTP API have been stable since v1.0. Breaking changes are
 reserved for a future major release.
@@ -125,6 +128,17 @@ vecgrep search "rate hikes" --filter "source:*2026*.md" --filter "corpus:papers"
 # Show the score decomposition for each hit (cosine, BM25, RRF, rerank)
 vecgrep search "rate hikes" --explain
 
+# Reconstruct a chronological event sequence instead of ranked snippets
+vecgrep timeline "what happened during the deploy" --corpus chatlogs \
+  --filter after:7d
+
+# Query by example, compare periods, and inspect corpus health
+vecgrep related <chunk-id> --corpus chatlogs
+vecgrep compare "deployment failures" --corpus chatlogs \
+  --a-after 60d --a-before 30d --b-after 30d
+vecgrep stats chatlogs
+vecgrep summarize chatlogs --after 7d
+
 # Inspect / clear the embedding cache
 vecgrep cache stats
 vecgrep cache clear --identity ollama:bge-m3
@@ -156,6 +170,10 @@ vecgrep corpora delete papers
 # One-shot diagnostic: daemon, auth, per-corpus chunk counts, last-update age
 vecgrep status
 vecgrep status --json    # for scripting / monitoring
+
+# Reconcile the corpus registry with the active vector store
+vecgrep doctor
+vecgrep doctor --json
 
 # Launch the web UI on http://127.0.0.1:8765
 vecgrep serve
@@ -230,18 +248,27 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 | `VECGREP_API_PORT` | `8765` | API port |
 | `VECGREP_API_TOKEN` | unset | If set, `/api/*` requires `Authorization: Bearer <token>` (health stays public) |
 | `VECGREP_ADMIN_TOKEN` | unset | Separate bearer token for `/api/admin/*`. Without it, admin access requires both a loopback peer and loopback Host header. |
+| `VECGREP_QDRANT_URL` | unset | Use Qdrant server mode, e.g. `http://localhost:6333`. Required when `serve`, `watch`, and CLI processes need the same live store concurrently. |
 | `VECGREP_TOP_K` | `5` | Default `--top` value |
 | `VECGREP_ALIASES_FILE` | `$VECGREP_HOME/aliases.json` | Entity alias map (personal data — keep it out of any repo). See `docs/aliases.example.json`. Missing = no expansion. |
 | `VECGREP_OAUTH_ENABLED` | unset | `1` enables OAuth 2.1 on `/mcp` (embedded auth server: /authorize, /token, /.well-known). |
 | `VECGREP_OAUTH_ISSUER_URL` | unset | Public base URL the MCP endpoint is reachable at. Required when OAuth is on. |
+| `VECGREP_THREAD_POOL_SIZE` | `8` | AnyIO worker-thread cap for the HTTP service. |
 | `VECGREP_BM25_WEIGHT` | `1.5` | Weight on BM25 contribution to RRF fusion. >1 boosts literal-keyword matches over semantic noise on short queries. Set to `1.0` for pure RRF, higher for keyword-leaning ranking. |
 | `VECGREP_BM25_COVERAGE_MODE` | `penalty` | How BM25 treats docs that match only some query tokens. `penalty` keeps them but demotes the score by `(matched/total)²`; `filter` drops anything below a coverage threshold (higher precision, but can zero out the BM25 half of a multi-token query). |
 | `VECGREP_EMBED_CACHE_MAX_ROWS` | `50000` | Row cap on the sqlite embedding cache (~1 GB at a 1024-dim model). Oldest entries are evicted first once over the cap. Set `<= 0` to disable the cap. |
 
 Non-secret settings can also live in `~/.vecgrep/config.json`; environment
-variables override the file. The Admin tab shows each value's provenance and
-makes environment-owned fields read-only. Run `vecgrep init --yes` for an
-initial file or edit it through `vecgrep serve --open`.
+variables override the file. `vecgrep config` shows the effective value and
+provenance for each setting, while `vecgrep init --yes` creates an initial
+config file.
+
+Embedded Qdrant is deliberately the zero-ceremony default, but it permits one
+process at a time. A long-running deployment with `serve` plus `watch` must pin
+the same `qdrant_url` in `config.json` for *every* process; setting it only in a
+service environment can split the daemon and an interactive CLI across two
+different stores. `vecgrep doctor` detects registry/store drift, but naturally
+it can only inspect the backend selected by its own effective config.
 
 ## Backup and recovery
 
@@ -258,15 +285,14 @@ vecgrep backup restore ~/.vecgrep/backups/vecgrep-<id>.vgbak --confirm <id>
 ```
 
 Restore verifies every checksum, requires the exact backup ID, creates a
-pre-restore safety backup, and rolls back automatically on failure. The Admin
-tab exposes the same operations and a disabled-by-default daily or weekly
-scheduler. Retention applies only to scheduled backups; manual and safety
-backups are never pruned.
+pre-restore safety backup, and rolls back automatically on failure. An optional
+daily or weekly scheduler is disabled by default. Retention applies only to
+scheduled backups; manual and safety backups are never pruned.
 
-## Memory-retrieval mode (v1.0)
+## Memory retrieval
 
 vecgrep's highest-value real-world use turned out to be searching messy,
-multilingual chat transcripts as a personal memory layer. v1.0 adds the
+multilingual chat transcripts as a personal memory layer. v1.0 introduced the
 result-assembly tools that make an AI assistant good at it — the hybrid
 retrieval core is unchanged.
 
@@ -275,9 +301,10 @@ retrieval core is unchanged.
   evidence. No-dup corpora are unaffected.
 - **Budget search** — breadth without a blown context:
   `vecgrep search "query" --budget` (API `{"budget": true}`, MCP
-  `search(budget=true)`) returns the top 8 hits with full context plus a
-  token-capped one-line stub tail (≤80 total). Expand any stub:
+  `search(budget=true)`) returns the top 10 hits with full context plus a
+  token-capped one-line stub tail (≤100 total). Expand any stub:
   `vecgrep chunk <corpus> <chunk_id>` / `GET /api/chunk/...` / MCP `get_chunk`.
+  On large corpora MCP enables breadth mode by default; callers can override it.
 - **Hard filters** — the caller passes explicit constraints; vecgrep never
   guesses intent: `--filter date:2026-01-15` (or `date:today`), `after:<iso>`
   (or relative: `after:7d`, `after:24h`, `after:2w`), `before:<iso>`,
@@ -296,6 +323,11 @@ retrieval core is unchanged.
   ranked chunks: `vecgrep timeline "query"` / `POST /api/timeline` / MCP
   `timeline`. Contiguous chronological slices grouped by source file,
   speakers + timestamps preserved.
+- **Location-first browse** — when you know where or when but have no search
+  query, MCP `browse` returns the event sequence selected by channel, exact
+  date, inclusive `since`/`until` range, and/or source-path glob. `tail` keeps
+  only the newest N matching events. A selector is mandatory; accidental whole
+  corpus dumps are refused.
 - **Incident object** — `service.incident()` / MCP `incident`: one structured
   answer (title, sources, participants, time range, primary timeline,
   related context separated, confidence).
@@ -306,6 +338,10 @@ retrieval core is unchanged.
 - **Clear scores** — every result carries `relevance_pct`, a qualitative
   `relevance_label` (exact / strong / related / weak), raw component scores,
   and a precise `anchor` citation (`path#L12-L24`).
+- **Large-corpus MCP defaults** — if the caller omits `rerank` and `budget`,
+  vecgrep auto-enables the cross-encoder and breadth/stub output on corpora with
+  at least 10,000 chunks. Explicit `true`/`false` still wins. This keeps the CLI
+  predictable while giving agents enough recall by default.
 
 ## Web UI
 
@@ -314,9 +350,10 @@ retrieval core is unchanged.
 Controls:
 
 - Index forms with a built-in dropdown explainer for source types.
-- Corpus list with delete.
-- Search bar with top-k slider, mode toggle (hybrid/vector/bm25), and reranker checkbox.
-- Results with surrounding context and the matched chunk highlighted.
+- Search and timeline tabs, with the same hard-filter grammar as the CLI/API.
+- Corpus list with delete plus a health snapshot for the selected corpus.
+- Search bar with top-k slider, mode toggle (hybrid/vector/bm25), reranker checkbox, and filters.
+- Results with expandable source context and query-by-example related chunks.
 
 Confidence is shown as a colored tier (high / soft / weak) tied to which retriever placed the hit (V vector, K keyword, VK both) — so a 1.6% BM25 hit reads as the strong literal-keyword match it actually is, not noise.
 
@@ -324,17 +361,29 @@ The sidebar carries a legend mapping V / K / VK and confidence colors, plus a co
 
 ## MCP server
 
-`vecgrep` ships an MCP server so Claude Desktop, Cursor, or any MCP-aware client can search your corpora as a tool. Install with the extra and run over stdio:
+`vecgrep` ships the same MCP tool surface over local stdio and streamable HTTP.
+Install the extra and run the local transport:
 
 ```bash
 uv tool install "vecgrep[mcp] @ git+https://github.com/jeffbai996/vecgrep"
 vecgrep mcp
 ```
 
-Tools exposed:
-- `search(query, corpus?, top_k?, mode?, rerank?)` — returns ranked chunks with surrounding context as JSON
-- `list_corpora()` — every corpus and its stats
-- `get_corpus(name)` — one corpus's full metadata including source list, recency-decay setting, and the **filter schema**: which `filters` expressions are accepted (`source:`, `corpus:`, and every discovered `meta.KEY` with sample values) so a caller can pre-filter by actor/channel/date before semantic ranking
+The 19 tools are grouped by intent:
+
+| Intent | Tools |
+|---|---|
+| Find evidence | `search`, `timeline`, `incident`, `browse`, `related`, `compare` |
+| Expand and inspect | `get_chunk`, `get_source`, `stats`, `summarize_corpus`, `list_aliases` |
+| Discover corpora | `list_corpora`, `get_corpus` |
+| Direct, operator-scoped mutation | `write`, `edit` |
+| Human-confirmed mutation | `propose_write`, `propose_edit`, `propose_delete`, `propose_merge` |
+
+`get_corpus` includes source inventory, recency-decay state, and a discovered
+filter schema (`source:`, `corpus:`, and available `meta.KEY` fields with sample
+values), so a model can constrain retrieval before searching. `search` returns
+precise source anchors; breadth-mode stubs expand through `get_chunk`, while a
+whole document expands through `get_source`.
 
 Then index a corpus once (`vecgrep index ./my-notes --corpus notes`), and the model can call `search("rate hikes", corpus="notes")` instead of asking you to paste documents.
 
@@ -356,30 +405,31 @@ If `vecgrep` isn't on `PATH` (common when you installed it inside a venv), give 
 
 ### Remote MCP over HTTP (one server, many clients)
 
-`vecgrep serve` now exposes `/mcp` for streamable HTTP MCP clients alongside the existing `/api/*` REST routes. Same port, same bearer auth. This means a Claude Code CLI on a different machine can hit your vecgrep box without having to launch its own stdio subprocess (or maintain a separate index).
+`vecgrep serve` exposes `/mcp` alongside `/api/*`, so many clients can use one
+index. Authentication is intentionally separate: `VECGREP_API_TOKEN` gates the
+REST API, while MCP is either network-trusted (OAuth off) or protected by its
+own OAuth 2.1 flow (OAuth on).
 
-**Server side.** Bind to a non-loopback interface and set an API token:
+For a private LAN/VPN deployment, bind to the private interface and keep the
+endpoint inside that trust boundary:
 
 ```bash
-export VECGREP_API_TOKEN=$(openssl rand -hex 32)   # share this with clients
 vecgrep serve --host 0.0.0.0
 ```
 
-The default `api_host` is loopback — `--host 0.0.0.0` opens it to your LAN / VPN. Anything reachable from the network must have an `Authorization: Bearer <token>` header or it gets a 401. There is no off switch for the auth check once `VECGREP_API_TOKEN` is set; that's intentional.
-
 For TLS, run vecgrep behind whatever reverse proxy you already use — Tailscale Serve, Caddy, nginx — and let it terminate HTTPS. vecgrep itself is HTTP-only.
 
-**Client side.** Point Claude Code CLI at the remote endpoint with the bearer token in a header:
+Point an HTTP-capable client at the endpoint:
 
 ```bash
 claude mcp add --scope user --transport http vecgrep \
-  https://your-server.example/mcp \
-  --header "Authorization: Bearer $VECGREP_API_TOKEN"
+  https://your-private-server.example/mcp
 ```
 
 Verify with `claude mcp list` — should show `vecgrep: https://your-server.example/mcp (HTTP) - ✓ Connected`.
 
-The same URL + bearer token works for any MCP client that supports the streamable HTTP transport. Stdio clients (Claude Desktop, Cursor) keep using the local `vecgrep mcp` invocation above.
+Do not expose an OAuth-off MCP endpoint to the public internet. For a public
+remote client, enable OAuth as described below.
 
 ### Wiring into Claude Desktop / Cursor
 
@@ -403,74 +453,74 @@ Restart Claude Desktop after editing. Same shape works for Cursor's `~/.cursor/m
 
 ### Wiring into Claude.ai (web)
 
-Claude.ai's web app supports remote MCP servers (HTTP, not stdio). Use the same `vecgrep serve` HTTP endpoint described above and add it under Claude.ai → Settings → Connectors → Custom MCP server. The endpoint must be reachable from Anthropic's servers (so loopback or Tailscale-only addresses won't work — terminate TLS at a public hostname or skip Claude.ai web for this).
+Claude.ai's web app supports remote HTTP MCP servers and OAuth discovery. Set:
+
+```bash
+export VECGREP_OAUTH_ENABLED=1
+export VECGREP_OAUTH_ISSUER_URL=https://your-public-host.example/mcp
+vecgrep serve --host 0.0.0.0
+```
+
+Terminate TLS at the public hostname, then add that `/mcp` URL under Claude.ai
+→ Settings → Connectors → Custom MCP server. The client dynamically
+registers and runs the authorization-code + PKCE flow; there is no client ID or
+secret to copy. OAuth scopes are `read` and `propose`; no OAuth grant can bypass
+human confirmation. `/api/*` and local stdio are unaffected. See
+[docs/OAUTH.md](docs/OAUTH.md) for token lifetimes, proxy gotchas, revocation,
+and troubleshooting.
+
+## Writing through MCP
+
+Read access is broad; mutation is deliberately narrow. A fresh install exposes
+the write-shaped MCP tools, but none can silently mutate an arbitrary corpus.
+
+The default path is **propose → review → confirm**:
+
+1. `propose_write`, `propose_edit`, `propose_delete`, or `propose_merge`
+   creates an inert proposal under `$VECGREP_HOME/write/_pending`.
+2. The operator reviews it with `vecgrep pending`.
+3. `vecgrep confirm <proposal-id>` commits and re-indexes it, or
+   `vecgrep discard <proposal-id>` drops the proposal.
+
+Proposal corpora are default-deny. The agent's default proposal corpus is
+`claude-ai`; override it with `VECGREP_DEFAULT_PROPOSE_CORPUS`, and explicitly
+open additional corpora with comma-separated
+`VECGREP_PROPOSE_ALLOWED_CORPORA`. A proposal can optionally trigger an external
+notification command through `VECGREP_PROPOSE_HOOK`, but hook failure never
+changes proposal durability.
+
+Edits support three modes: full-body overwrite; a strict, unique
+`old_str` → `new_str` patch; or a metadata-only tags/source-kind change.
+`propose_merge` accepts two or more documents, keeps the first ID as canonical,
+replaces its body with the supplied synthesis, and deletes the absorbed IDs only
+after confirmation. New document IDs include a content hash, avoiding
+same-second collisions.
+
+For one plain local corpus, an operator can opt into immediate MCP `write` and
+`edit` with `VECGREP_DIRECT_WRITE_CORPUS=<name>`. The corpus name is absent from
+the tool schema, so the caller cannot redirect a write elsewhere. Direct writes
+are size- and rate-capped; direct edits preserve timestamped backups and refuse
+protected documents. Direct delete does not exist, and a corpus with an upstream
+write-through hook is refused. Tune the bounds with
+`VECGREP_DIRECT_WRITE_MAX_BYTES` and `VECGREP_DIRECT_WRITE_MAX_PER_HOUR`.
+
+Local humans can also write without MCP:
+
+```bash
+vecgrep write notes "A durable note" --source-kind fact --tag example
+vecgrep edit notes-<id> "Replacement body" --corpus notes
+```
 
 ## Roadmap
 
-The plan is short and ordered. Make search good first, connect it to where you actually work second, polish later.
+The historical checklist moved where history belongs:
+[CHANGELOG.md](CHANGELOG.md). Current candidates live in
+[docs/IDEAS.md](docs/IDEAS.md), including code-aware chunking, EPUB/DOCX, OCR,
+RSS, query rewriting, source TTLs, and a documented plugin API. The bias stays
+the same: retrieval quality and operational safety before format tourism.
 
-**v0.2 — search quality (in progress)**
-- ✅ Hybrid search (BM25 + vector + RRF), default on. Pure vector misses exact-token matches like CVE numbers, ticker symbols, function names; BM25 nails them.
-- ✅ Cross-encoder reranking (`--rerank`, off by default). Local; adds latency (see "How it works" for the tradeoff), so opt-in.
-
-**v0.3 — connect it**
-- ✅ MCP server: expose `vecgrep` as a tool to Claude / Cursor / any MCP client. Index a corpus once, let your assistant retrieve from it instead of stuffing context.
-- ✅ Discord JSONL adapter: drop in chat exports, search them as a corpus.
-- ✅ Claude / ChatGPT export adapters: search your own conversation history.
-
-**v0.4 — operate it like a tool**
-- ✅ Incremental indexing — content-hash skip
-- ✅ `vecgrep watch` — file-watcher
-- ✅ `vecgrep corpora export/import` — tarball roundtrip
-- ✅ Search filters — `--filter source:GLOB`, `corpus:NAME`, `meta.KEY=VALUE`
-
-**v0.5 — power features**
-- ✅ `--explain` — per-retriever score breakdown (cosine, BM25, RRF, rerank)
-- ✅ Embedding cache — sqlite-backed `(model, sha256(text)) → vector` cache, free re-indexes. Row-capped (oldest evicted first) so it can't grow without bound.
-- ✅ `vecgrep corpora migrate` — re-embed a corpus to a new backend / model in place
-- ✅ Bearer-token auth for `/api/*` — set `VECGREP_API_TOKEN` to lock down a remote-bound server
-
-**v0.6 — quality of life**
-- ✅ Test suite — hermetic pytest, service layer + stores + adapters + cache + migration. Caught three real bugs on first run.
-
-**v0.7 — search legibility + correctness**
-- ✅ Weighted RRF — BM25 gets `1.5×` over vector by default so genuine keyword hits float above the vector noise floor (`VECGREP_BM25_WEIGHT` overrides). Fixed the "rare token returns 1.6% noise" problem.
-- ✅ BM25-only display percentages rescaled per query — 25–100% band (tunable), ranking unchanged.
-- ✅ Web UI confidence tiers + match-method badges (V / K / VK) — see what's a literal hit, what's semantic, what's both.
-- ✅ In-page primers — index help dropdown, sidebar legend, BM25/vector explainer + "how search works" panel. All `<details>`, default closed.
-- ✅ Click-to-expand chunk context — each search result is clickable to lazy-fetch ±2000 chars around the chunk. Backed by `GET /api/chunk/{corpus}/{chunk_id}?window=N`.
-- ✅ Per-chunk `doc_timestamp` extraction + tunable per-corpus **recency decay** — stale chunks can't outrank fresh ones on wording alone (`vecgrep corpora decay`).
-- ✅ Model-aware confidence calibration — the displayed `%` means the same thing across embedding models; when reranking is on it's the cross-encoder's own score.
-- ✅ Post-retrieval dedup of overlapping same-source chunks.
-- ✅ BM25 partial-coverage **penalty** mode (default) — docs matching only some query tokens are kept but demoted `(matched/total)²`, instead of hard-dropped. An A/B on real corpora showed the old `filter` default returning zero hits on reasonable multi-token queries; `filter` is still available via `VECGREP_BM25_COVERAGE_MODE`.
-- ✅ Mixed-model serving — corpora on different embed models coexist; each queries with its own. (Was a hard-error before.)
-- ✅ Filter schema in `get_corpus` — the accepted `filters` expressions are now discoverable, not a black box.
-- `uvx vecgrep` verification + docs
-- Plugin API docs (the registries already work, just need an example)
-- Per-source TTL on URLs
-- Whole-machine `vecgrep backup` / `restore`
-- Confidence-gated rerank — auto-rerank only when the top hybrid hit is weak, getting rerank's quality rescue without taxing easy queries
-
-**Later**
-Code-aware adapter (tree-sitter), EPUB/DOCX, OCR fallback, RSS feeds, query-aware chunking, query rewriting, single-binary build. See [docs/IDEAS.md](docs/IDEAS.md) for the live list and a "won't do" section explaining what we've explicitly ruled out.
-
-**v1.0 — the memory-retrieval quality release (shipped)**
-- ✅ Source-span dedup / MMR diversity selection (bot-spam dups collapse)
-- ✅ Result budget + stub tier (8 full + token-capped stubs, ≤80 total)
-- ✅ Hard date/path/time/channel filters (fail-closed)
-- ✅ Timeline mode + incident object (chronological reconstruction)
-- ✅ Alias / entity expansion (config-driven, out-of-repo map)
-- ✅ relevance_pct + labels + precise line anchors
-- ✅ OAuth 2.1 on /mcp (embedded auth server, off by default)
-- ✅ Eval harness with committed baseline (improvements are measured, not vibes)
-- ✅ Locked HTTP API and CLI surface
-
-**post-1.0**
-- Migration tooling for embedding model upgrades
-- Documented plugin API for adapters, chunkers, embed backends, rerankers
-- Query-intent hints (fact-lookup / timeline / recap) tuning retrieval
-
-PRs welcome on anything in v0.2 or v0.3. For larger items in **Later**, open an issue first.
+PRs are welcome. For a larger addition, open an issue first so vecgrep remains
+a focused tool instead of slowly becoming Kubernetes for paragraphs.
 
 ## Why not just use X?
 
@@ -496,7 +546,12 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Tests live in `tests/` and run hermetically — no Ollama, no network, no shared `~/.vecgrep`. Each test gets its own `VECGREP_HOME` under `tmp_path` and a deterministic stub embedding backend. The suite covers the service layer, BM25 store, adapters, embedding cache, and migration — the surfaces where every shipped bug has lived. Skip if you don't care; the tooling itself doesn't require them.
+Tests live in `tests/` and run hermetically — no Ollama, no network, no shared
+`~/.vecgrep`. Each test gets its own `VECGREP_HOME` under `tmp_path` and a
+deterministic stub embedding backend. The suite covers retrieval and result
+assembly, filters and timelines, stores and adapters, caching and migration,
+backup/restore, OAuth, MCP tools, and guarded write workflows. Skip if you don't
+care; the tooling itself doesn't require them.
 
 ## License
 
