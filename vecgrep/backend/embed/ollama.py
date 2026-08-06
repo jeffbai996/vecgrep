@@ -72,9 +72,17 @@ class OllamaBackend(EmbedBackend):
         last_reason = ""
         for attempt in range(2):
             try:
+                # /api/embed, NOT the legacy /api/embeddings: the legacy
+                # endpoint IGNORES `truncate` and returns HTTP 500 ("the input
+                # length exceeds the context length") for any chunk longer than
+                # the model context. Those 500s then fell through to the
+                # zero-vector path below, so oversized chunks were stored but
+                # unreachable by semantic search (observed at scale against a
+                # local bge-m3 deployment). /api/embed honours truncate and
+                # clips the input to the window instead.
                 r = self._client.post(
-                    f"{self.base_url}/api/embeddings",
-                    json={"model": self.model, "prompt": text},
+                    f"{self.base_url}/api/embed",
+                    json={"model": self.model, "input": text, "truncate": True},
                 )
             except httpx.ConnectError as e:
                 raise EmbedBackendError(
@@ -100,9 +108,16 @@ class OllamaBackend(EmbedBackend):
                 continue
 
             data = r.json()
+            # /api/embed nests under "embeddings" (a list, one row per input);
+            # the legacy endpoint used a flat "embedding". Read both so a
+            # mixed-version Ollama cannot silently zero-vector every chunk.
             vec = data.get("embedding")
             if vec is None:
-                last_reason = f"response missing 'embedding' field: {str(data)[:120]}"
+                rows = data.get("embeddings")
+                if isinstance(rows, list) and rows:
+                    vec = rows[0]
+            if vec is None:
+                last_reason = f"response missing 'embeddings' field: {str(data)[:120]}"
                 continue
             if not _is_finite_vector(vec):
                 last_reason = "embedding contained NaN/inf"

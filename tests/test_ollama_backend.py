@@ -111,3 +111,43 @@ def test_bad_request_4xx_still_hard_fails() -> None:
         pass
     else:
         raise AssertionError("expected EmbedBackendError on 422")
+
+
+def test_uses_modern_embed_endpoint_with_truncate() -> None:
+    """The legacy /api/embeddings endpoint IGNORES `truncate` and 500s on any
+    input longer than the model context; /api/embed honours it and truncates.
+
+    That difference silently degraded real workloads: oversized chunks 500'd
+    twice and were then stored as ZERO VECTORS, i.e.
+    present for BM25 but unreachable by semantic search. Pin both the endpoint
+    and the payload shape so a refactor cannot quietly regress to the legacy one.
+    """
+    seen: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        seen["url"] = str(req.url)
+        seen["body"] = _json.loads(req.content)
+        return httpx.Response(200, json={"embeddings": [[0.3] * 1024]})
+
+    b = _backend_with_handler(handler)
+    out = b.embed(["hello"])
+
+    assert seen["url"].endswith("/api/embed"), f"legacy endpoint used: {seen['url']}"
+    assert seen["body"]["truncate"] is True, "truncate must be set or long chunks 500"
+    assert seen["body"]["input"] == "hello", "modern endpoint takes `input`, not `prompt`"
+    assert out[0] == [0.3] * 1024
+
+
+def test_oversized_chunk_is_truncated_not_zero_vectored() -> None:
+    """A chunk far longer than the context window must still yield a REAL
+    vector (Ollama truncates it), never the zero-vector degradation path."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"embeddings": [[0.7] * 1024]})
+
+    b = _backend_with_handler(handler)
+    out = b.embed(["word " * 20000])
+    assert out[0] == [0.7] * 1024
+    assert out[0] != [0.0] * 1024, "must not degrade to the zero-vector fallback"
