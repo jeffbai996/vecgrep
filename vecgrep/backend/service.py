@@ -296,6 +296,10 @@ class VecgrepService:
         chunker_name: str = "sentence_window",
         force: bool = False,
         include: str | None = None,
+        *,
+        bypass_embed_cache: bool | None = None,
+        update_bm25: bool = True,
+        update_registry: bool = True,
     ) -> tuple[int, int, int]:
         """Index a source into a corpus. Returns (docs, chunks, skipped).
 
@@ -348,7 +352,8 @@ class VecgrepService:
         # otherwise we just re-write identical vectors. The wrapped backend
         # has a `bypass` flag we toggle for the duration of this call.
         prev_bypass = getattr(backend, "bypass", None)
-        if force and hasattr(backend, "bypass"):
+        use_bypass = force if bypass_embed_cache is None else bypass_embed_cache
+        if use_bypass and hasattr(backend, "bypass"):
             backend.bypass = True
 
         total_docs = 0
@@ -367,7 +372,8 @@ class VecgrepService:
 
             # Wipe any prior version of this source so re-indexing is idempotent.
             self.store.delete_by_source(collection, doc.source_id)
-            self.bm25.delete_by_source(corpus_name, doc.source_id)
+            if update_bm25:
+                self.bm25.delete_by_source(corpus_name, doc.source_id)
 
             ids = [_chunk_id(corpus_name, doc.source_id, c.index) for c in chunks]
             vectors = backend.embed([c.text for c in chunks])
@@ -394,13 +400,22 @@ class VecgrepService:
             ]
             self.store.ensure_collection(collection, corpus.dim)
             self.store.upsert(collection, ids, vectors, payloads)
-            self.bm25.upsert(corpus_name, ids, [c.text for c in chunks], payloads)
+            if update_bm25:
+                self.bm25.upsert(corpus_name, ids, [c.text for c in chunks], payloads)
 
             total_docs += 1
             total_chunks += len(chunks)
             if doc.source_id not in corpus.sources:
                 corpus.sources.append(doc.source_id)
             corpus.source_hashes[doc.source_id] = doc_hash
+
+        # During recovery, do not persist an intermediate point count as the
+        # corpus's expected total. If interrupted, diagnose() must retain count
+        # drift instead of accepting a partial collection as healthy.
+        if not update_registry:
+            if prev_bypass is not None and hasattr(backend, "bypass"):
+                backend.bypass = prev_bypass
+            return total_docs, total_chunks, skipped
 
         corpus.doc_count = len(corpus.sources)
         # Recount from Qdrant (source of truth) rather than accumulating a delta.
@@ -1264,20 +1279,43 @@ class VecgrepService:
           Otherwise reported as "needs_reindex" so a human decides.
         - orphan_collection → left alone (rebuilding the registry row needs the
           original source; reported for a human to `vecgrep index` it back)."""
+        def rebuild_qdrant_only(corpus: Corpus) -> None:
+            for src in list(corpus.sources or []):
+                self.index(
+                    src,
+                    corpus.name,
+                    force=True,
+                    bypass_embed_cache=False,
+                    update_bm25=False,
+                    update_registry=False,
+                )
+            # Commit registry health only after every source has completed.
+            corpus.chunk_count = self.store.count(_collection_for(corpus.name))
+            corpus.doc_count = len(corpus.sources)
+            corpus.updated_at = time.time()
+            self.registry.upsert(corpus)
+
         actions: list[dict] = []
         for issue in self.diagnose():
             name, kind = issue["corpus"], issue["kind"]
             if kind == "count_drift":
                 c = self.registry.get(name)
-                c.chunk_count = self.store.count(_collection_for(name))
-                c.updated_at = time.time()
-                self.registry.upsert(c)
-                actions.append({"corpus": name, "kind": kind, "action": "recounted"})
+                sources = list(c.sources or [])
+                all_sources_exist = bool(sources) and all(_source_exists(src) for src in sources)
+                live = self.store.count(_collection_for(name))
+                if reindex and live < c.chunk_count and all_sources_exist:
+                    rebuild_qdrant_only(c)
+                    action = "reindexed"
+                else:
+                    c.chunk_count = live
+                    c.updated_at = time.time()
+                    self.registry.upsert(c)
+                    action = "recounted"
+                actions.append({"corpus": name, "kind": kind, "action": action})
             elif kind == "missing_collection":
                 if reindex and issue["fixable"]:
                     c = self.registry.get(name)
-                    for src in list(c.sources or []):
-                        self.index(src, name, force=True)
+                    rebuild_qdrant_only(c)
                     actions.append({"corpus": name, "kind": kind, "action": "reindexed"})
                 else:
                     actions.append({"corpus": name, "kind": kind, "action": "needs_reindex"})
