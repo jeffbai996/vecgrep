@@ -70,7 +70,15 @@ class QdrantStore:
             return
         self.client.create_collection(
             collection_name=name,
-            vectors_config=qm.VectorParams(size=dim, distance=qm.Distance.COSINE),
+            # Vecgrep corpora can grow well beyond available WSL RAM. Keep
+            # both vectors and the HNSW graph disk-backed so qdrant recovery
+            # does not fault an entire large collection into memory.
+            vectors_config=qm.VectorParams(
+                size=dim,
+                distance=qm.Distance.COSINE,
+                on_disk=True,
+            ),
+            hnsw_config=qm.HnswConfigDiff(on_disk=True),
         )
 
     def drop_collection(self, name: str) -> None:
@@ -210,4 +218,3 @@ class QdrantStore:
             ),
             wait=True,
         )
-
