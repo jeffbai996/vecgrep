@@ -6,8 +6,10 @@ Past bugs / risks covered:
 """
 from __future__ import annotations
 
+import sqlite3
+
 from vecgrep.backend.embed.base import EmbedBackend
-from vecgrep.backend.embed.cache import CachedBackend, EmbedCache
+from vecgrep.backend.embed.cache import DEFAULT_MAX_ROWS, CachedBackend, EmbedCache
 
 
 class _Counting(EmbedBackend):
@@ -84,24 +86,107 @@ def test_clear_drops_entries(tmp_path):
     assert cache.stats() == {}
 
 
-def test_cap_evicts_oldest_rows(tmp_path, monkeypatch):
-    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "5")
+def test_cap_evicts_least_recently_used(tmp_path, monkeypatch):
+    """Eviction is LRU, not insertion order.
+
+    This used to assert FIFO (drop the lowest rowid). That policy is actively
+    harmful: a sequential re-index walks a corpus in roughly insertion order,
+    so evicting the oldest rows drops precisely the entries the walk is about
+    to ask for. Reading an entry has to protect it.
+    """
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "10")
     cache = EmbedCache(tmp_path / "embed.db")
 
-    old = [f"old-{i}" for i in range(5)]
-    new = [f"new-{i}" for i in range(5)]
+    first = [f"first-{i}" for i in range(5)]
+    second = [f"second-{i}" for i in range(5)]
+    cache.put_many("id", first, [[float(i)] for i in range(5)])
+    cache.put_many("id", second, [[float(i)] for i in range(5)])
+    assert sum(cache.stats().values()) == 10
 
-    # First batch fills exactly to the cap — nothing evicted.
-    cache.put_many("id", old, [[float(i)] for i in range(5)])
-    assert sum(cache.stats().values()) == 5
+    # Touch the OLDER batch. Under FIFO these are next to die; under LRU the
+    # read makes them the freshest thing in the cache.
+    assert len(cache.get_many("id", first)) == 5
 
-    # Second batch pushes over — the 5 oldest (first batch) get dropped.
-    cache.put_many("id", new, [[float(i)] for i in range(5)])
-    assert sum(cache.stats().values()) == 5
+    third = [f"third-{i}" for i in range(5)]
+    cache.put_many("id", third, [[float(i)] for i in range(5)])
+    assert sum(cache.stats().values()) == 10
 
-    # Oldest gone, newest survive.
-    assert cache.get_many("id", old) == {}
-    assert len(cache.get_many("id", new)) == 5
+    assert len(cache.get_many("id", first)) == 5, "recently read rows must survive"
+    assert cache.get_many("id", second) == {}, "untouched rows are the eviction target"
+    assert len(cache.get_many("id", third)) == 5
+
+
+def test_warm_corpus_reindexes_without_embedding(tmp_path, monkeypatch):
+    """The whole point of the cache: repairing a corpus that is already warm
+    must not call the embedding backend at all. Holds only while the cap is at
+    least the corpus size -- see the thrash test below for what happens when it
+    is not."""
+    corpus = [f"chunk-{i:04d}" for i in range(60)]
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", str(len(corpus)))
+    cache = EmbedCache(tmp_path / "embed.db")
+    inner = _Counting()
+    cache.put_many(inner.identity, corpus, [[float(i)] for i in range(len(corpus))])
+
+    wrapped = CachedBackend(inner, cache)
+    for i in range(0, len(corpus), 10):
+        wrapped.embed(corpus[i : i + 10])
+
+    assert inner.calls == 0, "a warm corpus must re-index without any embedding"
+
+
+def test_cap_below_corpus_size_thrashes_every_pass(tmp_path, monkeypatch):
+    """Why the default cap must exceed a real corpus.
+
+    A cap smaller than the corpus cannot hold it, so a one-pass walk evicts
+    entries it has not reached yet and the next pass re-embeds everything. No
+    eviction policy saves this -- LRU protects entries that have been *read*,
+    and a repair walk has not read its pending entries yet. Sizing the cap is
+    the fix; this test exists so nobody "optimises" the cap back down and
+    quietly reintroduces a full re-embed on every repair.
+    """
+    corpus = [f"chunk-{i:04d}" for i in range(60)]
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "20")  # a third of the corpus
+    cache = EmbedCache(tmp_path / "embed.db")
+    inner = _Counting()
+    wrapped = CachedBackend(inner, cache)
+
+    for _ in range(2):
+        for i in range(0, len(corpus), 10):
+            wrapped.embed(corpus[i : i + 10])
+
+    # 6 batches per pass; an adequately sized cache would make pass 2 free.
+    assert inner.calls > 6, "undersized cache re-embeds on the second pass too"
+
+
+def test_legacy_db_without_last_used_migrates(tmp_path):
+    """An existing cache predates the LRU column and must not be thrown away."""
+    db = tmp_path / "embed.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE embed_cache (identity TEXT NOT NULL, text_sha TEXT NOT NULL, "
+        "vector TEXT NOT NULL, PRIMARY KEY (identity, text_sha))"
+    )
+    conn.execute(
+        "INSERT INTO embed_cache (identity, text_sha, vector) VALUES (?, ?, ?)",
+        ("fake:fake-1", EmbedCache._sha("legacy"), "[1.0, 0.0, 0.0, 0.0]"),
+    )
+    conn.commit()
+    conn.close()
+
+    cache = EmbedCache(db)
+    cols = {r[1] for r in cache._conn.execute("PRAGMA table_info(embed_cache)")}
+    assert "last_used" in cols
+    # The pre-existing row survives the migration and still serves a hit.
+    inner = _Counting()
+    assert CachedBackend(inner, cache).embed(["legacy"]) == [[1.0, 0.0, 0.0, 0.0]]
+    assert inner.calls == 0
+
+
+def test_default_cap_fits_a_large_corpus():
+    """Guard the constant. A cap below a real corpus makes the cache worse than
+    useless: the walk evicts its own pending hits and every repair re-embeds
+    from scratch. Transcript corpora reach hundreds of thousands of chunks."""
+    assert DEFAULT_MAX_ROWS >= 500_000
 
 
 def test_cap_disabled_when_nonpositive(tmp_path, monkeypatch):
