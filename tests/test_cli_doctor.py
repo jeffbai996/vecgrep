@@ -9,21 +9,26 @@ from vecgrep.cli.main import cli
 
 
 class _DoctorService:
-    def __init__(self) -> None:
+    def __init__(self, post_repair_issues=None) -> None:
         self.diagnose_scope = None
         self.reconcile_scope = None
         self.reindex = None
+        self.reconciled = False
+        self.post_repair_issues = post_repair_issues
 
     def list_corpora(self):
         return [SimpleNamespace(name="cli")]
 
     def diagnose(self, *, corpora=None):
         self.diagnose_scope = corpora
+        if self.reconciled and self.post_repair_issues is not None:
+            return self.post_repair_issues
         return [{"corpus": "cli", "kind": "count_drift", "detail": "short", "fixable": True}]
 
     def reconcile(self, *, reindex=False, corpora=None):
         self.reindex = reindex
         self.reconcile_scope = corpora
+        self.reconciled = True
         return [{"corpus": "cli", "kind": "count_drift", "action": "reindexed"}]
 
 
@@ -43,3 +48,28 @@ def test_doctor_fix_scopes_recovery_and_uses_read_only_cache(monkeypatch):
     assert service.diagnose_scope == {"cli"}
     assert service.reconcile_scope == {"cli"}
     assert service.reindex is True
+
+
+def test_doctor_require_healthy_succeeds_only_after_repair(monkeypatch):
+    service = _DoctorService(post_repair_issues=[])
+    monkeypatch.setattr("vecgrep.cli.main.VecgrepService", lambda **_: service)
+
+    result = CliRunner().invoke(
+        cli, ["doctor", "--fix", "--corpus", "cli", "--require-healthy"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert service.reconciled is True
+
+
+def test_doctor_require_healthy_fails_when_repair_is_incomplete(monkeypatch):
+    remaining = [{"corpus": "cli", "kind": "count_drift", "detail": "short", "fixable": True}]
+    service = _DoctorService(post_repair_issues=remaining)
+    monkeypatch.setattr("vecgrep.cli.main.VecgrepService", lambda **_: service)
+
+    result = CliRunner().invoke(
+        cli, ["doctor", "--fix", "--corpus", "cli", "--require-healthy"]
+    )
+
+    assert result.exit_code != 0
+    assert "still unhealthy" in result.output
