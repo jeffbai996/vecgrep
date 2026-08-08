@@ -767,6 +767,14 @@ class VecgrepService:
         if not positions:
             return None
         payload = idx.payloads[positions[0]]
+        # A recovery-built BM25 sidecar intentionally omits the duplicated
+        # full source document. Qdrant is the canonical payload store, so use
+        # it when available and retain BM25 only as the offline fallback.
+        qdrant_payload = self.store.get_by_id(
+            _collection_for(corpus.name), idx.ids[positions[0]]
+        )
+        if qdrant_payload is not None:
+            payload = qdrant_payload
         source_text = payload.get("source_text", "") or ""
         ts = payload.get("doc_timestamp")
         events = parse_events(source_text)
@@ -1057,6 +1065,8 @@ class VecgrepService:
             out = []
             max_score = max((s for _, s, _ in bm25_hits), default=0.0)
             for rank, (cid, score, payload) in enumerate(bm25_hits[:top_k]):
+                if not payload.get("source_text"):
+                    payload = self.store.get_by_id(collection, cid) or payload
                 r = _bm25_to_result(corpus.name, cid, score, payload, ["bm25"], max_score=max_score)
                 r.explain = {
                     "bm25_score": float(score),
@@ -1118,6 +1128,8 @@ class VecgrepService:
         out = []
         for cid, fused_score in fused:
             payload = payloads_by_id[cid]
+            if not payload.get("source_text"):
+                payload = self.store.get_by_id(collection, cid) or payload
             matched_by = sources.get(cid, [])
             # similarity_pct: pick the most informative signal for display.
             # When vector saw it, the calibrated cosine pct (after sigmoid)
@@ -1313,6 +1325,13 @@ class VecgrepService:
                     "detail": f"registry {c.chunk_count} vs vector store {live}",
                     "fixable": True,
                 })
+            if c.chunk_count > 0 and not self.bm25.exists(name):
+                issues.append({
+                    "corpus": name,
+                    "kind": "missing_bm25",
+                    "detail": f"registry has {c.chunk_count} chunks but the BM25 index is absent",
+                    "fixable": live > 0,
+                })
 
         # Orphan collections: in Qdrant under our prefix, absent from registry.
         for coll in self.store.list_collections():
@@ -1390,6 +1409,35 @@ class VecgrepService:
                 active=False,
             )
 
+        def rebuild_bm25_only(corpus: Corpus) -> None:
+            collection = _collection_for(corpus.name)
+            expected = self.store.count(collection)
+
+            def records():
+                for point_id, payload in self.store.iter_payloads(
+                    collection,
+                    exclude_payload_fields={"source_text"},
+                ):
+                    text = payload.get("text")
+                    if not isinstance(text, str):
+                        raise RuntimeError(
+                            f"cannot rebuild BM25 for {corpus.name}: {point_id} has no chunk text"
+                        )
+                    # Qdrant is the canonical source payload store. The
+                    # scroll omits source_text, which would otherwise repeat
+                    # the same large transcript once per chunk in both RAM
+                    # and the BM25 pickle. Search results hydrate their small
+                    # final set from Qdrant above, so the keyword sidecar only
+                    # needs text, IDs, filters, and chunk offsets.
+                    yield point_id, text, payload
+
+            rebuilt = self.bm25.replace(corpus.name, records())
+            if rebuilt != expected:
+                self.bm25.drop(corpus.name)
+                raise RuntimeError(
+                    f"BM25 rebuild for {corpus.name} read {rebuilt} points; expected {expected}"
+                )
+
         actions: list[dict] = []
         for issue in self.diagnose(corpora=corpora):
             name, kind = issue["corpus"], issue["kind"]
@@ -1412,6 +1460,12 @@ class VecgrepService:
                     c = self.registry.get(name)
                     rebuild_qdrant_only(c)
                     actions.append({"corpus": name, "kind": kind, "action": "reindexed"})
+                else:
+                    actions.append({"corpus": name, "kind": kind, "action": "needs_reindex"})
+            elif kind == "missing_bm25":
+                if issue["fixable"]:
+                    rebuild_bm25_only(self.registry.get(name))
+                    actions.append({"corpus": name, "kind": kind, "action": "rebuilt_bm25"})
                 else:
                     actions.append({"corpus": name, "kind": kind, "action": "needs_reindex"})
             else:  # orphan_collection

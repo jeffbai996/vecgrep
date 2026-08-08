@@ -1383,12 +1383,14 @@ def doctor(
 ) -> None:
     """Reconcile the corpus registry against the vector store.
 
-    Catches the three ways they drift apart: a corpus a Qdrant restart wiped
-    (registry says N chunks, store has 0), a chunk_count that drifted, and an
-    orphan collection with no registry entry. Read-only by default — pass --fix
-    to recount drift and re-index any wiped corpus from its recorded sources
-    (orphans are reported for a manual `vecgrep index`, since rebuilding the
-    registry row needs the original source).
+    Catches vector-store drift plus a missing BM25 sidecar: a corpus a Qdrant
+    restart wiped (registry says N chunks, store has 0), a chunk_count that
+    drifted, an orphan collection with no registry entry, or a missing keyword
+    index. Read-only by default — pass --fix to recount drift, re-index any
+    wiped corpus from its recorded sources, and rebuild a missing BM25 index
+    from existing Qdrant payloads without embedding again (orphans are reported
+    for a manual `vecgrep index`, since rebuilding the registry row needs the
+    original source).
 
     Run it after a Qdrant/host restart, or on a timer, so a wiped corpus
     surfaces immediately instead of silently returning nothing at search time.

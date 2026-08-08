@@ -74,6 +74,22 @@ def test_persistence_round_trip(tmp_path):
     assert hits[0][0] == "1"
 
 
+def test_cached_empty_index_reloads_when_a_rebuild_appears(tmp_path):
+    """A long-lived API worker sees an atomically rebuilt index without restart."""
+    reader = BM25Store(tmp_path)
+    assert reader.search("demo", "quartzite", top_k=3) == []
+
+    writer = BM25Store(tmp_path)
+    writer.replace(
+        "demo",
+        [("1", "Quartzite is now keyword-searchable", {"source_id": "/x"})],
+    )
+
+    hits = reader.search("demo", "quartzite", top_k=3)
+    assert hits
+    assert hits[0][0] == "1"
+
+
 def test_drop_removes_pickle(tmp_path):
     store = BM25Store(tmp_path)
     store.upsert(

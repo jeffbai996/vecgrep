@@ -142,6 +142,33 @@ def test_diagnose_flags_count_drift_and_reconcile_recounts(svc, make_doc):
     assert svc.diagnose() == []
 
 
+def test_reconcile_rebuilds_missing_bm25_from_qdrant(svc, make_doc):
+    """A vector-only recovery must restore exact-keyword retrieval too.
+
+    Qdrant stores each chunk's text and payload, so rebuilding BM25 from those
+    live points must not re-embed or re-ingest the original source files.
+    """
+    p = make_doc("doc.md", "Quartzite is the exact keyword this corpus needs.")
+    svc.index(str(p), "test")
+    svc.bm25.drop("test")
+
+    assert any(i["kind"] == "missing_bm25" for i in svc.diagnose())
+
+    actions = svc.reconcile()
+
+    assert actions == [{"corpus": "test", "kind": "missing_bm25", "action": "rebuilt_bm25"}]
+    assert svc.diagnose() == []
+    hits = svc.search("quartzite", "test", top_k=3, mode="bm25")
+    assert hits
+    assert hits[0].matched_by == ["bm25"]
+    # The redundant full source stays in Qdrant, not duplicated into every
+    # rebuilt BM25 chunk; source expansion still fetches the canonical copy.
+    assert "source_text" not in svc.bm25._load("test").payloads[0]
+    source = svc.get_source("test", str(p.resolve()))
+    assert source is not None
+    assert source["text"] == p.read_text()
+
+
 def test_reconcile_can_be_scoped_to_one_corpus(svc, make_doc):
     """A targeted recovery must not repair unrelated live corpora.
 
