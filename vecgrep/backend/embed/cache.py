@@ -70,6 +70,17 @@ class EmbedCache:
         # check_same_thread=False because the FastAPI server may serve
         # concurrent requests; the lock below serializes writes.
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        # This file is shared by every vecgrep process on the box -- the serve
+        # daemon, the watchers, and any one-shot reindex, all at once. In the
+        # default rollback-journal mode a single writer takes an EXCLUSIVE lock
+        # that blocks readers outright, so once get_many started touching
+        # last_used (LRU), concurrent readers began failing with "database is
+        # locked" and killed a long recovery run mid-flight. WAL lets readers
+        # continue while one process writes; busy_timeout makes the writers
+        # themselves queue instead of raising.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=10000")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(_SCHEMA)
         self._migrate_last_used()
         self._conn.execute(_LRU_INDEX)
@@ -124,8 +135,21 @@ class EmbedCache:
             if out:
                 # A read is what makes an entry worth keeping. One UPDATE per
                 # batch, not per row, so this stays cheap on the hot path.
-                self._touch_locked(identity, list(out))
-                self._conn.commit()
+                #
+                # BEST EFFORT, always. This is bookkeeping for the eviction
+                # order -- losing it costs nothing but a slightly worse choice
+                # of victim later. Letting it raise costs a whole reindex, which
+                # is exactly what happened when contention on the shared cache
+                # first surfaced. A cache lookup must never be able to fail the
+                # embed it was supposed to make cheaper.
+                try:
+                    self._touch_locked(identity, list(out))
+                    self._conn.commit()
+                except sqlite3.Error:
+                    try:
+                        self._conn.rollback()
+                    except sqlite3.Error:
+                        pass
         return out
 
     def _touch_locked(self, identity: str, shas: list[str]) -> None:

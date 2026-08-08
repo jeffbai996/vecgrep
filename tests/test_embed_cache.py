@@ -195,3 +195,52 @@ def test_cap_disabled_when_nonpositive(tmp_path, monkeypatch):
     texts = [f"t{i}" for i in range(20)]
     cache.put_many("id", texts, [[float(i)] for i in range(20)])
     assert sum(cache.stats().values()) == 20
+
+
+# ─────────── concurrency (added 2026-08-07, after a live failure) ───────────
+# The cache file is shared by every vecgrep process on a host: the serve
+# daemon, the watchers, and any one-shot reindex. When get_many started
+# touching last_used for LRU it turned every READER into a WRITER, and in
+# sqlite's default rollback-journal mode one writer takes an EXCLUSIVE lock
+# that shuts readers out. A long corpus recovery died mid-run on
+# "sqlite3.OperationalError: database is locked" raised from a plain SELECT.
+
+def test_reader_survives_a_concurrent_writer_holding_a_transaction(tmp_path):
+    db = tmp_path / "embed.db"
+    reader = EmbedCache(db)
+    reader.put_many("id", ["a", "b"], [[1.0], [2.0]])
+
+    # A second process mid-write, holding the lock.
+    other = sqlite3.connect(str(db))
+    other.execute("PRAGMA busy_timeout=10000")
+    other.execute("BEGIN IMMEDIATE")
+    other.execute(
+        "INSERT OR REPLACE INTO embed_cache (identity, text_sha, vector, last_used) "
+        "VALUES (?, ?, ?, ?)",
+        ("id", EmbedCache._sha("c"), "[3.0]", 1),
+    )
+    try:
+        # Must still serve the hit rather than raising.
+        got = reader.get_many("id", ["a", "b"])
+        assert len(got) == 2
+    finally:
+        other.rollback()
+        other.close()
+
+
+def test_cache_uses_wal_so_readers_do_not_block(tmp_path):
+    cache = EmbedCache(tmp_path / "embed.db")
+    mode = cache._conn.execute("PRAGMA journal_mode").fetchone()[0]
+    assert mode.lower() == "wal"
+
+
+def test_touch_failure_never_breaks_a_lookup(tmp_path, monkeypatch):
+    """Eviction bookkeeping is optional; the vector it returns is not."""
+    cache = EmbedCache(tmp_path / "embed.db")
+    cache.put_many("id", ["a"], [[9.0]])
+
+    def boom(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(cache, "_touch_locked", boom)
+    assert cache.get_many("id", ["a"]) == {EmbedCache._sha("a"): [9.0]}
