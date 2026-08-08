@@ -19,6 +19,12 @@ _KNOWN_DIMS = {
 }
 
 
+# Chunks per /api/embed request. Big enough that round-trip latency stops
+# dominating, small enough that one poison chunk only costs a re-embed of its
+# own window on the fallback path rather than the whole document.
+_MAX_BATCH = 64
+
+
 def _is_finite_vector(vec: list[float]) -> bool:
     """True only if every component is a finite number (no NaN/inf)."""
     return bool(vec) and all(math.isfinite(x) for x in vec)
@@ -51,10 +57,68 @@ class OllamaBackend(EmbedBackend):
         return len(vec)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch, falling back to one-at-a-time only when it fails.
+
+        This used to be a plain per-chunk loop. /api/embed accepts an array, so
+        that spent one HTTP round trip per chunk: measured against a live
+        bge-m3, the endpoint served 32 inputs in 0.5s (~67/s) while a corpus
+        rebuild driven by the loop moved ~5.7/s. The ~12x gap was round-trip
+        overhead, not the GPU -- a full rebuild spent a night on work the
+        backend could do in an hour.
+
+        The per-chunk path is still the fallback, because it is the only thing
+        that isolates a poison chunk (bge-m3 500s on some inputs). Fast path
+        when the batch is clean, slow path when it is not.
+        """
+        if not texts:
+            return []
         out: list[list[float]] = []
-        for t in texts:
-            out.append(self._embed_one_resilient(t))
+        for i in range(0, len(texts), _MAX_BATCH):
+            window = texts[i : i + _MAX_BATCH]
+            rows = self._embed_batch(window)
+            if rows is None:
+                rows = [self._embed_one_resilient(t) for t in window]
+            out.extend(rows)
         return out
+
+    def _embed_batch(self, texts: list[str]) -> list[list[float]] | None:
+        """One request for the whole window. None means "use the slow path".
+
+        Anything short of a clean, correctly-sized, all-finite answer returns
+        None rather than guessing. In particular a row count that does not
+        match the input count is NEVER zipped onto the inputs: pairing 3
+        returned vectors with 4 chunks would attach the wrong embedding to the
+        wrong text, which raises no error and only shows up much later as
+        nonsense search results. Re-embedding per chunk is cheap next to
+        silently corrupting a corpus.
+        """
+        try:
+            r = self._client.post(
+                f"{self.base_url}/api/embed",
+                json={"model": self.model, "input": texts, "truncate": True},
+            )
+        except httpx.ConnectError as e:
+            # An unreachable backend is a whole-backend problem, not a batch
+            # quirk — surface it now instead of retrying it len(texts) times.
+            raise EmbedBackendError(
+                f"Could not reach Ollama at {self.base_url}. "
+                "Start it with `ollama serve` (or set VECGREP_OLLAMA_URL)."
+            ) from e
+        except httpx.HTTPError:
+            return None
+        if r.status_code != 200:
+            # Let the per-chunk path decide: it already distinguishes a fatal
+            # 404/4xx from a transient 5xx, so error messages stay identical.
+            return None
+        try:
+            rows = r.json().get("embeddings")
+        except ValueError:
+            return None
+        if not isinstance(rows, list) or len(rows) != len(texts):
+            return None
+        if not all(_is_finite_vector(v) for v in rows):
+            return None
+        return rows
 
     def _embed_one_resilient(self, text: str) -> list[float]:
         """Embed one chunk, tolerating per-chunk NaN failures.
