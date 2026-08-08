@@ -56,7 +56,12 @@ def test_nan_500_chunk_falls_back_to_zero_vector_not_abort() -> None:
     assert out[0] == [0.2] * 1024
     assert out[2] == [0.2] * 1024
     assert out[1] == [0.0] * 1024  # bad chunk -> zero vector
-    assert calls["n"] == 2  # tried twice (initial + one retry) before giving up
+    # 3, not 2: the batched fast path attempts the window once and its 500
+    # sends the whole window down the per-chunk path, where the bad chunk is
+    # tried twice (initial + one retry) before giving up. The isolation this
+    # test exists to prove -- good chunks survive, poison degrades to a zero
+    # vector -- is asserted above and unchanged.
+    assert calls["n"] == 3
 
 
 def test_nan_in_vector_payload_falls_back() -> None:
@@ -136,7 +141,11 @@ def test_uses_modern_embed_endpoint_with_truncate() -> None:
 
     assert seen["url"].endswith("/api/embed"), f"legacy endpoint used: {seen['url']}"
     assert seen["body"]["truncate"] is True, "truncate must be set or long chunks 500"
-    assert seen["body"]["input"] == "hello", "modern endpoint takes `input`, not `prompt`"
+    # `input`, never the legacy `prompt`. It is a LIST because the backend
+    # batches; /api/embed accepts a bare string or an array, and this test is
+    # pinning the endpoint and truncate flag, not which of the two shapes.
+    assert "prompt" not in seen["body"], "legacy `prompt` key must not come back"
+    assert seen["body"]["input"] == ["hello"]
     assert out[0] == [0.3] * 1024
 
 
@@ -151,3 +160,93 @@ def test_oversized_chunk_is_truncated_not_zero_vectored() -> None:
     out = b.embed(["word " * 20000])
     assert out[0] == [0.7] * 1024
     assert out[0] != [0.0] * 1024, "must not degrade to the zero-vector fallback"
+
+
+# ─────────────── batching (added 2026-08-07) ───────────────
+# The backend used to issue one HTTP request PER CHUNK. Measured against a
+# live bge-m3 the endpoint served 32 inputs in 0.5s (~67/s) while a corpus
+# rebuild driven by the per-chunk loop moved ~5.7/s -- a ~12x gap that was
+# pure round-trip overhead, not GPU. Batching closes it, but must not lose
+# the per-chunk isolation the tests above pin.
+
+def _rows(vecs: list[list[float]]) -> httpx.Response:
+    return httpx.Response(200, json={"embeddings": vecs})
+
+
+def test_batch_sends_one_request_for_many_chunks() -> None:
+    good = [0.1] * 1024
+    seen = {"n": 0, "inputs": None}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["n"] += 1
+        import json as _j
+        seen["inputs"] = _j.loads(req.content)["input"]
+        return _rows([good] * len(seen["inputs"]))
+
+    b = _backend_with_handler(handler)
+    out = b.embed([f"chunk-{i}" for i in range(32)])
+    assert len(out) == 32
+    assert seen["n"] == 1, "32 chunks must cost one request, not 32"
+    assert isinstance(seen["inputs"], list) and len(seen["inputs"]) == 32
+
+
+def test_batch_response_with_wrong_row_count_never_misaligns() -> None:
+    """A short/long batch answer must NOT be zipped onto the inputs.
+
+    Silently pairing 3 returned vectors with 4 chunks would attach the wrong
+    embedding to the wrong text -- corruption that no error surfaces and that
+    only shows up later as nonsense search results. Fall back to per-chunk,
+    where each vector is provably the one for its own input.
+    """
+    good = [0.2] * 1024
+    calls = {"batch": 0, "single": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        import json as _j
+        payload = _j.loads(req.content)["input"]
+        if isinstance(payload, list):
+            calls["batch"] += 1
+            return _rows([good] * (len(payload) - 1))   # one row short
+        calls["single"] += 1
+        return _ok(good)
+
+    b = _backend_with_handler(handler)
+    out = b.embed(["a", "b", "c", "d"])
+    assert len(out) == 4
+    assert all(v == good for v in out)
+    assert calls["single"] == 4, "a mismatched batch must re-embed per chunk"
+
+
+def test_batch_failure_falls_back_and_still_isolates_a_poison_chunk() -> None:
+    """Batch 500s (the NaN case, now at batch scope) -> per-chunk path runs,
+    and the one bad chunk still degrades to a zero vector instead of taking
+    the whole document with it."""
+    good = [0.3] * 1024
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        import json as _j
+        payload = _j.loads(req.content)["input"]
+        if isinstance(payload, list):
+            return httpx.Response(500, text="unsupported value: NaN")
+        if payload == "poison":
+            return httpx.Response(500, text="unsupported value: NaN")
+        return _ok(good)
+
+    b = _backend_with_handler(handler)
+    out = b.embed(["a", "poison", "b"])
+    assert len(out) == 3
+    assert out[0] == good and out[2] == good
+    assert all(x == 0.0 for x in out[1]), "poison chunk degrades to zero vector"
+
+
+def test_batch_connect_error_still_hard_fails() -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    b = _backend_with_handler(handler)
+    try:
+        b.embed(["a", "b"])
+    except EmbedBackendError as e:
+        assert "Could not reach Ollama" in str(e)
+    else:
+        raise AssertionError("an unreachable backend must not be swallowed")
