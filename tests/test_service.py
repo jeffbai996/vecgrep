@@ -10,6 +10,8 @@ Covers:
 """
 from __future__ import annotations
 
+import json
+
 from tests.conftest import StubEmbed
 
 
@@ -138,6 +140,101 @@ def test_diagnose_flags_count_drift_and_reconcile_recounts(svc, make_doc):
     from vecgrep.backend.service import _collection_for
     assert svc.list_corpora()[0].chunk_count == svc.store.count(_collection_for("test"))
     assert svc.diagnose() == []
+
+
+def test_reconcile_can_be_scoped_to_one_corpus(svc, make_doc):
+    """A targeted recovery must not repair unrelated live corpora.
+
+    A broad doctor run once chose the active chats corpus before the broken CLI
+    corpus.  The selection belongs in the service layer so every caller gets
+    the same hard boundary, not merely a CLI-level filter.
+    """
+    from vecgrep.backend.service import _collection_for
+
+    first = make_doc("first.md", "First corpus sentence. Another first sentence.")
+    second = make_doc("second.md", "Second corpus sentence. Another second sentence.")
+    svc.index(str(first), "first")
+    svc.index(str(second), "second")
+
+    for name in ("first", "second"):
+        corpus = svc.registry.get(name)
+        corpus.chunk_count = 999
+        svc.registry.upsert(corpus)
+
+    issues = svc.diagnose(corpora={"first"})
+    assert [issue["corpus"] for issue in issues] == ["first"]
+
+    svc.reconcile(corpora={"first"})
+    assert svc.registry.get("first").chunk_count == svc.store.count(_collection_for("first"))
+    assert svc.registry.get("second").chunk_count == 999
+
+
+def test_recovery_reuses_partial_points_without_source_delete(svc, make_doc, monkeypatch):
+    """A partial rebuild resumes by deterministic IDs, not repeated full scans.
+
+    `source_id` is not indexed in Qdrant.  Deleting by that field before every
+    recovered source turns a 2k-source repair into thousands of collection
+    scans, even though the deterministic point IDs make a same-snapshot upsert
+    idempotent already.
+    """
+    from vecgrep.backend.service import _collection_for
+
+    first = make_doc("first.md", "First corpus sentence. Another first sentence.")
+    second = make_doc("second.md", "Second corpus sentence. Another second sentence.")
+    svc.index(str(first), "test")
+    svc.index(str(second), "test")
+    svc.store.delete_by_source(_collection_for("test"), str(second.resolve()))
+
+    def source_delete_would_scan(*_args, **_kwargs):
+        raise AssertionError("partial recovery must not delete by source")
+
+    monkeypatch.setattr(svc.store, "delete_by_source", source_delete_would_scan)
+    actions = svc.reconcile(reindex=True, corpora={"test"})
+
+    assert actions == [{"corpus": "test", "kind": "count_drift", "action": "reindexed"}]
+    assert svc.diagnose(corpora={"test"}) == []
+
+
+def test_recovery_skips_a_complete_source_already_in_qdrant(svc, make_doc, monkeypatch):
+    """Resume only source files whose deterministic points are incomplete."""
+    from vecgrep.backend.service import _collection_for
+
+    first = make_doc("first.md", "First corpus sentence. Another first sentence.")
+    second = make_doc("second.md", "Second corpus sentence. Another second sentence.")
+    svc.index(str(first), "test")
+    svc.index(str(second), "test")
+    svc.store.delete_by_source(_collection_for("test"), str(second.resolve()))
+
+    upserted_sources = []
+    original_upsert = svc.store.upsert
+
+    def record_upsert(collection, ids, vectors, payloads):
+        upserted_sources.extend(payload["source_id"] for payload in payloads)
+        return original_upsert(collection, ids, vectors, payloads)
+
+    monkeypatch.setattr(svc.store, "upsert", record_upsert)
+    svc.reconcile(reindex=True, corpora={"test"})
+
+    assert str(first.resolve()) not in upserted_sources
+    assert str(second.resolve()) in upserted_sources
+
+
+def test_recovery_persists_completed_progress(svc, make_doc, vg_home):
+    """A watchdog can distinguish real recovery work from a stuck process."""
+    from vecgrep.backend.service import _collection_for
+
+    doc = make_doc("doc.md", "Recovery progress must be durable.")
+    svc.index(str(doc), "test")
+    svc.store.drop_collection(_collection_for("test"))
+
+    svc.reconcile(reindex=True, corpora={"test"})
+
+    progress = json.loads((vg_home / "recovery-progress.json").read_text())
+    assert progress["corpus"] == "test"
+    assert progress["source_done"] == progress["sources_total"] == 1
+    assert progress["chunks_done"] == svc.store.count(_collection_for("test"))
+    assert progress["active"] is False
+    assert progress["last_progress_at"] > 0
 
 
 def test_hybrid_search_includes_both_retrievers(svc, make_doc):

@@ -65,26 +65,38 @@ def _max_rows() -> int:
 
 
 class EmbedCache:
-    def __init__(self, db_path: Path) -> None:
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        # check_same_thread=False because the FastAPI server may serve
-        # concurrent requests; the lock below serializes writes.
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        # This file is shared by every vecgrep process on the box -- the serve
-        # daemon, the watchers, and any one-shot reindex, all at once. In the
-        # default rollback-journal mode a single writer takes an EXCLUSIVE lock
-        # that blocks readers outright, so once get_many started touching
-        # last_used (LRU), concurrent readers began failing with "database is
-        # locked" and killed a long recovery run mid-flight. WAL lets readers
-        # continue while one process writes; busy_timeout makes the writers
-        # themselves queue instead of raising.
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=10000")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.executescript(_SCHEMA)
-        self._migrate_last_used()
-        self._conn.execute(_LRU_INDEX)
-        self._conn.commit()
+    def __init__(self, db_path: Path, *, read_only: bool = False) -> None:
+        self._read_only = read_only
+        if read_only:
+            # A repair needs the warm vectors, not cache bookkeeping. Opening
+            # this connection as SQLite read-only prevents a large reindex from
+            # competing with live serving/watchers for a write transaction.
+            self._conn = sqlite3.connect(
+                f"{db_path.resolve().as_uri()}?mode=ro",
+                uri=True,
+                check_same_thread=False,
+            )
+            self._conn.execute("PRAGMA busy_timeout=10000")
+        else:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            # check_same_thread=False because the FastAPI server may serve
+            # concurrent requests; the lock below serializes writes.
+            self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            # This file is shared by every vecgrep process on the box -- the serve
+            # daemon, the watchers, and any one-shot reindex, all at once. In the
+            # default rollback-journal mode a single writer takes an EXCLUSIVE lock
+            # that blocks readers outright, so once get_many started touching
+            # last_used (LRU), concurrent readers began failing with "database is
+            # locked" and killed a long recovery run mid-flight. WAL lets readers
+            # continue while one process writes; busy_timeout makes the writers
+            # themselves queue instead of raising.
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=10000")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.executescript(_SCHEMA)
+            self._migrate_last_used()
+            self._conn.execute(_LRU_INDEX)
+            self._conn.commit()
         self._lock = threading.Lock()
         # Resolved once per instance so tests can set the env before construction.
         self._max_rows = _max_rows()
@@ -132,7 +144,7 @@ class EmbedCache:
                 )
                 for sha, vec_json in cur.fetchall():
                     out[sha] = json.loads(vec_json)
-            if out:
+            if out and not self._read_only:
                 # A read is what makes an entry worth keeping. One UPDATE per
                 # batch, not per row, so this stays cheap on the hot path.
                 #
@@ -166,6 +178,8 @@ class EmbedCache:
 
     def put_many(self, identity: str, texts: list[str], vectors: list[list[float]]) -> None:
         if not texts:
+            return
+        if self._read_only:
             return
         now = self._now()
         rows = [
@@ -215,6 +229,8 @@ class EmbedCache:
             return {row[0]: row[1] for row in cur.fetchall()}
 
     def clear(self, identity: str | None = None) -> int:
+        if self._read_only:
+            raise RuntimeError("embed cache is read-only")
         with self._lock:
             if identity:
                 cur = self._conn.execute(

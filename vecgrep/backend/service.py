@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import json
 import math
 import os
 import re
@@ -204,7 +205,12 @@ class SearchResult:
 
 
 class VecgrepService:
-    def __init__(self, settings: Settings | None = None, ephemeral: bool = False) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        ephemeral: bool = False,
+        embed_cache_read_only: bool = False,
+    ) -> None:
         self.settings = settings or get_settings()
         self.ephemeral = ephemeral
         self.registry = CorpusRegistry(self.settings.corpora_file)
@@ -218,7 +224,10 @@ class VecgrepService:
         # is opt-in per backend in _backend_for() so tests / mocks can
         # bypass it by sticking a backend directly into _backend_cache.
         self._embed_cache: EmbedCache | None = (
-            None if ephemeral else EmbedCache(self.settings.home / "embed_cache.db")
+            None if ephemeral else EmbedCache(
+                self.settings.home / "embed_cache.db",
+                read_only=embed_cache_read_only,
+            )
         )
 
     # ----- backend resolution ---------------------------------------------------
@@ -300,6 +309,8 @@ class VecgrepService:
         bypass_embed_cache: bool | None = None,
         update_bm25: bool = True,
         update_registry: bool = True,
+        replace_existing: bool = True,
+        resume_source_counts: dict[str, int] | None = None,
     ) -> tuple[int, int, int]:
         """Index a source into a corpus. Returns (docs, chunks, skipped).
 
@@ -365,13 +376,30 @@ class VecgrepService:
                 continue
 
             doc_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
+            matches_recorded_source = corpus.source_hashes.get(doc.source_id) == doc_hash
+            if (
+                resume_source_counts is not None
+                and matches_recorded_source
+                and resume_source_counts.get(doc.source_id) == len(chunks)
+            ):
+                # This source already has every deterministic point for the
+                # exact content recorded in the registry. Leave it alone.
+                skipped += 1
+                continue
             if not force and corpus.source_hashes.get(doc.source_id) == doc_hash:
                 # Already indexed at this exact content — skip embed call.
                 skipped += 1
                 continue
 
-            # Wipe any prior version of this source so re-indexing is idempotent.
-            self.store.delete_by_source(collection, doc.source_id)
+            # Normal re-indexing removes a prior version so a source that
+            # shrank cannot leave old tail chunks behind. A partial Qdrant
+            # recovery can skip that scan: point IDs are deterministic for the
+            # same corpus/source/chunk index, so upsert overwrites completed
+            # sources and fills only the missing points.
+            if replace_existing and not (
+                resume_source_counts is not None and matches_recorded_source
+            ):
+                self.store.delete_by_source(collection, doc.source_id)
             if update_bm25:
                 self.bm25.delete_by_source(corpus_name, doc.source_id)
 
@@ -1217,7 +1245,31 @@ class VecgrepService:
     def list_corpora(self) -> list[Corpus]:
         return self.registry.list()
 
-    def diagnose(self) -> list[dict]:
+    def _record_recovery_progress(
+        self,
+        corpus: Corpus,
+        *,
+        source_done: int,
+        sources_total: int,
+        chunks_done: int,
+        active: bool,
+    ) -> None:
+        """Atomically publish coarse recovery progress for an off-box monitor."""
+        path = self.settings.home / "recovery-progress.json"
+        payload = {
+            "corpus": corpus.name,
+            "source_done": source_done,
+            "sources_total": sources_total,
+            "chunks_done": chunks_done,
+            "last_progress_at": time.time(),
+            "active": active,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.tmp")
+        temporary.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(temporary, path)
+
+    def diagnose(self, *, corpora: set[str] | None = None) -> list[dict]:
         """Reconcile the registry against the vector store — the check that
         catches a corpus a Qdrant flap wiped, a count that drifted, or an
         orphan collection with no registry entry. One dict per issue found:
@@ -1235,7 +1287,12 @@ class VecgrepService:
 
         Read-only. `reconcile()` acts on what this reports."""
         issues: list[dict] = []
-        registered = {c.name: c for c in self.registry.list()}
+        selected = set(corpora or ())
+        registered = {
+            c.name: c
+            for c in self.registry.list()
+            if not selected or c.name in selected
+        }
 
         for name, c in registered.items():
             live = self.store.count(_collection_for(name))
@@ -1260,7 +1317,12 @@ class VecgrepService:
         # Orphan collections: in Qdrant under our prefix, absent from registry.
         for coll in self.store.list_collections():
             cname = _corpus_from_collection(coll)
-            if cname and cname not in registered and self.store.count(coll) > 0:
+            if (
+                cname
+                and (not selected or cname in selected)
+                and cname not in registered
+                and self.store.count(coll) > 0
+            ):
                 issues.append({
                     "corpus": cname,
                     "kind": "orphan_collection",
@@ -1269,18 +1331,32 @@ class VecgrepService:
                 })
         return issues
 
-    def reconcile(self, *, reindex: bool = False) -> list[dict]:
+    def reconcile(
+        self,
+        *,
+        reindex: bool = False,
+        corpora: set[str] | None = None,
+    ) -> list[dict]:
         """Repair what diagnose() finds. Returns the actions taken (one dict per
         issue: {corpus, kind, action}).
 
         - count_drift → recount chunk_count from Qdrant (cheap, always safe).
         - missing_collection → only re-index from recorded sources when
           `reindex=True` AND every source still exists (embeds — not free).
-          Otherwise reported as "needs_reindex" so a human decides.
+        Otherwise reported as "needs_reindex" so a human decides.
         - orphan_collection → left alone (rebuilding the registry row needs the
           original source; reported for a human to `vecgrep index` it back)."""
         def rebuild_qdrant_only(corpus: Corpus) -> None:
-            for src in list(corpus.sources or []):
+            resume_source_counts = self.store.source_counts(_collection_for(corpus.name))
+            sources = list(corpus.sources or [])
+            self._record_recovery_progress(
+                corpus,
+                source_done=0,
+                sources_total=len(sources),
+                chunks_done=self.store.count(_collection_for(corpus.name)),
+                active=True,
+            )
+            for source_done, src in enumerate(sources, start=1):
                 self.index(
                     src,
                     corpus.name,
@@ -1288,15 +1364,34 @@ class VecgrepService:
                     bypass_embed_cache=False,
                     update_bm25=False,
                     update_registry=False,
+                    resume_source_counts=resume_source_counts,
                 )
+                # Every source is a durable resume point. Avoid thousands of
+                # point-count calls during a normal run while still updating a
+                # monitor much more often than its ten-minute stale threshold.
+                if source_done % 16 == 0 or source_done == len(sources):
+                    self._record_recovery_progress(
+                        corpus,
+                        source_done=source_done,
+                        sources_total=len(sources),
+                        chunks_done=self.store.count(_collection_for(corpus.name)),
+                        active=True,
+                    )
             # Commit registry health only after every source has completed.
             corpus.chunk_count = self.store.count(_collection_for(corpus.name))
             corpus.doc_count = len(corpus.sources)
             corpus.updated_at = time.time()
             self.registry.upsert(corpus)
+            self._record_recovery_progress(
+                corpus,
+                source_done=len(sources),
+                sources_total=len(sources),
+                chunks_done=corpus.chunk_count,
+                active=False,
+            )
 
         actions: list[dict] = []
-        for issue in self.diagnose():
+        for issue in self.diagnose(corpora=corpora):
             name, kind = issue["corpus"], issue["kind"]
             if kind == "count_drift":
                 c = self.registry.get(name)
