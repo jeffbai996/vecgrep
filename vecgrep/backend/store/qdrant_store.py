@@ -25,6 +25,7 @@ to its own Qdrant collection. Payload schema:
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -133,6 +134,41 @@ class QdrantStore:
                     counts[source_id] += 1
             if offset is None:
                 return dict(counts)
+
+    def iter_payloads(
+        self,
+        name: str,
+        *,
+        exclude_payload_fields: set[str] | None = None,
+    ) -> Iterator[tuple[str, dict]]:
+        """Stream every point ID and payload from one collection.
+
+        Used to reconstruct a derived local index from the vector store without
+        transferring vectors or making a huge all-points request. Callers can
+        exclude fields not needed by the derivative; this matters when a large
+        source document is deliberately duplicated on every point.
+        """
+        existing = {c.name for c in self.client.get_collections().collections}
+        if name not in existing:
+            return
+        offset = None
+        selector = (
+            qm.PayloadSelectorExclude(exclude=sorted(exclude_payload_fields))
+            if exclude_payload_fields
+            else True
+        )
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=name,
+                offset=offset,
+                limit=1000,
+                with_payload=selector,
+                with_vectors=False,
+            )
+            for point in points:
+                yield str(point.id), dict(point.payload or {})
+            if offset is None:
+                return
 
     # Max points per upsert request. We store the full source_text on every
     # chunk, so a large document's chunks can sum to >256MB — Qdrant's default

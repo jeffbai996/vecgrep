@@ -13,6 +13,7 @@ import pickle
 import re
 import tempfile
 from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -158,6 +159,11 @@ class BM25Store:
         self.max_cached_corpora = None if root is None else max_cached_corpora
         self._cache: OrderedDict[str, _CorpusIndex] = OrderedDict()
         self._bm25_instances: OrderedDict[str, BM25Okapi] = OrderedDict()
+        # A separate repair process can atomically replace a pickle while the
+        # API worker is alive.  Remember the on-disk version so a worker that
+        # previously cached an empty index notices the replacement without a
+        # service restart.
+        self._disk_versions: dict[str, tuple[int, int] | None] = {}
         if root is not None:
             root.mkdir(parents=True, exist_ok=True)
 
@@ -166,12 +172,24 @@ class BM25Store:
             return None
         return self.root / f"{corpus}.pkl"
 
+    def _disk_version(self, corpus: str) -> tuple[int, int] | None:
+        p = self._path(corpus)
+        if p is None:
+            return None
+        try:
+            stat = p.stat()
+        except FileNotFoundError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size)
+
     def _load(self, corpus: str) -> _CorpusIndex:
         if corpus in self._cache:
-            self._cache.move_to_end(corpus)
-            if corpus in self._bm25_instances:
-                self._bm25_instances.move_to_end(corpus)
-            return self._cache[corpus]
+            if self._disk_versions.get(corpus) == self._disk_version(corpus):
+                self._cache.move_to_end(corpus)
+                if corpus in self._bm25_instances:
+                    self._bm25_instances.move_to_end(corpus)
+                return self._cache[corpus]
+            self.evict(corpus)
         self._make_room(corpus)
         p = self._path(corpus)
         if p and p.exists():
@@ -182,6 +200,7 @@ class BM25Store:
         else:
             idx = _CorpusIndex()
         self._cache[corpus] = idx
+        self._disk_versions[corpus] = self._disk_version(corpus)
         return idx
 
     def _make_room(self, incoming: str) -> None:
@@ -190,11 +209,13 @@ class BM25Store:
         while len(self._cache) >= self.max_cached_corpora:
             evicted, _ = self._cache.popitem(last=False)
             self._bm25_instances.pop(evicted, None)
+            self._disk_versions.pop(evicted, None)
 
     def evict(self, corpus: str) -> None:
         """Release one corpus's expanded index and BM25 scoring structure."""
         self._cache.pop(corpus, None)
         self._bm25_instances.pop(corpus, None)
+        self._disk_versions.pop(corpus, None)
 
     def _persist(self, corpus: str) -> None:
         p = self._path(corpus)
@@ -216,6 +237,7 @@ class BM25Store:
                 temp_path = Path(fh.name)
                 pickle.dump(idx, fh, protocol=pickle.HIGHEST_PROTOCOL)
             os.replace(temp_path, p)
+            self._disk_versions[corpus] = self._disk_version(corpus)
         finally:
             if temp_path is not None and temp_path.exists():
                 temp_path.unlink()
@@ -233,6 +255,34 @@ class BM25Store:
             idx.by_source.setdefault(sid, []).append(arr_pos)
         self._bm25_instances.pop(corpus, None)
         self._persist(corpus)
+
+    def replace(self, corpus: str, records: Iterable[tuple[str, str, dict]]) -> int:
+        """Atomically replace one corpus from already-materialized chunks.
+
+        Recovery can rebuild the lexical index from Qdrant payloads without
+        re-reading sources or calling an embedding backend.  Build the complete
+        replacement in memory, then persist it once so readers see either the
+        old index or the whole new one, never an incrementally-written pickle.
+        """
+        self.evict(corpus)
+        self._make_room(corpus)
+        idx = _CorpusIndex()
+        for cid, text, payload in records:
+            pos = len(idx.ids)
+            idx.ids.append(cid)
+            idx.docs.append(tokenize(text))
+            idx.payloads.append(payload)
+            source_id = payload.get("source_id", "")
+            idx.by_source.setdefault(source_id, []).append(pos)
+        self._cache[corpus] = idx
+        self._bm25_instances.pop(corpus, None)
+        self._persist(corpus)
+        return len(idx.ids)
+
+    def exists(self, corpus: str) -> bool:
+        """Whether a persisted index exists for a non-empty corpus."""
+        p = self._path(corpus)
+        return bool(p and p.exists())
 
     def delete_by_source(self, corpus: str, source_id: str) -> None:
         idx = self._load(corpus)
