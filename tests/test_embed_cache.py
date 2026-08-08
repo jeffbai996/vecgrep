@@ -244,3 +244,29 @@ def test_touch_failure_never_breaks_a_lookup(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cache, "_touch_locked", boom)
     assert cache.get_many("id", ["a"]) == {EmbedCache._sha("a"): [9.0]}
+
+
+def test_read_only_cache_serves_hits_without_any_mutation(tmp_path):
+    """Recovery may read a shared warm cache but must never contend on it."""
+    db = tmp_path / "embed.db"
+    writer = EmbedCache(db)
+    writer.put_many("id", ["warm"], [[3.0]])
+    before = writer._conn.execute(
+        "SELECT last_used FROM embed_cache WHERE identity = ? AND text_sha = ?",
+        ("id", EmbedCache._sha("warm")),
+    ).fetchone()[0]
+
+    reader = EmbedCache(db, read_only=True)
+    assert reader.get_many("id", ["warm"]) == {EmbedCache._sha("warm"): [3.0]}
+    reader.put_many("id", ["cold"], [[4.0]])
+
+    after = writer._conn.execute(
+        "SELECT last_used FROM embed_cache WHERE identity = ? AND text_sha = ?",
+        ("id", EmbedCache._sha("warm")),
+    ).fetchone()[0]
+    cold = writer._conn.execute(
+        "SELECT 1 FROM embed_cache WHERE identity = ? AND text_sha = ?",
+        ("id", EmbedCache._sha("cold")),
+    ).fetchone()
+    assert after == before
+    assert cold is None

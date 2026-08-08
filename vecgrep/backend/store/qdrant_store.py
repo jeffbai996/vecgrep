@@ -24,6 +24,7 @@ to its own Qdrant collection. Payload schema:
 """
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -103,6 +104,35 @@ class QdrantStore:
         if name not in existing:
             return 0
         return self.client.count(collection_name=name, exact=True).count
+
+    def source_counts(self, name: str) -> dict[str, int]:
+        """Return the live point count for each source in one collection scan.
+
+        Recovery uses deterministic point IDs, so this one cheap payload-only
+        pass distinguishes complete source files from files that need an
+        upsert.  Counting each source with an unindexed filter would turn a
+        large recovery into thousands of full collection scans.
+        """
+        existing = {c.name for c in self.client.get_collections().collections}
+        if name not in existing:
+            return {}
+        counts: Counter[str] = Counter()
+        offset = None
+        selector = qm.PayloadSelectorInclude(include=["source_id"])
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=name,
+                offset=offset,
+                limit=1000,
+                with_payload=selector,
+                with_vectors=False,
+            )
+            for point in points:
+                source_id = (point.payload or {}).get("source_id")
+                if isinstance(source_id, str):
+                    counts[source_id] += 1
+            if offset is None:
+                return dict(counts)
 
     # Max points per upsert request. We store the full source_text on every
     # chunk, so a large document's chunks can sum to >256MB — Qdrant's default

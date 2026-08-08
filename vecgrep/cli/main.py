@@ -1363,8 +1363,14 @@ def status(json_out: bool) -> None:
 
 @cli.command()
 @click.option("--fix", is_flag=True, help="Repair count drift + re-index wiped corpora from their sources.")
+@click.option(
+    "--corpus",
+    "corpora",
+    multiple=True,
+    help="Restrict diagnosis and repair to one or more named corpora.",
+)
 @click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
-def doctor(fix: bool, json_out: bool) -> None:
+def doctor(fix: bool, corpora: tuple[str, ...], json_out: bool) -> None:
     """Reconcile the corpus registry against the vector store.
 
     Catches the three ways they drift apart: a corpus a Qdrant restart wiped
@@ -1377,9 +1383,18 @@ def doctor(fix: bool, json_out: bool) -> None:
     Run it after a Qdrant/host restart, or on a timer, so a wiped corpus
     surfaces immediately instead of silently returning nothing at search time.
     """
-    svc = VecgrepService()
-    issues = svc.diagnose()
-    actions = svc.reconcile(reindex=True) if fix else []
+    # A repair only needs to read a warm cache. Keeping that connection
+    # read-only prevents LRU touches or cache misses from contending with live
+    # serving and watcher writes.
+    svc = VecgrepService(embed_cache_read_only=fix)
+    selected = set(corpora) or None
+    if selected:
+        known = {corpus.name for corpus in svc.list_corpora()}
+        unknown = sorted(selected - known)
+        if unknown:
+            raise click.ClickException(f"unknown corpus: {', '.join(unknown)}")
+    issues = svc.diagnose(corpora=selected)
+    actions = svc.reconcile(reindex=True, corpora=selected) if fix else []
 
     if json_out:
         click.echo(json.dumps({"issues": issues, "actions": actions}, indent=2, default=str))
