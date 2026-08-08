@@ -1370,7 +1370,17 @@ def status(json_out: bool) -> None:
     help="Restrict diagnosis and repair to one or more named corpora.",
 )
 @click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
-def doctor(fix: bool, corpora: tuple[str, ...], json_out: bool) -> None:
+@click.option(
+    "--require-healthy",
+    is_flag=True,
+    help="Exit nonzero unless the selected corpora are healthy after this command.",
+)
+def doctor(
+    fix: bool,
+    corpora: tuple[str, ...],
+    json_out: bool,
+    require_healthy: bool,
+) -> None:
     """Reconcile the corpus registry against the vector store.
 
     Catches the three ways they drift apart: a corpus a Qdrant restart wiped
@@ -1395,9 +1405,18 @@ def doctor(fix: bool, corpora: tuple[str, ...], json_out: bool) -> None:
             raise click.ClickException(f"unknown corpus: {', '.join(unknown)}")
     issues = svc.diagnose(corpora=selected)
     actions = svc.reconcile(reindex=True, corpora=selected) if fix else []
+    # A recovery runner needs a completion signal stronger than "the command
+    # returned." Re-check after mutations so systemd can retry a partial
+    # reindex instead of accepting a misleading zero exit status.
+    remaining_issues = svc.diagnose(corpora=selected) if require_healthy else []
 
     if json_out:
-        click.echo(json.dumps({"issues": issues, "actions": actions}, indent=2, default=str))
+        payload = {"issues": issues, "actions": actions}
+        if require_healthy:
+            payload["remaining_issues"] = remaining_issues
+        click.echo(json.dumps(payload, indent=2, default=str))
+        if require_healthy and remaining_issues:
+            raise click.exceptions.Exit(1)
         return
 
     if not issues:
@@ -1422,6 +1441,13 @@ def doctor(fix: bool, corpora: tuple[str, ...], json_out: bool) -> None:
     else:
         click.echo("")
         click.echo("run `vecgrep doctor --fix` to repair (○ = auto-fixable).")
+
+    if require_healthy and remaining_issues:
+        click.echo("")
+        click.echo("recovery is still unhealthy:")
+        for issue in remaining_issues:
+            click.echo(f"  [{issue['kind']}] {issue['corpus']}: {issue['detail']}")
+        raise click.exceptions.Exit(1)
 
 
 @cli.command()
