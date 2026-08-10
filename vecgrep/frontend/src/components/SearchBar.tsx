@@ -8,10 +8,38 @@ type Props = {
   corpusCount: number;
 };
 
-const MODES: { value: SearchMode; label: string; hint: string }[] = [
-  { value: "hybrid", label: "Hybrid", hint: "meaning + exact terms" },
-  { value: "vector", label: "Semantic", hint: "meaning only" },
-  { value: "bm25", label: "Keyword", hint: "exact terms only" },
+const MODES: {
+  value: SearchMode;
+  badge: "V" | "K" | "VK";
+  label: string;
+  hint: string;
+  active: string;
+  idle: string;
+}[] = [
+  {
+    value: "hybrid",
+    badge: "VK",
+    label: "Hybrid",
+    hint: "meaning + exact terms",
+    active: "border-violet-700/80 bg-violet-950/70 text-violet-300",
+    idle: "border-transparent text-violet-500/70 hover:bg-violet-950/35 hover:text-violet-300",
+  },
+  {
+    value: "vector",
+    badge: "V",
+    label: "Semantic",
+    hint: "meaning only",
+    active: "border-sky-700/80 bg-sky-950/70 text-sky-300",
+    idle: "border-transparent text-sky-500/70 hover:bg-sky-950/35 hover:text-sky-300",
+  },
+  {
+    value: "bm25",
+    badge: "K",
+    label: "Keyword",
+    hint: "exact terms only",
+    active: "border-emerald-700/80 bg-emerald-950/70 text-emerald-300",
+    idle: "border-transparent text-emerald-500/70 hover:bg-emerald-950/35 hover:text-emerald-300",
+  },
 ];
 
 const QUICK_FILTERS = [
@@ -89,13 +117,13 @@ export default function SearchBar({ onSearch, disabled, corpus, corpusCount }: P
               type="button"
               onClick={() => setMode(item.value)}
               title={item.hint}
-              className={`px-2.5 py-1 rounded-md transition-colors ${
-                mode === item.value
-                  ? "bg-zinc-700 text-zinc-100"
-                  : "text-zinc-500 hover:text-zinc-300"
+              aria-pressed={mode === item.value}
+              className={`flex items-center gap-1.5 border px-2.5 py-1 rounded-md transition-colors ${
+                mode === item.value ? item.active : item.idle
               }`}
             >
-              {item.label}
+              <span className="text-[9px] font-semibold">{item.badge}</span>
+              <span>{item.label}</span>
             </button>
           ))}
         </div>

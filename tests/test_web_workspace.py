@@ -96,3 +96,22 @@ def test_web_ui_uses_dense_budgeted_results_and_insight_views() -> None:
     assert "Incident" in (FRONTEND / "components" / "TimelinePanel.tsx").read_text(
         encoding="utf-8"
     )
+
+
+def test_search_modes_share_the_result_badge_color_language() -> None:
+    search = (FRONTEND / "components" / "SearchBar.tsx").read_text(encoding="utf-8")
+
+    assert 'badge: "VK"' in search and "violet" in search
+    assert 'badge: "V"' in search and "sky" in search
+    assert 'badge: "K"' in search and "emerald" in search
+
+
+def test_committed_web_bundle_has_no_private_companion_url() -> None:
+    dist = FRONTEND.parent / "dist"
+    built = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in dist.rglob("*")
+        if path.is_file()
+    )
+
+    assert ".ts.net" not in built
