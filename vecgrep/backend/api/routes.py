@@ -25,6 +25,7 @@ from .schemas import (
     SearchStub,
     TimelineGroup,
     TimelineRequest,
+    WeightRequest,
 )
 
 
@@ -114,6 +115,16 @@ def set_decay(name: str, req: DecayRequest) -> CorpusOut:
     svc = _service()
     try:
         corpus = svc.set_decay(name, req.half_life_days)
+    except CorpusError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return CorpusOut(**asdict(corpus))
+
+
+@router.post("/corpora/{name}/weight", response_model=CorpusOut)
+def set_rank_weight(name: str, req: WeightRequest) -> CorpusOut:
+    svc = _service()
+    try:
+        corpus = svc.set_rank_weight(name, req.weight)
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return CorpusOut(**asdict(corpus))

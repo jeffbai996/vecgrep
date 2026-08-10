@@ -901,6 +901,29 @@ def corpora_decay(name: str, half_life: float | None, off: bool) -> None:
         click.echo(f"{name}: recency decay disabled")
 
 
+@corpora.command("weight")
+@click.argument("name")
+@click.option(
+    "--factor",
+    type=float,
+    default=None,
+    help="Cross-corpus rank weight (>1 boosts, <1 demotes). Omit to reset to 1.0.",
+)
+def corpora_weight(name: str, factor: float | None) -> None:
+    """Set or reset a corpus's cross-corpus rank weight (no re-index needed)."""
+    if _api_alive():
+        c = _post(f"/api/corpora/{name}/weight", {"weight": factor})
+        w = c.get("rank_weight", 1.0)
+    else:
+        svc = VecgrepService()
+        try:
+            corpus = svc.set_rank_weight(name, factor)
+        except CorpusError as e:
+            raise click.ClickException(str(e))
+        w = corpus.rank_weight
+    click.echo(f"{name}: cross-corpus rank weight = {w:g}")
+
+
 @cli.command()
 @click.option("--host", default=None, help="Override host.")
 @click.option("--port", default=None, type=int, help="Override port.")
