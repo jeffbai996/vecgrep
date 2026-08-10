@@ -41,6 +41,7 @@ from .ingestion.chunkers import (
     Chunker,
     FixedTokenChunker,
     MarkdownSectionChunker,
+    CodeSymbolChunker,
     SentenceWindowChunker,
 )
 from .store import (
@@ -65,6 +66,7 @@ CHUNKERS: dict[str, type[Chunker]] = {
     "sentence_window": SentenceWindowChunker,
     "fixed_token": FixedTokenChunker,
     "markdown_section": MarkdownSectionChunker,
+    "code_symbol": CodeSymbolChunker,
 }
 
 SearchMode = Literal["hybrid", "vector", "bm25"]
@@ -371,7 +373,10 @@ class VecgrepService:
         total_chunks = 0
         skipped = 0
         for doc in _expand(source, adapter, include=include):
-            chunks = chunker.chunk(doc.text)
+            # doc-aware chunkers (code_symbol) see the source path for
+            # language detection; text-only chunkers keep the old contract
+            chunks = (chunker.chunk_doc(doc)
+                      if hasattr(chunker, "chunk_doc") else chunker.chunk(doc.text))
             if not chunks:
                 continue
 
@@ -419,7 +424,8 @@ class VecgrepService:
                     "text": c.text,
                     # Doc metadata + per-chunk enrichment (speakers, bot flag,
                     # content shapes) — powers speaker:/bot:/has: filters.
-                    "metadata": {**doc.metadata, **chunk_enrichment(c.text)},
+                    "metadata": {**doc.metadata, **chunk_enrichment(c.text),
+                                 **(getattr(c, "meta", None) or {})},
                     # Document's own date (epoch seconds) when discoverable.
                     # Powers optional recency decay at search time. None is fine.
                     "doc_timestamp": doc.timestamp,
