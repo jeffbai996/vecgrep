@@ -1,0 +1,98 @@
+"""Human web-workspace contracts for vecgrep's mature retrieval surface."""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from vecgrep.backend.api import routes
+from vecgrep.backend.api.schemas import BrowseRequest, IncidentRequest, SearchRequest
+
+
+FRONTEND = Path(__file__).parent.parent / "vecgrep" / "frontend" / "src"
+
+
+def test_search_request_supports_bounded_budget_breadth() -> None:
+    req = SearchRequest(query="needle", budget=True, full_k=8, max_total=40)
+    assert req.budget is True
+    assert req.full_k == 8
+    assert req.max_total == 40
+
+    with pytest.raises(ValidationError):
+        SearchRequest(query="needle", max_total=101)
+    with pytest.raises(ValidationError):
+        SearchRequest(query="needle", full_k=41, max_total=40)
+
+
+def test_search_route_passes_budget_limit_to_service(monkeypatch) -> None:
+    seen: dict = {}
+
+    class FakeService:
+        def search_budgeted(self, query, corpus, **kwargs):
+            seen.update(query=query, corpus=corpus, **kwargs)
+            return [], []
+
+        def calibration(self, corpus):
+            return {
+                "cosine_center": 0.5,
+                "cosine_slope": 10.0,
+                "bm25_top": 5.0,
+                "bm25_floor": 0.0,
+            }
+
+    monkeypatch.setattr(routes, "_SERVICE", FakeService())
+    routes.search(
+        SearchRequest(
+            query="needle",
+            corpus="notes",
+            budget=True,
+            full_k=6,
+            max_total=40,
+            explain=True,
+        )
+    )
+    assert seen["full_k"] == 6
+    assert seen["max_total"] == 40
+    assert seen["explain"] is True
+
+
+def test_browse_and_incident_routes_expose_service_tools(monkeypatch) -> None:
+    seen: list[tuple[str, dict]] = []
+
+    class FakeService:
+        def browse(self, corpus, **kwargs):
+            seen.append(("browse", {"corpus": corpus, **kwargs}))
+            return []
+
+        def incident(self, query, corpus, **kwargs):
+            seen.append(("incident", {"query": query, "corpus": corpus, **kwargs}))
+            return {"title": query, "confidence": "strong"}
+
+    monkeypatch.setattr(routes, "_SERVICE", FakeService())
+
+    assert routes.browse(
+        BrowseRequest(corpus="cli", channel="discord", since="7d", tail=50)
+    ) == []
+    incident = routes.incident(
+        IncidentRequest(query="what broke", corpus="cli", filters=["after:7d"])
+    )
+    assert incident["confidence"] == "strong"
+    assert seen[0][1]["tail"] == 50
+    assert seen[1][1]["filters"] == ["after:7d"]
+
+
+def test_web_ui_uses_dense_budgeted_results_and_insight_views() -> None:
+    app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
+    search = (FRONTEND / "components" / "SearchBar.tsx").read_text(encoding="utf-8")
+    results = (FRONTEND / "components" / "ResultList.tsx").read_text(encoding="utf-8")
+    api = (FRONTEND / "api.ts").read_text(encoding="utf-8")
+
+    assert 'useState(40)' in search, "human search should show broad results by default"
+    assert "budget: true" in api and "max_total" in api
+    assert "response.stubs" in results, "stub tail must be visible, not discarded"
+    assert "divide-y" in results and "space-y-3" not in results
+    assert '"compare"' in app and '"browse"' in app
+    assert "Incident" in (FRONTEND / "components" / "TimelinePanel.tsx").read_text(
+        encoding="utf-8"
+    )

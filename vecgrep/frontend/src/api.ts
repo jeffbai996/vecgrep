@@ -49,6 +49,28 @@ export type SearchHit = {
   };
 };
 
+export type SearchStub = {
+  chunk_id: string;
+  corpus: string;
+  source_id: string;
+  doc_timestamp: number | null;
+  snippet: string;
+  similarity_pct: number;
+};
+
+export type SearchResponse = {
+  hits: SearchHit[];
+  stubs: SearchStub[];
+  calibration?: Calibration;
+};
+
+export type SearchOptions = {
+  topK: number;
+  mode: SearchMode;
+  rerank: boolean;
+  filters: string[];
+};
+
 function _authHeaders(): Record<string, string> {
   // If the operator has set VECGREP_API_TOKEN server-side, the UI needs to
   // send the same token. We read it from localStorage so the user can drop
@@ -94,17 +116,21 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ source, corpus, chunker }),
     }),
-  search: (
-    query: string,
-    corpus: string | null,
-    top_k: number,
-    mode: SearchMode = "hybrid",
-    rerank = false,
-    filters: string[] = []
-  ) =>
-    request<{ hits: SearchHit[]; calibration?: Calibration }>("/api/search", {
+  search: (query: string, corpus: string | null, options: SearchOptions) =>
+    request<SearchResponse>("/api/search", {
       method: "POST",
-      body: JSON.stringify({ query, corpus, top_k, mode, rerank, filters }),
+      body: JSON.stringify({
+        query,
+        corpus,
+        mode: options.mode,
+        rerank: options.rerank,
+        filters: options.filters,
+        explain: true,
+        budget: true,
+        full_k: Math.min(8, options.topK),
+        max_total: options.topK,
+        token_ceiling: 8000,
+      }),
     }),
   timeline: (
     query: string,
@@ -127,6 +153,26 @@ export const api = {
     request<ChunkWindow>(
       `/api/chunk/${encodeURIComponent(corpus)}/${encodeURIComponent(chunkId)}?window=${window}`
     ),
+  compare: (query: string, corpus: string, windows: CompareWindows, topK = 10) =>
+    request<CompareResponse>("/api/compare", {
+      method: "POST",
+      body: JSON.stringify({ query, corpus, ...windows, top_k: topK }),
+    }),
+  browse: (options: BrowseRequest) =>
+    request<BrowseGroup[]>("/api/browse", {
+      method: "POST",
+      body: JSON.stringify(options),
+    }),
+  incident: (
+    query: string,
+    corpus: string | null,
+    mode: SearchMode = "hybrid",
+    filters: string[] = []
+  ) =>
+    request<Incident | null>("/api/incident", {
+      method: "POST",
+      body: JSON.stringify({ query, corpus, mode, filters }),
+    }),
 };
 
 export type TimelineEvent = {
@@ -144,6 +190,56 @@ export type TimelineGroup = {
   events: TimelineEvent[];
   // Set only when the source is not a transcript (no parseable events).
   slice_text: string;
+};
+
+export type BrowseGroup = {
+  corpus: string;
+  source_id: string;
+  doc_timestamp: number | null;
+  events: TimelineEvent[];
+  slice_text: string;
+};
+
+export type BrowseRequest = {
+  corpus: string;
+  channel?: string;
+  date?: string;
+  source_path?: string;
+  since?: string;
+  until?: string;
+  tail?: number;
+};
+
+export type CompareWindows = {
+  a_after?: string;
+  a_before?: string;
+  b_after?: string;
+  b_before?: string;
+};
+
+export type CompareSide = { results: SearchHit[]; sources: string[] };
+
+export type CompareResponse = {
+  windows: {
+    a: { after: string | null; before: string | null };
+    b: { after: string | null; before: string | null };
+  };
+  a: CompareSide;
+  b: CompareSide;
+  only_in_a: string[];
+  only_in_b: string[];
+  in_both: string[];
+};
+
+export type Incident = {
+  title: string;
+  confidence: string;
+  sources: string[];
+  participants: string[];
+  time_range: { start: string; end: string };
+  primary_source: string;
+  primary_timeline: TimelineEvent[];
+  related: TimelineGroup[];
 };
 
 export type CorpusStats = {

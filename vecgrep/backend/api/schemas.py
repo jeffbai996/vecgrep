@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class IndexRequest(BaseModel):
@@ -29,8 +29,17 @@ class SearchRequest(BaseModel):
     # Breadth mode: top full_k hits keep context; the rest degrade to
     # one-line stubs (see SearchStub) until ~token_ceiling estimated tokens.
     budget: bool = False
-    full_k: int = 8
-    token_ceiling: int = 4000
+    full_k: int = Field(8, ge=1, le=100)
+    # Keep the REST API's breadth ceiling aligned with the service default;
+    # the human UI explicitly requests 40 for a useful dense first page.
+    max_total: int = Field(100, ge=1, le=100)
+    token_ceiling: int = Field(4000, ge=100, le=20000)
+
+    @model_validator(mode="after")
+    def validate_budget_shape(self) -> "SearchRequest":
+        if self.full_k > self.max_total:
+            raise ValueError("full_k cannot exceed max_total")
+        return self
 
 
 class SearchHit(BaseModel):
@@ -102,6 +111,23 @@ class TimelineRequest(BaseModel):
     padding: int = 1200
     mode: str = "hybrid"
     filters: list[str] = []
+
+
+class IncidentRequest(BaseModel):
+    query: str
+    corpus: str | None = None
+    mode: str = "hybrid"
+    filters: list[str] = []
+
+
+class BrowseRequest(BaseModel):
+    corpus: str
+    channel: str | None = None
+    date: str | None = None
+    source_path: str | None = None
+    since: str | None = None
+    until: str | None = None
+    tail: int | None = Field(default=100, ge=1, le=1000)
 
 
 class TimelineEvent(BaseModel):

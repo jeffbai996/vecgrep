@@ -12,3 +12,10 @@ body {
   background-color: #0b0d10;
   color: #e6e8eb;
 }
+
+.result-snippet {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
