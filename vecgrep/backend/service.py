@@ -531,9 +531,13 @@ class VecgrepService:
             # distinct evidence, not five slices of one exchange. On corpora
             # with no near-dups this degrades to plain score order.
             results = mmr_select(results, top_k)
-            # Display order matches the displayed similarity_pct so the user
-            # can trust their eyes (a higher % is always above a lower %).
-            results.sort(key=lambda r: r.similarity_pct, reverse=True)
+            # Display order follows similarity_pct scaled by the corpus rank
+            # weight — identical to raw pct order when weights are neutral;
+            # where they differ, a curated corpus deliberately edges out a
+            # transcript hit of comparable %, which is the point of weighting.
+            weights = {c.name: (getattr(c, "rank_weight", 1.0) or 1.0) for c in corpora}
+            results.sort(key=lambda r: r.similarity_pct * weights.get(r.corpus, 1.0),
+                         reverse=True)
         return results
 
     def search_budgeted(
@@ -1110,6 +1114,10 @@ class VecgrepService:
         # float stale content to the top. No-op when the corpus has no
         # half-life or the chunk has no timestamp (factor 1.0).
         half_life = corpus.decay_half_life_days
+        # Cross-corpus rank weight rides the same multiplier: neutral (1.0)
+        # within a single corpus, decisive when corpora compete in a merged
+        # search (curated shelves above the transcript firehose).
+        weight = getattr(corpus, "rank_weight", 1.0) or 1.0
         now = time.time()
         decay_by_id: dict[str, float] = {}
         decayed: dict[str, float] = {}
@@ -1117,7 +1125,7 @@ class VecgrepService:
             ts = payloads_by_id.get(cid, {}).get("doc_timestamp")
             factor = _recency_factor(ts, half_life, now)
             decay_by_id[cid] = factor
-            decayed[cid] = raw * factor
+            decayed[cid] = raw * factor * weight
 
         fused = sorted(decayed.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
         # For BM25-only display: rescale per-query so the top BM25 hit reads
@@ -1193,6 +1201,15 @@ class VecgrepService:
         if half_life_days is not None and half_life_days <= 0:
             raise CorpusError("half-life must be positive (or omit to disable decay)")
         corpus.decay_half_life_days = half_life_days
+        self.registry.upsert(corpus)
+        return corpus
+
+    def set_rank_weight(self, name: str, weight: float | None) -> Corpus:
+        """Set (or reset, with None) a corpus's cross-corpus rank weight."""
+        corpus = self.registry.get(name)
+        if weight is not None and weight <= 0:
+            raise CorpusError("rank weight must be positive (or omit to reset to 1.0)")
+        corpus.rank_weight = 1.0 if weight is None else weight
         self.registry.upsert(corpus)
         return corpus
 

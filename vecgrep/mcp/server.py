@@ -384,6 +384,7 @@ def _run_get_corpus(name: str) -> str:
                 "created_at": c.created_at,
                 "updated_at": c.updated_at,
                 "decay_half_life_days": c.decay_half_life_days,
+                "rank_weight": getattr(c, "rank_weight", 1.0),
                 # What `filters` the caller can pass to search — surfaced so
                 # filtering by actor/channel/date isn't a guessing game.
                 "filterable": svc.filterable_fields(c.name)["filters"],

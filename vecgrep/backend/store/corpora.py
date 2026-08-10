@@ -46,6 +46,11 @@ class Corpus:
     # prior behavior). Tune per corpus: fast for chat/journal, slow for
     # reference, off for static seed material.
     decay_half_life_days: float | None = None
+    # Cross-corpus rank weight. Multiplies a hit's fused score (and biases
+    # final display order) when a search spans corpora, so a small curated
+    # reference corpus can outrank a high-volume transcript corpus at
+    # comparable relevance. 1.0 = neutral (default, no change).
+    rank_weight: float = 1.0
 
 
 class CorpusRegistry:

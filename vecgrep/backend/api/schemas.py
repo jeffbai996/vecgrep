@@ -141,6 +141,12 @@ class CorpusOut(BaseModel):
     created_at: float
     updated_at: float
     decay_half_life_days: float | None = None
+    rank_weight: float = 1.0
+
+
+class WeightRequest(BaseModel):
+    # None / omitted resets to neutral 1.0; a positive number sets the weight.
+    weight: float | None = None
 
 
 class DecayRequest(BaseModel):
