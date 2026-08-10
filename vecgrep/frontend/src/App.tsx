@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, Corpus, SearchHit, SearchMode } from "./api";
+import { api, Corpus, SearchOptions, SearchResponse } from "./api";
 import SearchBar from "./components/SearchBar";
 import IndexPanel from "./components/IndexPanel";
 import CorpusList from "./components/CorpusList";
@@ -10,6 +10,8 @@ import HowSearchWorks from "./components/HowSearchWorks";
 import AboutFooter from "./components/AboutFooter";
 import TuningPanel from "./components/TuningPanel";
 import TimelinePanel from "./components/TimelinePanel";
+import ComparePanel from "./components/ComparePanel";
+import BrowsePanel from "./components/BrowsePanel";
 import {
   loadTuning,
   saveTuning,
@@ -19,10 +21,10 @@ import {
 } from "./tuning";
 
 export default function App() {
-  const [view, setView] = useState<"search" | "timeline">("search");
+  const [view, setView] = useState<"search" | "timeline" | "compare" | "browse">("search");
   const [corpora, setCorpora] = useState<Corpus[]>([]);
   const [selectedCorpus, setSelectedCorpus] = useState<string | null>(null);
-  const [hits, setHits] = useState<SearchHit[] | null>(null);
+  const [response, setResponse] = useState<SearchResponse | null>(null);
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tuning, setTuning] = useState<Tuning>(() => loadTuning());
@@ -49,18 +51,12 @@ export default function App() {
     refresh();
   }, []);
 
-  const onSearch = async (
-    query: string,
-    topK: number,
-    mode: SearchMode,
-    rerank: boolean,
-    filters: string[]
-  ) => {
+  const onSearch = async (query: string, options: SearchOptions) => {
     setError(null);
     setSearching(true);
     try {
-      const r = await api.search(query, selectedCorpus, topK, mode, rerank, filters);
-      setHits(r.hits);
+      const r = await api.search(query, selectedCorpus, options);
+      setResponse(r);
       // Seed the tuning sliders from the server's actual calibration for this
       // corpus's model — but only while the user hasn't customized them.
       if (!tuningCustom && r.calibration) {
@@ -68,7 +64,7 @@ export default function App() {
       }
     } catch (e) {
       setError(String((e as Error).message ?? e));
-      setHits([]);
+      setResponse({ hits: [], stubs: [] });
     } finally {
       setSearching(false);
     }
@@ -76,18 +72,18 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col">
-      <header className="border-b border-zinc-800 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-baseline gap-3">
+      <header className="border-b border-zinc-800 px-4 sm:px-6 py-3 flex items-center justify-between gap-3">
+        <div className="flex items-baseline gap-3 min-w-0">
           <h1 className="text-xl font-mono font-semibold tracking-tight">vecgrep</h1>
-          <span className="text-zinc-500 text-sm">grep for meaning, not keywords.</span>
+          <span className="text-zinc-500 text-sm hidden sm:inline">grep for meaning, not keywords.</span>
         </div>
-        <div className="flex items-center gap-4">
-          <nav className="flex border border-zinc-800 rounded p-0.5" aria-label="Primary">
-            {(["search", "timeline"] as const).map((item) => (
+        <div className="flex items-center gap-3 min-w-0">
+          <nav className="flex border border-zinc-800 rounded-lg p-0.5 overflow-x-auto" aria-label="Primary">
+            {(["search", "timeline", "compare", "browse"] as const).map((item) => (
               <button
                 key={item}
                 onClick={() => setView(item)}
-                className={`px-3 h-7 text-xs font-mono rounded ${view === item ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"}`}
+                className={`px-2.5 sm:px-3 h-7 text-[11px] font-mono rounded-md whitespace-nowrap ${view === item ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"}`}
               >
                 {item[0].toUpperCase() + item.slice(1)}
               </button>
@@ -107,14 +103,31 @@ export default function App() {
               {import.meta.env.VITE_COMPANION_LABEL || "companion"} ↗
             </a>
           )}
-          <span className="text-xs text-zinc-500 font-mono">
+          <span className="text-xs text-zinc-500 font-mono hidden lg:inline">
             {corpora.length} corp{corpora.length === 1 ? "us" : "ora"}
           </span>
         </div>
       </header>
 
-      <main className="flex-1 grid grid-cols-12 gap-6 px-6 py-6 max-w-7xl mx-auto w-full">
-        <aside className="col-span-12 md:col-span-3 space-y-6">
+      <main className="flex-1 grid grid-cols-12 gap-4 lg:gap-6 px-4 sm:px-6 py-5 max-w-[1600px] mx-auto w-full">
+        <div className="col-span-12 md:hidden">
+          <label className="flex items-center gap-2 border border-zinc-800 rounded-lg px-3 py-2 text-[11px] font-mono text-zinc-500">
+            <span>Corpus</span>
+            <select
+              value={selectedCorpus || ""}
+              onChange={(event) => setSelectedCorpus(event.target.value || null)}
+              className="min-w-0 flex-1 bg-transparent text-zinc-200 focus:outline-none"
+            >
+              <option value="">All corpora</option>
+              {corpora.map((corpus) => (
+                <option key={corpus.name} value={corpus.name}>
+                  {corpus.name} · {corpus.chunk_count.toLocaleString()} chunks
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <aside className="hidden md:block md:col-span-3 xl:col-span-2 space-y-4">
           {view === "search" && <IndexPanel onIndexed={refresh} />}
           <CorpusList
             corpora={corpora}
@@ -132,7 +145,7 @@ export default function App() {
         </aside>
 
         {view === "search" ? (
-          <section className="col-span-12 md:col-span-9 space-y-4">
+          <section className="col-span-12 md:col-span-9 xl:col-span-10 space-y-3">
             <SearchBar
               onSearch={onSearch}
               disabled={searching}
@@ -145,12 +158,14 @@ export default function App() {
                 {error}
               </div>
             )}
-            <ResultList hits={hits} searching={searching} tuning={tuning} />
+            <ResultList response={response} searching={searching} tuning={tuning} />
             <AboutFooter />
           </section>
         ) : (
-          <section className="col-span-12 md:col-span-9 space-y-4">
-            <TimelinePanel corpus={selectedCorpus} corpusCount={corpora.length} />
+          <section className="col-span-12 md:col-span-9 xl:col-span-10 space-y-4">
+            {view === "timeline" && <TimelinePanel corpus={selectedCorpus} corpusCount={corpora.length} />}
+            {view === "compare" && <ComparePanel corpus={selectedCorpus} />}
+            {view === "browse" && <BrowsePanel corpus={selectedCorpus} />}
           </section>
         )}
       </main>

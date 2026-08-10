@@ -1,62 +1,26 @@
 import { useEffect, useRef, useState } from "react";
-import { api, ChunkWindow, SearchHit } from "../api";
+import { api, ChunkWindow, SearchHit, SearchResponse, SearchStub } from "../api";
 import { pctOf, rerankByTuning, Tuning } from "../tuning";
 
-type Props = { hits: SearchHit[] | null; searching: boolean; tuning: Tuning };
+type Props = {
+  response: SearchResponse | null;
+  searching: boolean;
+  tuning: Tuning;
+};
 
-// Per-result expansion state. Keyed by chunk_id so it survives re-renders
-// when the parent list changes order under tuning.
 type ExpandState = {
-  data: ChunkWindow | null;       // null while loading or before first fetch
+  data: ChunkWindow | null;
   loading: boolean;
   error: string | null;
 };
 
-// Confidence tiers, calibrated against the new sigmoid scoring.
-// Under the calibrated map: noise floor sits at ~10-25%, weak relevant
-// 30-60%, clearly relevant 60-80%, strong 80%+. We tier on (pct, matched_by)
-// jointly so a "both retrievers agreed" hit at 70% still reads high.
-type Tier = "high" | "med" | "none";
+type ResultRow =
+  | { kind: "hit"; hit: SearchHit }
+  | { kind: "stub"; stub: SearchStub };
 
-function confidenceTier(pct: number, matchedBy: string[] | undefined): Tier {
-  const set = new Set(matchedBy || []);
-  const hasBoth = set.has("vector") && set.has("bm25");
-  if (pct >= 75 || hasBoth) return "high";
-  if (pct >= 45) return "med";
-  return "none";
+function rowRef(row: ResultRow) {
+  return row.kind === "hit" ? row.hit : row.stub;
 }
-
-const TIER_PCT_CLASS: Record<Tier, string> = {
-  high: "text-emerald-400",
-  med: "text-amber-400",
-  none: "text-zinc-500",
-};
-
-const TIER_BORDER_CLASS: Record<Tier, string> = {
-  high: "border-emerald-900/60 hover:border-emerald-700",
-  med: "border-amber-900/50 hover:border-amber-700",
-  none: "border-zinc-800 hover:border-zinc-700",
-};
-
-// Brighter borders for open results — visually anchors the user's eye to
-// what's currently expanded, especially helpful with multiple results open.
-const TIER_BORDER_CLASS_OPEN: Record<Tier, string> = {
-  high: "border-emerald-600/80",
-  med: "border-amber-600/80",
-  none: "border-zinc-600",
-};
-
-const TIER_LABEL: Record<Tier, string> = {
-  high: "high",
-  med: "soft",
-  none: "weak",
-};
-
-const TIER_LABEL_CLASS: Record<Tier, string> = {
-  high: "text-emerald-500/80",
-  med: "text-amber-500/80",
-  none: "text-zinc-600",
-};
 
 function shortSource(id: string) {
   if (id.startsWith("http")) return id;
@@ -69,45 +33,35 @@ function MatchBadge({ matchedBy }: { matchedBy: string[] | undefined }) {
   const hasV = set.has("vector");
   const hasK = set.has("bm25");
   if (!hasV && !hasK) return null;
-  // Color encoding: K (keyword/literal) = emerald, V (vector/semantic) = sky,
-  // VK (both) = violet. The hue carries meaning; the tooltip explains it.
   const tone = hasV && hasK
-    ? "bg-violet-900/40 border-violet-700/60 text-violet-300"
+    ? "border-violet-800/70 text-violet-400"
     : hasK
-    ? "bg-emerald-900/40 border-emerald-700/60 text-emerald-300"
-    : "bg-sky-900/40 border-sky-700/60 text-sky-300";
+    ? "border-emerald-800/70 text-emerald-400"
+    : "border-sky-800/70 text-sky-400";
   const label = hasV && hasK ? "VK" : hasV ? "V" : "K";
   const title = hasV && hasK
-    ? "vector + bm25 — both retrievers fired"
+    ? "Found by semantic and keyword retrieval"
     : hasV
-    ? "vector — semantic similarity match"
-    : "bm25 — exact-keyword match (literal token in source)";
+    ? "Found by semantic retrieval"
+    : "Found by exact-keyword retrieval";
   return (
-    <span
-      title={title}
-      className={`text-[10px] font-mono font-bold border rounded px-1.5 py-px ${tone}`}
-    >
+    <span title={title} className={`text-[9px] font-mono border rounded px-1 py-px ${tone}`}>
       {label}
     </span>
   );
 }
 
-export default function ResultList({ hits, searching, tuning }: Props) {
-  // Expansion state lives at the list level so the same chunk stays open
-  // across tuning-driven reorders (which only swap the array, not identity).
+export default function ResultList({ response, searching, tuning }: Props) {
   const [expanded, setExpanded] = useState<Record<string, ExpandState>>({});
 
-  // ESC collapses the most recently opened result. Tracking "most recent" by
-  // insertion order in the expanded map.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
-      setExpanded((s) => {
-        const keys = Object.keys(s);
-        if (!keys.length) return s;
-        const last = keys[keys.length - 1];
-        const next = { ...s };
-        delete next[last];
+      setExpanded((current) => {
+        const keys = Object.keys(current);
+        if (!keys.length) return current;
+        const next = { ...current };
+        delete next[keys[keys.length - 1]];
         return next;
       });
     }
@@ -115,252 +69,204 @@ export default function ResultList({ hits, searching, tuning }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  async function toggleExpand(h: SearchHit) {
-    const cur = expanded[h.chunk_id];
-    if (cur) {
-      setExpanded((e) => {
-        const next = { ...e };
-        delete next[h.chunk_id];
+  async function toggleExpand(row: ResultRow) {
+    const ref = rowRef(row);
+    const key = `${ref.corpus}:${ref.chunk_id}`;
+    if (expanded[key]) {
+      setExpanded((current) => {
+        const next = { ...current };
+        delete next[key];
         return next;
       });
       return;
     }
-    setExpanded((e) => ({
-      ...e,
-      [h.chunk_id]: { data: null, loading: true, error: null },
+    setExpanded((current) => ({
+      ...current,
+      [key]: { data: null, loading: true, error: null },
     }));
     try {
-      const data = await api.getChunk(h.corpus, h.chunk_id, 2000);
-      setExpanded((e) => ({
-        ...e,
-        [h.chunk_id]: { data, loading: false, error: null },
+      const data = await api.getChunk(ref.corpus, ref.chunk_id, 3000);
+      setExpanded((current) => ({
+        ...current,
+        [key]: { data, loading: false, error: null },
       }));
-    } catch (err) {
-      setExpanded((e) => ({
-        ...e,
-        [h.chunk_id]: {
+    } catch (error) {
+      setExpanded((current) => ({
+        ...current,
+        [key]: {
           data: null,
           loading: false,
-          error: err instanceof Error ? err.message : "failed to fetch",
+          error: error instanceof Error ? error.message : "Failed to fetch context",
         },
       }));
     }
   }
 
-  if (searching && !hits) {
+  if (searching && !response) {
     return (
-      <div className="space-y-3" aria-busy="true" aria-label="searching">
-        {[0, 1, 2].map((i) => (
-          <div
-            key={i}
-            className="border border-zinc-800 rounded p-3 animate-pulse"
-          >
-            <div className="flex items-center gap-2 mb-2">
-              <div className="h-3 w-10 bg-zinc-800 rounded" />
-              <div className="h-3 w-32 bg-zinc-800/70 rounded" />
+      <div className="border border-zinc-800 rounded-xl overflow-hidden" aria-busy="true" aria-label="Searching">
+        <div className="divide-y divide-zinc-800/70">
+          {[0, 1, 2, 3, 4, 5].map((i) => (
+            <div key={i} className="px-3 py-2.5 animate-pulse flex gap-3">
+              <div className="h-3 w-6 bg-zinc-800 rounded mt-1" />
+              <div className="flex-1">
+                <div className="h-3 w-2/5 bg-zinc-800 rounded mb-2" />
+                <div className="h-3 w-5/6 bg-zinc-800/70 rounded" />
+              </div>
             </div>
-            <div className="h-3 w-full bg-zinc-800/60 rounded mb-1.5" />
-            <div className="h-3 w-11/12 bg-zinc-800/60 rounded mb-1.5" />
-            <div className="h-3 w-4/6 bg-zinc-800/50 rounded" />
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     );
   }
-  if (hits === null) {
-    return (
-      <div className="text-zinc-600 font-mono text-sm">
-        results show up here.
-      </div>
-    );
+  if (response === null) {
+    return <div className="text-zinc-600 text-sm py-8 text-center">Search results will appear here.</div>;
   }
-  if (hits.length === 0) {
-    return <div className="text-zinc-500 font-mono text-sm">no matches.</div>;
+
+  const orderedHits = rerankByTuning(response.hits, tuning);
+  const rows: ResultRow[] = [
+    ...orderedHits.map((hit): ResultRow => ({ kind: "hit", hit })),
+    ...response.stubs.map((stub): ResultRow => ({ kind: "stub", stub })),
+  ];
+
+  if (!rows.length) {
+    return <div className="text-zinc-500 text-sm py-8 text-center">No matches.</div>;
   }
-  // Re-rank under user tuning so dragging the bm25-bias slider actually
-  // reorders the list, not just relabels it.
-  const ordered = rerankByTuning(hits, tuning);
+
   return (
-    <div className="space-y-3">
-      {ordered.map((h, i) => {
-        const displayPct = pctOf(h, tuning);
-        const tier = confidenceTier(displayPct, h.matched_by);
-        const exp = h.chunk_id ? expanded[h.chunk_id] : undefined;
-        const isOpen = !!exp;
-        return (
-          <article
-            key={h.chunk_id || i}
-            className={`border rounded p-4 transition-colors ${
-              isOpen ? TIER_BORDER_CLASS_OPEN[tier] : TIER_BORDER_CLASS[tier]
-            }`}
-          >
-            <header className="flex items-baseline justify-between mb-2 gap-3">
-              <div className="text-xs font-mono text-zinc-500 truncate flex items-center gap-2 min-w-0">
-                {/* Chevron — visible affordance that the row is clickable.
-                    Rotates 90° on expand so state is unambiguous. */}
-                {h.chunk_id && (
-                  <span
-                    className={`text-zinc-500 select-none transition-transform inline-block w-3 ${
-                      isOpen ? "rotate-90 text-zinc-300" : ""
-                    }`}
-                    aria-hidden="true"
-                  >
-                    ▸
-                  </span>
-                )}
-                <span className="text-zinc-400">{h.corpus}</span>
-                <span className="text-zinc-700">·</span>
-                <span className="truncate">{shortSource(h.source_id)}</span>
-                <MatchBadge matchedBy={h.matched_by} />
-              </div>
-              <div className="flex items-baseline gap-2 shrink-0">
-                <span
-                  className={`text-[10px] font-mono uppercase tracking-wider ${TIER_LABEL_CLASS[tier]}`}
-                >
-                  {TIER_LABEL[tier]}
-                </span>
-                <span
-                  className={`text-sm font-mono font-semibold ${TIER_PCT_CLASS[tier]}`}
-                  title={`raw scores: ${formatRaw(h)}`}
-                >
-                  {displayPct.toFixed(1)}%
-                </span>
-              </div>
-            </header>
-            {/* Body — clickable to expand. Keep the existing inline preview
-                until the user opts in; expanded view replaces it. div+role
-                instead of <button> because the expanded view nests its own
-                buttons (nested buttons are invalid HTML). */}
-            <div
-              role={h.chunk_id ? "button" : undefined}
-              tabIndex={h.chunk_id ? 0 : -1}
-              onClick={() => h.chunk_id && toggleExpand(h)}
-              onKeyDown={(e) => {
-                if (h.chunk_id && (e.key === "Enter" || e.key === " ")) {
-                  e.preventDefault();
-                  toggleExpand(h);
-                }
-              }}
-              className={`font-mono text-sm leading-relaxed whitespace-pre-wrap break-words -mx-1 px-1 py-0.5 rounded transition-colors ${
-                h.chunk_id ? "cursor-pointer hover:bg-zinc-900/30" : ""
-              } ${isOpen ? "bg-zinc-900/20" : ""}`}
-              title={h.chunk_id ? (isOpen ? "click to collapse (Esc)" : "click to expand context") : ""}
-            >
-              {isOpen ? (
-                <ExpandedView
-                  exp={exp!}
-                  hit={h}
-                  fallback={
-                    <>
-                      {h.context_before && (
-                        <span className="text-zinc-600">
-                          {trimTo(h.context_before, 200, "start")}
-                        </span>
-                      )}
-                      <mark className="bg-yellow-500/20 text-yellow-100 not-italic">
-                        {h.chunk}
-                      </mark>
-                      {h.context_after && (
-                        <span className="text-zinc-600">
-                          {" "}
-                          {trimTo(h.context_after, 200, "end")}
-                        </span>
-                      )}
-                    </>
+    <section data-testid="result-list" className="border border-zinc-800 rounded-xl overflow-hidden bg-zinc-950/20">
+      <header className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between gap-3 text-[11px] font-mono">
+        <span className="text-zinc-400">
+          {rows.length} result{rows.length === 1 ? "" : "s"}
+          <span className="text-zinc-700"> · </span>
+          <span className="text-zinc-600">distinct evidence, relevance order</span>
+        </span>
+        <span className="text-zinc-600 shrink-0">
+          {searching ? "refreshing" : `${response.hits.length} rich · ${response.stubs.length} compact`}
+        </span>
+      </header>
+
+      <ol className="divide-y divide-zinc-800/70">
+        {rows.map((row, index) => {
+          const ref = rowRef(row);
+          const key = `${ref.corpus}:${ref.chunk_id}`;
+          const exp = expanded[key];
+          const isOpen = Boolean(exp);
+          const hit = row.kind === "hit" ? row.hit : null;
+          const pct = hit ? pctOf(hit, tuning) : row.stub.similarity_pct;
+          const snippet = hit ? hit.chunk : row.stub.snippet;
+          const label = hit?.relevance_label || relevanceLabel(pct);
+          return (
+            <li data-testid="result-row" key={key} className={isOpen ? "bg-zinc-900/45" : "hover:bg-zinc-900/25"}>
+              <div
+                role="button"
+                tabIndex={0}
+                aria-expanded={isOpen}
+                onClick={() => toggleExpand(row)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    toggleExpand(row);
                   }
+                }}
+                className="grid grid-cols-[2rem_minmax(0,1fr)_auto] gap-2.5 px-3 py-2.5 cursor-pointer focus:outline-none focus:bg-zinc-900/60"
+              >
+                <span className="font-mono text-[11px] text-zinc-700 pt-0.5 tabular-nums">
+                  {String(index + 1).padStart(2, "0")}
+                </span>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 min-w-0 text-[10px] font-mono mb-1">
+                    <span className={`inline-block transition-transform text-zinc-600 ${isOpen ? "rotate-90" : ""}`}>▸</span>
+                    <span className="text-zinc-400 shrink-0">{ref.corpus}</span>
+                    <span className="text-zinc-700">/</span>
+                    <span className="text-zinc-500 truncate" title={ref.source_id}>{shortSource(ref.source_id)}</span>
+                    {hit && <MatchBadge matchedBy={hit.matched_by} />}
+                    {hit?.anchor && (
+                      <span className="text-zinc-700 truncate hidden lg:inline" title={hit.anchor}>
+                        {lineAnchor(hit)}
+                      </span>
+                    )}
+                    {ref.doc_timestamp && (
+                      <time className="text-zinc-700 ml-auto shrink-0 hidden sm:inline">
+                        {new Date(ref.doc_timestamp * 1000).toISOString().slice(0, 10)}
+                      </time>
+                    )}
+                  </div>
+                  <p className="result-snippet text-[13px] leading-[1.35rem] text-zinc-300 font-mono break-words">
+                    {snippet}
+                  </p>
+                  {hit && <MetadataHints metadata={hit.metadata} />}
+                </div>
+                <div className="pl-2 text-right font-mono tabular-nums self-start">
+                  <div className={scoreTone(pct)}>{pct.toFixed(0)}%</div>
+                  <div className="text-[9px] uppercase tracking-wide text-zinc-600">{label}</div>
+                </div>
+              </div>
+
+              {isOpen && (
+                <ExpandedView
+                  state={exp}
+                  row={row}
+                  onCollapse={() => toggleExpand(row)}
                 />
-              ) : (
-                <>
-                  {h.context_before && (
-                    <span className="text-zinc-600">
-                      {trimTo(h.context_before, 200, "start")}
-                    </span>
-                  )}
-                  <mark className="bg-yellow-500/20 text-yellow-100 not-italic">
-                    {h.chunk}
-                  </mark>
-                  {h.context_after && (
-                    <span className="text-zinc-600">
-                      {" "}
-                      {trimTo(h.context_after, 200, "end")}
-                    </span>
-                  )}
-                </>
               )}
-            </div>
-          </article>
-        );
-      })}
-    </div>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
   );
 }
 
 function ExpandedView({
-  exp,
-  hit,
-  fallback,
+  state,
+  row,
+  onCollapse,
 }: {
-  exp: ExpandState;
-  hit: SearchHit;
-  // Fallback content (the inline preview from the search hit) is shown while
-  // the wider window is in flight, so the user never sees the chunk disappear.
-  fallback: React.ReactNode;
+  state: ExpandState;
+  row: ResultRow;
+  onCollapse: () => void;
 }) {
   const markRef = useRef<HTMLElement | null>(null);
+  const ref = rowRef(row);
 
-  // Once data lands, scroll the highlighted chunk into view inside the
-  // scrollable container. Without this, a chunk at chunk_start=5000 ends up
-  // off-screen after a ±2000 expansion, forcing the user to hunt for it.
   useEffect(() => {
-    if (!exp.data || !markRef.current) return;
-    markRef.current.scrollIntoView({ block: "center", behavior: "auto" });
-  }, [exp.data]);
+    if (state.data && markRef.current) {
+      markRef.current.scrollIntoView({ block: "nearest", behavior: "auto" });
+    }
+  }, [state.data]);
 
-  if (exp.error) {
+  if (state.error) {
+    return <div className="border-t border-zinc-800 px-12 py-3 text-xs text-red-400">{state.error}</div>;
+  }
+  if (state.loading || !state.data) {
     return (
-      <div className="text-red-400 text-xs py-1">error: {exp.error}</div>
+      <div className="border-t border-zinc-800 px-12 py-3 text-[11px] font-mono text-zinc-500">
+        Loading source context...
+      </div>
     );
   }
-  if (exp.loading && !exp.data) {
-    return (
-      <>
-        <div className="opacity-60">{fallback}</div>
-        <div className="mt-2 text-[10px] font-mono text-zinc-500 flex items-center gap-2">
-          <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-500 animate-pulse" />
-          loading wider context…
-        </div>
-      </>
-    );
-  }
-  const d = exp.data!;
-  const coveredChars = d.before.length + d.chunk.length + d.after.length;
+
+  const data = state.data;
+  const shown = data.before.length + data.chunk.length + data.after.length;
   return (
-    <>
-      <div className="flex items-center justify-between mb-2 text-[10px] font-mono text-zinc-500">
-        <span>
-          showing {coveredChars.toLocaleString()} / {d.source_length.toLocaleString()} chars
-        </span>
-        <span className="text-zinc-600">click row or Esc to collapse</span>
+    <div className="border-t border-zinc-800 px-3 sm:px-12 py-3" onClick={(e) => e.stopPropagation()}>
+      <div className="flex items-center justify-between gap-3 text-[10px] font-mono text-zinc-600 mb-2">
+        <span>{shown.toLocaleString()} / {data.source_length.toLocaleString()} characters</span>
+        <button type="button" onClick={onCollapse} className="hover:text-zinc-300">Collapse · Esc</button>
       </div>
-      <div className="max-h-[600px] overflow-y-auto pr-2 border-l-2 border-zinc-800 pl-3 whitespace-pre-wrap break-words">
-        {d.before && <span className="text-zinc-500">{d.before}</span>}
-        <mark
-          ref={markRef}
-          className="bg-yellow-500/25 text-yellow-100 not-italic"
-        >
-          {d.chunk}
-        </mark>
-        {d.after && <span className="text-zinc-500">{d.after}</span>}
+      <div className="max-h-[560px] overflow-y-auto border-l-2 border-zinc-800 pl-3 pr-2 text-sm font-mono leading-relaxed whitespace-pre-wrap break-words">
+        {data.before && <span className="text-zinc-500">{data.before}</span>}
+        <mark ref={markRef} className="bg-yellow-500/20 text-yellow-100 not-italic">{data.chunk}</mark>
+        {data.after && <span className="text-zinc-500">{data.after}</span>}
       </div>
-      <RelatedChunks hit={hit} />
-    </>
+      {row.kind === "hit" && <ScoreBreakdown hit={row.hit} />}
+      <RelatedChunks corpus={ref.corpus} chunkId={ref.chunk_id} />
+    </div>
   );
 }
 
-// Query-by-example: nearest neighbours of the expanded chunk, fetched on
-// demand. Mirrors `vecgrep related` — useful for "what else is like this?"
-// without composing a new query.
-function RelatedChunks({ hit }: { hit: SearchHit }) {
+function RelatedChunks({ corpus, chunkId }: { corpus: string; chunkId: string }) {
   const [state, setState] = useState<
     | { kind: "idle" }
     | { kind: "loading" }
@@ -368,85 +274,75 @@ function RelatedChunks({ hit }: { hit: SearchHit }) {
     | { kind: "loaded"; hits: SearchHit[] }
   >({ kind: "idle" });
 
-  async function load(e: React.MouseEvent) {
-    e.stopPropagation(); // the parent row toggles collapse on click
+  async function load() {
     setState({ kind: "loading" });
     try {
-      const r = await api.related(hit.corpus, hit.chunk_id);
-      // The chunk is its own nearest neighbour; drop it.
-      setState({
-        kind: "loaded",
-        hits: r.hits.filter((n) => n.chunk_id !== hit.chunk_id),
-      });
-    } catch (err) {
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : "failed to fetch",
-      });
+      const response = await api.related(corpus, chunkId);
+      setState({ kind: "loaded", hits: response.hits.filter((hit) => hit.chunk_id !== chunkId) });
+    } catch (error) {
+      setState({ kind: "error", message: error instanceof Error ? error.message : "Failed to fetch" });
     }
   }
 
   if (state.kind === "idle") {
-    return (
-      <button
-        type="button"
-        onClick={load}
-        className="mt-2 text-[10px] font-mono uppercase tracking-wider text-zinc-600 hover:text-zinc-300 transition-colors"
-      >
-        related chunks ▸
-      </button>
-    );
+    return <button type="button" onClick={load} className="mt-3 text-[10px] font-mono uppercase tracking-wider text-zinc-600 hover:text-zinc-300">Find related evidence ▸</button>;
   }
-  if (state.kind === "loading") {
-    return (
-      <div className="mt-2 text-[10px] font-mono text-zinc-500 flex items-center gap-2">
-        <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-500 animate-pulse" />
-        finding neighbours…
-      </div>
-    );
-  }
-  if (state.kind === "error") {
-    return (
-      <div className="mt-2 text-[10px] font-mono text-red-400">related: {state.message}</div>
-    );
-  }
-  if (!state.hits.length) {
-    return <div className="mt-2 text-[10px] font-mono text-zinc-600">no neighbours found.</div>;
-  }
+  if (state.kind === "loading") return <div className="mt-3 text-[10px] font-mono text-zinc-600">Finding related evidence...</div>;
+  if (state.kind === "error") return <div className="mt-3 text-[10px] font-mono text-red-400">{state.message}</div>;
+  if (!state.hits.length) return <div className="mt-3 text-[10px] font-mono text-zinc-600">No related chunks.</div>;
   return (
-    <div
-      className="mt-3 border-t border-zinc-800/70 pt-2 space-y-1.5"
-      onClick={(e) => e.stopPropagation()}
-    >
-      <div className="text-[10px] font-mono uppercase tracking-wider text-zinc-600">
-        related chunks
+    <div className="mt-3 border-t border-zinc-800 pt-2">
+      <div className="text-[10px] font-mono uppercase tracking-wider text-zinc-600 mb-1">Related evidence</div>
+      <div className="divide-y divide-zinc-800/60">
+        {state.hits.slice(0, 6).map((hit) => (
+          <div key={hit.chunk_id} className="py-1.5 grid grid-cols-[2.5rem_minmax(0,1fr)] gap-2 text-xs font-mono">
+            <span className="text-zinc-600 tabular-nums">{hit.similarity_pct.toFixed(0)}%</span>
+            <span className="text-zinc-400 truncate" title={hit.source_id}>{shortSource(hit.source_id)} · {hit.chunk}</span>
+          </div>
+        ))}
       </div>
-      {state.hits.map((n) => (
-        <div key={n.chunk_id} className="text-xs font-mono flex items-baseline gap-2 min-w-0">
-          <span className="text-zinc-500 shrink-0">{n.similarity_pct.toFixed(0)}%</span>
-          <span className="text-zinc-600 shrink-0 truncate max-w-[180px]" title={n.source_id}>
-            {shortSource(n.source_id)}
-          </span>
-          <span className="text-zinc-400 truncate">{n.chunk.slice(0, 160)}</span>
-        </div>
-      ))}
     </div>
   );
 }
 
-function trimTo(s: string, n: number, side: "start" | "end") {
-  if (s.length <= n) return s;
-  return side === "start" ? "... " + s.slice(-n) : s.slice(0, n) + " ...";
+function MetadataHints({ metadata }: { metadata: Record<string, unknown> }) {
+  const values: string[] = [];
+  const speakers = Array.isArray(metadata.speakers) ? metadata.speakers.map(String) : [];
+  if (speakers.length) values.push(speakers.slice(0, 3).join(", "));
+  if (metadata.has_code === true) values.push("code");
+  if (metadata.has_table === true) values.push("table");
+  if (metadata.has_link === true) values.push("link");
+  if (!values.length) return null;
+  return <div className="mt-1 text-[9px] font-mono text-zinc-700 truncate">{values.join(" · ")}</div>;
 }
 
-function formatRaw(h: SearchHit): string {
-  const e = h.explain;
-  if (!e) return "n/a";
+function ScoreBreakdown({ hit }: { hit: SearchHit }) {
+  const explain = hit.explain || {};
   const parts: string[] = [];
-  if (typeof e.vector_cosine === "number")
-    parts.push(`cos=${e.vector_cosine.toFixed(3)}`);
-  if (typeof e.bm25_score === "number")
-    parts.push(`bm25=${e.bm25_score.toFixed(2)}`);
-  if (typeof e.rrf === "number") parts.push(`rrf=${e.rrf.toFixed(4)}`);
-  return parts.join(" · ") || "n/a";
+  if (typeof explain.vector_cosine === "number") parts.push(`vector ${explain.vector_cosine.toFixed(3)}${explain.vector_rank ? ` #${explain.vector_rank}` : ""}`);
+  if (typeof explain.bm25_score === "number") parts.push(`keyword ${explain.bm25_score.toFixed(2)}${explain.bm25_rank ? ` #${explain.bm25_rank}` : ""}`);
+  if (typeof explain.rrf === "number") parts.push(`fusion ${explain.rrf.toFixed(4)}`);
+  if (typeof explain.rerank_score === "number") parts.push(`rerank ${explain.rerank_score.toFixed(3)}`);
+  if (!parts.length) return null;
+  return <div className="mt-2 text-[10px] font-mono text-zinc-700">{parts.join(" · ")}</div>;
+}
+
+function lineAnchor(hit: SearchHit) {
+  if (!hit.line_start) return "";
+  return hit.line_end && hit.line_end !== hit.line_start
+    ? `L${hit.line_start}-${hit.line_end}`
+    : `L${hit.line_start}`;
+}
+
+function relevanceLabel(pct: number) {
+  if (pct >= 85) return "exact";
+  if (pct >= 70) return "strong";
+  if (pct >= 45) return "related";
+  return "weak";
+}
+
+function scoreTone(pct: number) {
+  if (pct >= 75) return "text-sm text-emerald-400 font-semibold";
+  if (pct >= 45) return "text-sm text-amber-400 font-semibold";
+  return "text-sm text-zinc-500 font-semibold";
 }

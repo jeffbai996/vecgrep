@@ -13,12 +13,14 @@ from ..service import VecgrepService
 from ..store import CorpusError
 from .schemas import (
     Calibration,
+    BrowseRequest,
     ChunkWindow,
     ConfigOut,
     CorpusOut,
     DecayRequest,
     IndexRequest,
     IndexResponse,
+    IncidentRequest,
     SearchHit,
     SearchRequest,
     SearchResponse,
@@ -197,6 +199,7 @@ def search(req: SearchRequest) -> SearchResponse:
                 req.query,
                 req.corpus,
                 full_k=req.full_k,
+                max_total=req.max_total,
                 token_ceiling=req.token_ceiling,
                 **common,
             )
@@ -250,6 +253,43 @@ def timeline(req: TimelineRequest) -> list[TimelineGroup]:
     except EmbedBackendError as e:
         raise HTTPException(status_code=503, detail=str(e))
     return [TimelineGroup(**g) for g in groups]
+
+
+@router.post("/incident")
+def incident(req: IncidentRequest) -> dict | None:
+    """Structured incident reconstruction with primary and related evidence."""
+    if req.mode not in ("hybrid", "vector", "bm25"):
+        raise HTTPException(status_code=400, detail=f"Unknown search mode: {req.mode}")
+    try:
+        return _service().incident(
+            req.query,
+            req.corpus,
+            mode=req.mode,
+            filters=req.filters or None,
+        )
+    except CorpusError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except EmbedBackendError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@router.post("/browse")
+def browse(req: BrowseRequest) -> list[dict]:
+    """Location-first reading by channel, date/range, or source path."""
+    try:
+        return _service().browse(
+            req.corpus,
+            channel=req.channel,
+            date=req.date,
+            source_path=req.source_path,
+            since=req.since,
+            until=req.until,
+            tail=req.tail,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except CorpusError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/oauth/status")

@@ -350,10 +350,13 @@ retrieval core is unchanged.
 Controls:
 
 - Index forms with a built-in dropdown explainer for source types.
-- Search and timeline tabs, with the same hard-filter grammar as the CLI/API.
+- Search, timeline/incident, temporal compare, and location-first browse workspaces.
 - Corpus list with delete plus a health snapshot for the selected corpus.
-- Search bar with top-k slider, mode toggle (hybrid/vector/bm25), reranker checkbox, and filters.
-- Results with expandable source context and query-by-example related chunks.
+- Search bar with a 40-result default, mode toggle (hybrid/semantic/keyword),
+  reranker, quick filters, and the full precise-filter grammar.
+- Dense ranked evidence rows: the top eight carry rich retrieval metadata and
+  the remaining breadth tier uses one-line stubs. Every row expands to source
+  context in place and supports query-by-example related chunks.
 
 Confidence is shown as a colored tier (high / soft / weak) tied to which retriever placed the hit (V vector, K keyword, VK both) — so a 1.6% BM25 hit reads as the strong literal-keyword match it actually is, not noise.
 
