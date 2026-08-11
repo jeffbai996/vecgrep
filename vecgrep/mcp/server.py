@@ -775,55 +775,64 @@ def _run_direct_write(content: str, source_kind: str | None = None,
             f"content is {n_bytes} bytes, over the {_direct_write_max_bytes()}-byte "
             f"direct-write cap. Split it, or use propose_write for a large entry.")})
 
-    corpus_dir = _write_dir(corpus)
-    if not _direct_write_rate_ok(corpus_dir):
-        return json.dumps({"error": (
-            f"rate cap reached ({_direct_write_max_per_hour()} direct writes/hour "
-            f"for {corpus!r}). This is runaway-loop protection; wait, or raise "
-            f"VECGREP_DIRECT_WRITE_MAX_PER_HOUR.")})
+    return _commit_direct_write(corpus, content, title, source_kind, tags)
 
-    from datetime import datetime as _datetime, timezone as _timezone
 
-    corpus_dir.mkdir(parents=True, exist_ok=True)
-    doc_id = _P.next_doc_id(corpus_dir, corpus)
-    meta = {
-        "origin": "agent-direct",
-        "status": "active",
-        "tier": "normal",
-        "corpus": corpus,
-        "created_at": _datetime.now(_timezone.utc).isoformat(timespec="seconds"),
-    }
-    if title:
-        meta["title"] = title
-    if source_kind:
-        meta["source_kind"] = source_kind
-    if tags:
-        meta["tags"] = list(tags)
-    try:
-        _P._validate_meta(meta)
-    except _P.ProposalError as e:
-        return json.dumps({"error": str(e)})
+def _commit_direct_write(corpus: str, content: str, title: str | None,
+                         source_kind: str | None, tags: list[str] | None) -> str:
+    """Commit file creation + indexing under the corpus admission lock."""
+    from ..backend.write import proposal as _P
+    svc = _svc()
+    with svc.locks.write(corpus):
+        svc._recover_corpus_locked(corpus)
+        corpus_dir = _write_dir(corpus)
+        if not _direct_write_rate_ok(corpus_dir):
+            return json.dumps({"error": (
+                f"rate cap reached ({_direct_write_max_per_hour()} direct writes/hour "
+                f"for {corpus!r}). This is runaway-loop protection; wait, or raise "
+                f"VECGREP_DIRECT_WRITE_MAX_PER_HOUR.")})
 
-    rendered = _P.render_doc(doc_id, content, meta)
-    target = corpus_dir / f"{doc_id}.md"
-    target.write_text(rendered)
+        from datetime import datetime as _datetime, timezone as _timezone
 
-    # Embed immediately so the entry is searchable now -- the whole point is
-    # "save this and be able to find it". Same incremental single-file index the
-    # confirm path uses. A failure here leaves a findable doc on disk (truth), so
-    # it is reported rather than fatal; a later reindex reconciles.
-    index_note = ""
-    try:
-        _svc().index(str(target), corpus)
-    except Exception as e:  # noqa: BLE001 - never lose the write over an embed
-        index_note = (f" (not yet searchable: {e}; "
-                      f"`vecgrep index` will reconcile)")
+        corpus_dir.mkdir(parents=True, exist_ok=True)
+        doc_id = _P.next_doc_id(corpus_dir, corpus)
+        meta = {
+            "origin": "agent-direct",
+            "status": "active",
+            "tier": "normal",
+            "corpus": corpus,
+            "created_at": _datetime.now(_timezone.utc).isoformat(timespec="seconds"),
+        }
+        if title:
+            meta["title"] = title
+        if source_kind:
+            meta["source_kind"] = source_kind
+        if tags:
+            meta["tags"] = list(tags)
+        try:
+            _P._validate_meta(meta)
+        except _P.ProposalError as e:
+            return json.dumps({"error": str(e)})
 
-    return json.dumps({
-        "committed": True, "doc_id": doc_id, "corpus": corpus,
-        "path": str(target),
-        "status": f"written and indexed{index_note}",
-    })
+        rendered = _P.render_doc(doc_id, content, meta)
+        target = corpus_dir / f"{doc_id}.md"
+        target.write_text(rendered)
+
+        # Embed immediately so the entry is searchable now -- the whole point is
+        # "save this and be able to find it". Same incremental single-file index
+        # the confirm path uses. The service lock is re-entrant here.
+        index_note = ""
+        try:
+            svc.index(str(target), corpus)
+        except Exception as e:  # noqa: BLE001 - never lose the write over an embed
+            index_note = (f" (not yet searchable: {e}; "
+                          f"`vecgrep index` will reconcile)")
+
+        return json.dumps({
+            "committed": True, "doc_id": doc_id, "corpus": corpus,
+            "path": str(target),
+            "status": f"written and indexed{index_note}",
+        })
 
 
 def _run_direct_edit(doc_id: str, content: str | None = None,
@@ -871,68 +880,80 @@ def _run_direct_edit(doc_id: str, content: str | None = None,
         return json.dumps({"error": (
             "direct edit needs content (or old_str/new_str for a patch).")})
 
-    # Resolve the target INSIDE this corpus only. _write_dir(corpus) is the sole
+    return _commit_direct_edit(corpus, doc_id, content, old_str, new_str, is_patch)
+
+
+def _commit_direct_edit(corpus: str, doc_id: str, content: str | None,
+                        old_str: str | None, new_str: str | None,
+                        is_patch: bool) -> str:
+    """Commit backup + local edit + re-index as one admitted mutation."""
+    from ..backend.write import proposal as _P
+    svc = _svc()
+    with svc.locks.write(corpus):
+        svc._recover_corpus_locked(corpus)
+
+        # Resolve the target INSIDE this corpus only. _write_dir(corpus) is the sole
     # directory consulted, so a doc_id belonging to another corpus simply doesn't
     # exist here -- the corpus boundary is structural, not a check to forget.
-    target = _write_dir(corpus) / f"{doc_id}.md"
-    if not target.exists():
-        return json.dumps({"error": (
-            f"doc {doc_id!r} not found in corpus {corpus!r} — direct edit only "
-            f"touches its own corpus. (Nothing was changed.)")})
+        target = _write_dir(corpus) / f"{doc_id}.md"
+        if not target.exists():
+            return json.dumps({"error": (
+                f"doc {doc_id!r} not found in corpus {corpus!r} — direct edit only "
+                f"touches its own corpus. (Nothing was changed.)")})
 
-    on_disk = target.read_text()
-    if "tier: protected" in on_disk:
-        return json.dumps({"error": (
-            f"{doc_id} is tier: protected — human-only. Use propose_edit so a "
-            f"human confirms it with the exact-id ack.")})
+        on_disk = target.read_text()
+        if "tier: protected" in on_disk:
+            return json.dumps({"error": (
+                f"{doc_id} is tier: protected — human-only. Use propose_edit so a "
+                f"human confirms it with the exact-id ack.")})
 
-    body = _doc_body(corpus, doc_id)
-    if body is None:
-        return json.dumps({"error": f"could not read the body of {doc_id!r}."})
+        body = _doc_body(corpus, doc_id)
+        if body is None:
+            return json.dumps({"error": f"could not read the body of {doc_id!r}."})
 
-    if is_patch:
-        try:
-            new_body = _apply_patch(body, old_str, new_str)
-        except ValueError as e:
-            return json.dumps({"error": str(e)})
-    else:
-        new_body = content
+        if is_patch:
+            try:
+                new_body = _apply_patch(body, old_str, new_str)
+            except ValueError as e:
+                return json.dumps({"error": str(e)})
+        else:
+            new_body = content
 
-    n_bytes = len(new_body.encode("utf-8"))
-    if n_bytes > _direct_write_max_bytes():
-        return json.dumps({"error": (
-            f"result is {n_bytes} bytes, over the {_direct_write_max_bytes()}-byte "
-            f"direct-write cap.")})
+        n_bytes = len(new_body.encode("utf-8"))
+        if n_bytes > _direct_write_max_bytes():
+            return json.dumps({"error": (
+                f"result is {n_bytes} bytes, over the {_direct_write_max_bytes()}-byte "
+                f"direct-write cap.")})
 
     # Back up BEFORE mutating: this write had no human review, so the previous
     # body must stay recoverable. Timestamped so repeated edits don't clobber
     # each other's history.
-    import time as _t
-    bak = target.with_suffix(f".md.bak-{int(_t.time())}")
-    bak.write_text(on_disk)
+        import time as _t
+        bak = target.with_suffix(f".md.bak-{int(_t.time())}")
+        bak.write_text(on_disk)
 
     # Preserve the existing frontmatter, swap only the body, and record that an
     # unreviewed edit touched it (and when) for audit.
-    from ..backend.ingestion.adapters.markdown import parse_frontmatter
-    meta = dict(parse_frontmatter(on_disk) or {})
-    meta.update({"corpus": corpus, "origin": "agent-direct"})
-    from datetime import datetime as _datetime, timezone as _timezone
-    meta["edited_at"] = _datetime.now(_timezone.utc).isoformat(timespec="seconds")
-    rendered = _P.render_doc(doc_id, new_body, meta)
-    target.write_text(rendered)
+        from ..backend.ingestion.adapters.markdown import parse_frontmatter
+        meta = dict(parse_frontmatter(on_disk) or {})
+        meta.update({"corpus": corpus, "origin": "agent-direct"})
+        from datetime import datetime as _datetime, timezone as _timezone
+        meta["edited_at"] = _datetime.now(_timezone.utc).isoformat(timespec="seconds")
+        rendered = _P.render_doc(doc_id, new_body, meta)
+        target.write_text(rendered)
 
-    index_note = ""
-    try:
-        _svc().index(str(target), corpus)
-    except Exception as e:  # noqa: BLE001 - the file on disk is the truth
-        index_note = (f" (index stale: {e}; `vecgrep index` will reconcile)")
+        index_note = ""
+        try:
+            svc.index(str(target), corpus)
+        except Exception as e:  # noqa: BLE001 - the file on disk is the truth
+            index_note = (f" (index stale: {e}; `vecgrep index` will reconcile)")
 
-    return json.dumps({
-        "committed": True, "doc_id": doc_id, "corpus": corpus,
-        "path": str(target), "backup": str(bak),
-        "mode": "patch" if is_patch else "overwrite",
-        "status": f"edited and re-indexed{index_note}",
-    })
+        return json.dumps({
+            "committed": True, "doc_id": doc_id, "corpus": corpus,
+            "path": str(target), "backup": str(bak),
+            "mode": "patch" if is_patch else "overwrite",
+            "status": f"edited and re-indexed{index_note}",
+        })
 
 
 def _fire_propose_hook(pr) -> None:

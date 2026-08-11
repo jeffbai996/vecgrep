@@ -13,7 +13,7 @@ import os
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -60,6 +60,8 @@ from .timeline import (
     build_timeline,
     parse_events,
 )
+from .mutation import CorpusLocks
+from .mutation_journal import MutationJournal
 
 
 CHUNKERS: dict[str, type[Chunker]] = {
@@ -215,12 +217,22 @@ class VecgrepService:
     ) -> None:
         self.settings = settings or get_settings()
         self.ephemeral = ephemeral
-        self.registry = CorpusRegistry(self.settings.corpora_file)
+        self.locks = CorpusLocks(
+            None if ephemeral else self.settings.home / "locks"
+        )
+        self.registry = CorpusRegistry(
+            self.settings.corpora_file,
+            locks=self.locks,
+            in_memory=ephemeral,
+        )
         self.store = QdrantStore(
             None if ephemeral else self.settings.qdrant_path,
             url=None if ephemeral else self.settings.qdrant_url,
         )
         self.bm25 = BM25Store(None if ephemeral else self.settings.home / "bm25")
+        self.mutations = MutationJournal(
+            None if ephemeral else self.settings.home / "mutations"
+        )
         self._backend_cache: dict[str, EmbedBackend] = {}
         # Embedding cache lives on disk except in ephemeral mode. Wrapping
         # is opt-in per backend in _backend_for() so tests / mocks can
@@ -231,6 +243,117 @@ class VecgrepService:
                 read_only=embed_cache_read_only,
             )
         )
+        self.recover_pending_mutations()
+
+    # ----- mutation recovery --------------------------------------------------
+    def recover_pending_mutations(self) -> list[str]:
+        """Repair incomplete corpus commits left by a dead writer.
+
+        Admission is reacquired per corpus. If the journal belongs to a live
+        writer this waits; once that writer commits the record disappears and
+        there is nothing to recover.
+        """
+        recovered: list[str] = []
+        for corpus_name in self.mutations.pending_corpora():
+            with self.locks.write(corpus_name):
+                if self._recover_corpus_locked(corpus_name):
+                    recovered.append(corpus_name)
+        return recovered
+
+    def _recover_if_pending(self, corpus_name: str) -> None:
+        if self.mutations.read(corpus_name) is None:
+            return
+        with self.locks.write(corpus_name):
+            self._recover_corpus_locked(corpus_name)
+
+    def _recover_corpus_locked(self, corpus_name: str) -> bool:
+        record = self.mutations.read(corpus_name)
+        if record is None:
+            return False
+        operation = record.get("operation")
+        phase = record.get("phase")
+        collection = _collection_for(corpus_name)
+
+        if operation == "delete_corpus":
+            self.store.drop_collection(collection)
+            self.bm25.drop(corpus_name)
+            if self.registry.has(corpus_name):
+                self.registry.delete(corpus_name)
+            self.mutations.finish(corpus_name)
+            return True
+
+        if operation not in {"index_source", "delete_source"}:
+            raise CorpusError(
+                f"unknown pending mutation {operation!r} for {corpus_name}"
+            )
+
+        before_data = record.get("corpus_before")
+        target_data = record.get("corpus_target")
+        source_id = str(record.get("source_id") or "")
+
+        if operation == "index_source" and phase == "prepared":
+            # Qdrant may have accepted zero, some, or all batches before the
+            # writer died. Restore the exact old point set, then rebuild both
+            # derivatives from that canonical state.
+            metadata = before_data
+            old_points = list(record.get("old_points") or [])
+            if old_points and metadata:
+                self.store.ensure_collection(collection, int(metadata["dim"]))
+            self.store.restore_source(collection, source_id, old_points)
+        elif operation == "delete_source":
+            # A persisted delete intent is always completed. The source file
+            # is outside vecgrep's authority and may already be gone.
+            self.store.delete_by_source(collection, source_id)
+            metadata = target_data or before_data
+        else:
+            # Qdrant finished before the phase marker landed. Complete BM25 +
+            # registry from Qdrant; both operations are deterministic.
+            metadata = target_data or before_data
+
+        live_count = self.store.count(collection)
+        if metadata is None and live_count == 0:
+            self.store.drop_collection(collection)
+            self.bm25.drop(corpus_name)
+            if self.registry.has(corpus_name):
+                self.registry.delete(corpus_name)
+            self.mutations.finish(corpus_name)
+            return True
+        if metadata is None:
+            raise CorpusError(
+                f"cannot recover {corpus_name}: live points have no corpus metadata"
+            )
+
+        corpus = Corpus(**metadata)
+        sources: list[str] = []
+        source_hashes: dict[str, str] = {}
+        bm25_records: list[tuple[str, str, dict]] = []
+        for point_id, payload in self.store.iter_payloads(collection):
+            text = payload.get("text")
+            if not isinstance(text, str):
+                raise CorpusError(
+                    f"cannot recover {corpus_name}: {point_id} has no chunk text"
+                )
+            compact_payload = dict(payload)
+            compact_payload.pop("source_text", None)
+            bm25_records.append((point_id, text, compact_payload))
+            sid = payload.get("source_id")
+            if isinstance(sid, str) and sid not in source_hashes:
+                sources.append(sid)
+                source_text = payload.get("source_text")
+                if isinstance(source_text, str):
+                    source_hashes[sid] = hashlib.sha256(
+                        source_text.encode("utf-8")
+                    ).hexdigest()
+
+        self.bm25.replace(corpus_name, bm25_records)
+        corpus.sources = sources
+        corpus.source_hashes = source_hashes
+        corpus.doc_count = len(sources)
+        corpus.chunk_count = len(bm25_records)
+        corpus.updated_at = time.time()
+        self.registry.upsert(corpus)
+        self.mutations.finish(corpus_name)
+        return True
 
     # ----- backend resolution ---------------------------------------------------
     def _backend_for(self, corpus: Corpus | None) -> EmbedBackend:
@@ -301,6 +424,27 @@ class VecgrepService:
 
     # ----- indexing -------------------------------------------------------------
     def index(
+        self,
+        source: str,
+        corpus_name: str,
+        chunker_name: str = "sentence_window",
+        force: bool = False,
+        include: str | None = None,
+        **kwargs,
+    ) -> tuple[int, int, int]:
+        """Serialize one corpus mutation across every process and surface."""
+        with self.locks.write(corpus_name):
+            self._recover_corpus_locked(corpus_name)
+            return self._index_locked(
+                source,
+                corpus_name,
+                chunker_name,
+                force,
+                include,
+                **kwargs,
+            )
+
+    def _index_locked(
         self,
         source: str,
         corpus_name: str,
@@ -404,6 +548,30 @@ class VecgrepService:
             if replace_existing and not (
                 resume_source_counts is not None and matches_recorded_source
             ):
+                old_records = self.store.source_records(collection, doc.source_id)
+            else:
+                old_records = []
+
+            journaled = update_bm25 and update_registry
+            if journaled:
+                target = Corpus(**asdict(corpus))
+                if doc.source_id not in target.sources:
+                    target.sources.append(doc.source_id)
+                target.source_hashes[doc.source_id] = doc_hash
+                self.mutations.write({
+                    "version": 1,
+                    "corpus": corpus_name,
+                    "operation": "index_source",
+                    "phase": "prepared",
+                    "source_id": doc.source_id,
+                    "corpus_before": asdict(corpus) if self.registry.has(corpus_name) else None,
+                    "corpus_target": asdict(target),
+                    "old_points": old_records,
+                })
+
+            if replace_existing and not (
+                resume_source_counts is not None and matches_recorded_source
+            ):
                 self.store.delete_by_source(collection, doc.source_id)
             if update_bm25:
                 self.bm25.delete_by_source(corpus_name, doc.source_id)
@@ -434,14 +602,36 @@ class VecgrepService:
             ]
             self.store.ensure_collection(collection, corpus.dim)
             self.store.upsert(collection, ids, vectors, payloads)
+            if journaled:
+                record = self.mutations.read(corpus_name) or {}
+                record["phase"] = "qdrant_done"
+                self.mutations.write(record)
             if update_bm25:
                 self.bm25.upsert(corpus_name, ids, [c.text for c in chunks], payloads)
+                if journaled:
+                    record = self.mutations.read(corpus_name) or {}
+                    record["phase"] = "bm25_done"
+                    self.mutations.write(record)
 
             total_docs += 1
             total_chunks += len(chunks)
             if doc.source_id not in corpus.sources:
                 corpus.sources.append(doc.source_id)
             corpus.source_hashes[doc.source_id] = doc_hash
+
+            if update_registry:
+                corpus.doc_count = len(corpus.sources)
+                corpus.chunk_count = self.store.count(collection)
+                corpus.updated_at = time.time()
+                if self.ephemeral:
+                    self.registry._corpora[corpus.name] = corpus
+                else:
+                    self.registry.upsert(corpus)
+                if journaled:
+                    record = self.mutations.read(corpus_name) or {}
+                    record["phase"] = "registry_done"
+                    self.mutations.write(record)
+                    self.mutations.finish(corpus_name)
 
         # During recovery, do not persist an intermediate point count as the
         # corpus's expected total. If interrupted, diagnose() must retain count
@@ -451,19 +641,11 @@ class VecgrepService:
                 backend.bypass = prev_bypass
             return total_docs, total_chunks, skipped
 
-        corpus.doc_count = len(corpus.sources)
-        # Recount from Qdrant (source of truth) rather than accumulating a delta.
-        # The old `chunk_count - chunks_freed + total_chunks` drifted permanently
-        # once `chunks_freed` (derived from BM25) diverged from the vector store —
-        # e.g. after a collection was wiped out-of-band. Recounting self-heals.
-        corpus.chunk_count = self.store.count(_collection_for(corpus_name))
-        corpus.updated_at = time.time()
-        # Persist via upsert (reload-merge-save) so a concurrent writer's other
-        # corpora aren't clobbered. Ephemeral runs only touch the in-memory map.
-        if self.ephemeral:
-            self.registry._corpora[corpus.name] = corpus
-        else:
-            self.registry.upsert(corpus)
+        # Normal mutations commit the registry per source so every journal
+        # record has a complete recovery boundary. Maintenance callers may
+        # deliberately defer registry publication until a whole repair ends.
+        if update_registry and total_docs == 0 and self.registry.has(corpus_name):
+            corpus = self.registry.get(corpus_name)
 
         # Restore the bypass flag for subsequent calls (other corpora etc.)
         if prev_bypass is not None and hasattr(backend, "bypass"):
@@ -1040,6 +1222,21 @@ class VecgrepService:
         mode: SearchMode,
         explain: bool = False,
     ) -> list[SearchResult]:
+        self._recover_if_pending(corpus.name)
+        with self.locks.read(corpus.name):
+            # A migration/delete may have completed while query assembly was
+            # selecting corpora. Re-resolve metadata inside admission.
+            corpus = self.registry.get(corpus.name)
+            return self._search_one_locked(corpus, query, top_k, mode, explain)
+
+    def _search_one_locked(
+        self,
+        corpus: Corpus,
+        query: str,
+        top_k: int,
+        mode: SearchMode,
+        explain: bool = False,
+    ) -> list[SearchResult]:
         collection = _collection_for(corpus.name)
 
         vector_hits: list[StoredHit] = []
@@ -1192,10 +1389,27 @@ class VecgrepService:
 
     # ----- corpus management ----------------------------------------------------
     def delete_corpus(self, name: str) -> None:
-        corpus = self.registry.get(name)
-        self.store.drop_collection(_collection_for(corpus.name))
-        self.bm25.drop(corpus.name)
-        self.registry.delete(name)
+        with self.locks.write(name):
+            self._recover_corpus_locked(name)
+            corpus = self.registry.get(name)
+            self.mutations.write({
+                "version": 1,
+                "corpus": name,
+                "operation": "delete_corpus",
+                "phase": "prepared",
+                "corpus_before": asdict(corpus),
+            })
+            self.store.drop_collection(_collection_for(corpus.name))
+            record = self.mutations.read(name) or {}
+            record["phase"] = "qdrant_done"
+            self.mutations.write(record)
+            self.bm25.drop(corpus.name)
+            record["phase"] = "bm25_done"
+            self.mutations.write(record)
+            self.registry.delete(name)
+            record["phase"] = "registry_done"
+            self.mutations.write(record)
+            self.mutations.finish(name)
 
     def set_decay(self, name: str, half_life_days: float | None) -> Corpus:
         """Set (or clear, with None) a corpus's recency-decay half-life in days.
@@ -1203,21 +1417,25 @@ class VecgrepService:
         No re-index needed — decay is applied at search time from the
         per-chunk doc_timestamp already in each payload.
         """
-        corpus = self.registry.get(name)
-        if half_life_days is not None and half_life_days <= 0:
-            raise CorpusError("half-life must be positive (or omit to disable decay)")
-        corpus.decay_half_life_days = half_life_days
-        self.registry.upsert(corpus)
-        return corpus
+        with self.locks.write(name):
+            self._recover_corpus_locked(name)
+            corpus = self.registry.get(name)
+            if half_life_days is not None and half_life_days <= 0:
+                raise CorpusError("half-life must be positive (or omit to disable decay)")
+            corpus.decay_half_life_days = half_life_days
+            self.registry.upsert(corpus)
+            return corpus
 
     def set_rank_weight(self, name: str, weight: float | None) -> Corpus:
         """Set (or reset, with None) a corpus's cross-corpus rank weight."""
-        corpus = self.registry.get(name)
-        if weight is not None and weight <= 0:
-            raise CorpusError("rank weight must be positive (or omit to reset to 1.0)")
-        corpus.rank_weight = 1.0 if weight is None else weight
-        self.registry.upsert(corpus)
-        return corpus
+        with self.locks.write(name):
+            self._recover_corpus_locked(name)
+            corpus = self.registry.get(name)
+            if weight is not None and weight <= 0:
+                raise CorpusError("rank weight must be positive (or omit to reset to 1.0)")
+            corpus.rank_weight = 1.0 if weight is None else weight
+            self.registry.upsert(corpus)
+            return corpus
 
     def get_chunk_window(
         self,
@@ -1261,21 +1479,40 @@ class VecgrepService:
         }
 
     def delete_source(self, corpus_name: str, source_id: str) -> None:
-        corpus = self.registry.get(corpus_name)
-        collection = _collection_for(corpus.name)
-        self.store.delete_by_source(collection, source_id)
-        self.bm25.delete_by_source(corpus.name, source_id)
-        if source_id in corpus.sources:
-            corpus.sources.remove(source_id)
-        corpus.source_hashes.pop(source_id, None)
-        corpus.doc_count = len(corpus.sources)
-        # Recount from Qdrant (source of truth), not a stale accumulator delta.
-        corpus.chunk_count = self.store.count(collection)
-        corpus.updated_at = time.time()
-        if self.ephemeral:
-            self.registry._corpora[corpus.name] = corpus
-        else:
-            self.registry.upsert(corpus)
+        with self.locks.write(corpus_name):
+            self._recover_corpus_locked(corpus_name)
+            corpus = self.registry.get(corpus_name)
+            collection = _collection_for(corpus.name)
+            target = Corpus(**asdict(corpus))
+            if source_id in target.sources:
+                target.sources.remove(source_id)
+            target.source_hashes.pop(source_id, None)
+            self.mutations.write({
+                "version": 1,
+                "corpus": corpus_name,
+                "operation": "delete_source",
+                "phase": "prepared",
+                "source_id": source_id,
+                "corpus_before": asdict(corpus),
+                "corpus_target": asdict(target),
+            })
+            self.store.delete_by_source(collection, source_id)
+            record = self.mutations.read(corpus_name) or {}
+            record["phase"] = "qdrant_done"
+            self.mutations.write(record)
+            self.bm25.delete_by_source(corpus.name, source_id)
+            record["phase"] = "bm25_done"
+            self.mutations.write(record)
+            target.doc_count = len(target.sources)
+            target.chunk_count = self.store.count(collection)
+            target.updated_at = time.time()
+            if self.ephemeral:
+                self.registry._corpora[target.name] = target
+            else:
+                self.registry.upsert(target)
+            record["phase"] = "registry_done"
+            self.mutations.write(record)
+            self.mutations.finish(corpus_name)
 
     def list_corpora(self) -> list[Corpus]:
         return self.registry.list()

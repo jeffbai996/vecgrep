@@ -10,8 +10,11 @@ import json
 import os
 import re
 import tempfile
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+from ..mutation import CorpusLocks
 
 EPHEMERAL_NAME = "__ephemeral__"
 # Internal corpus names that bypass the user-facing name rule (they're never
@@ -54,10 +57,15 @@ class Corpus:
 
 
 class CorpusRegistry:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, locks: CorpusLocks | None = None,
+                 *, in_memory: bool = False) -> None:
         self.path = path
+        self.in_memory = in_memory
+        self.locks = locks or CorpusLocks(path.parent / "locks")
         self._corpora: dict[str, Corpus] = {}
-        self._load()
+        if not in_memory:
+            with self.locks.registry_read():
+                self._load()
 
     def _load(self) -> None:
         if not self.path.exists():
@@ -107,6 +115,13 @@ class CorpusRegistry:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(tmp_name, self.path)
+            # Persist the directory entry as well as the file contents. This is
+            # the difference between atomic visibility and crash durability.
+            dir_fd = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
         except BaseException:
             try:
                 os.unlink(tmp_name)
@@ -125,27 +140,56 @@ class CorpusRegistry:
             )
 
     def list(self) -> list[Corpus]:
-        return sorted(self._corpora.values(), key=lambda c: c.name)
+        if self.in_memory:
+            return sorted(
+                (deepcopy(c) for c in self._corpora.values()), key=lambda c: c.name
+            )
+        with self.locks.registry_read():
+            self._reload()
+            return sorted(
+                (deepcopy(c) for c in self._corpora.values()), key=lambda c: c.name
+            )
 
     def get(self, name: str) -> Corpus:
-        if name not in self._corpora:
-            raise CorpusError(f"No such corpus: {name}")
-        return self._corpora[name]
+        if self.in_memory:
+            if name not in self._corpora:
+                raise CorpusError(f"No such corpus: {name}")
+            return deepcopy(self._corpora[name])
+        with self.locks.registry_read():
+            self._reload()
+            if name not in self._corpora:
+                raise CorpusError(f"No such corpus: {name}")
+            return deepcopy(self._corpora[name])
 
     def has(self, name: str) -> bool:
-        return name in self._corpora
+        if self.in_memory:
+            return name in self._corpora
+        with self.locks.registry_read():
+            self._reload()
+            return name in self._corpora
 
     def upsert(self, c: Corpus) -> None:
         self.validate_name(c.name)
-        # Merge against fresh disk state so a concurrent writer's other corpora
-        # survive this save (read-modify-write, not blind overwrite).
-        self._reload()
-        self._corpora[c.name] = c
-        self._save()
+        if self.in_memory:
+            self._corpora[c.name] = deepcopy(c)
+            return
+        # The lock spans reload -> modify -> replace. Atomic replace alone kept
+        # readers from seeing torn JSON but still allowed two writers to reload
+        # the same generation and silently clobber one another.
+        with self.locks.registry_write():
+            self._reload()
+            self._corpora[c.name] = deepcopy(c)
+            self._save()
 
     def delete(self, name: str) -> None:
-        self._reload()
-        if name not in self._corpora:
-            raise CorpusError(f"No such corpus: {name}")
-        del self._corpora[name]
-        self._save()
+        if self.in_memory:
+            if name not in self._corpora:
+                raise CorpusError(f"No such corpus: {name}")
+            del self._corpora[name]
+            return
+        with self.locks.registry_write():
+            self._reload()
+            if name not in self._corpora:
+                raise CorpusError(f"No such corpus: {name}")
+            del self._corpora[name]
+            self._save()
