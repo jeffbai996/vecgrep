@@ -209,6 +209,12 @@ docs ──▶ adapters ──▶ chunkers ──┤                      ├─
   - Fallback: OpenAI `text-embedding-3-small` (1536-dim) takes over when Ollama is unreachable and `OPENAI_API_KEY` is set.
 - **Qdrant** runs in embedded mode (no server, no Docker) at `~/.vecgrep/qdrant/`. Each named corpus is its own collection.
 - **BM25** index runs alongside Qdrant, persisted as a pickle per corpus. Tokenizer splits identifiers (`sharpe_ratio` → `sharpe`, `ratio`) so code search isn't blind to underscore- or camelCase-style naming.
+- **Concurrent mutation integrity.** Search takes a shared corpus lease; index,
+  delete, confirmed writes, and direct edits take an exclusive lease shared by
+  API, MCP, CLI, and watcher processes. A durable per-corpus intent journal
+  makes Qdrant, BM25, and `corpora.json` one recoverable logical commit: startup
+  rolls back an interrupted Qdrant batch or rolls completed vector work forward
+  into the derived stores.
 - **Hybrid retrieval** is the default. Each retriever returns its top 50 candidates; their ranks are fused via Reciprocal Rank Fusion (`score = Σ w / (60+rank)`). BM25's weight is `1.5` by default — high enough to float exact-keyword hits over the vector noise floor on short queries, low enough to leave long conceptual queries vector-dominated (override with `VECGREP_BM25_WEIGHT`). Pure-vector or pure-BM25 are available with `--mode vector` / `--mode bm25`.
 - **Recency decay** (optional, per corpus). Set a half-life in days with `vecgrep corpora decay <name> --half-life N` and a hit's fused score is multiplied by `0.5 ** (age_days / half_life)` — a chunk one half-life old ranks as if half as relevant. Applied *before* the top-k cut, so a fresh chunk can rescue itself above a stale one, and lexical closeness alone can't float a stale chunk to the top. Off by default; undated chunks are never penalized. The date comes from a `doc_timestamp` parsed at index time (frontmatter `date:`/`Saved:` lines, a `YYYY-MM-DD` filename, then file mtime). Tune fast for chat/journal corpora, off for durable reference.
 - **Dedup.** The sentence-window chunker emits overlapping windows, so one passage can surface as several near-identical hits. vecgrep collapses same-source hits whose character ranges overlap before truncating to top-k, keeping the strongest, so the result list isn't padded with the same text at three ranks.
@@ -227,6 +233,8 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 ~/.vecgrep/
 ├── qdrant/         # vector store, one collection per corpus
 ├── bm25/           # BM25 inverted index, one pickle per corpus
+├── locks/          # cross-process corpus and registry admission
+├── mutations/      # pending crash-recovery intents (normally empty)
 ├── corpora.json    # named-corpus metadata
 └── config.json     # optional, env vars override
 ```

@@ -170,6 +170,60 @@ class QdrantStore:
             if offset is None:
                 return
 
+    def source_records(self, name: str, source_id: str) -> list[dict]:
+        """Materialize one source's points for mutation rollback.
+
+        A source update can span several Qdrant batches.  Persisting the old
+        records before the first batch lets recovery restore the complete old
+        version if the writer dies before Qdrant reports the stage complete.
+        """
+        existing = {c.name for c in self.client.get_collections().collections}
+        if name not in existing:
+            return []
+        records: list[dict] = []
+        offset = None
+        query_filter = qm.Filter(
+            must=[
+                qm.FieldCondition(
+                    key="source_id", match=qm.MatchValue(value=source_id)
+                )
+            ]
+        )
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=name,
+                scroll_filter=query_filter,
+                offset=offset,
+                limit=256,
+                with_payload=True,
+                with_vectors=True,
+            )
+            for point in points:
+                vector = point.vector
+                if isinstance(vector, dict):
+                    raise RuntimeError("named-vector collections are unsupported")
+                records.append(
+                    {
+                        "id": str(point.id),
+                        "vector": list(vector or []),
+                        "payload": dict(point.payload or {}),
+                    }
+                )
+            if offset is None:
+                return records
+
+    def restore_source(self, collection: str, source_id: str, records: list[dict]) -> None:
+        """Replace one source with a previously captured point snapshot."""
+        self.delete_by_source(collection, source_id)
+        if not records:
+            return
+        self.upsert(
+            collection,
+            [str(r["id"]) for r in records],
+            [list(r["vector"]) for r in records],
+            [dict(r["payload"]) for r in records],
+        )
+
     # Max points per upsert request. We store the full source_text on every
     # chunk, so a large document's chunks can sum to >256MB — Qdrant's default
     # request-payload ceiling — and a single all-points upsert 400s. Batching

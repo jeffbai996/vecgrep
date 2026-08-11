@@ -1,19 +1,29 @@
-"""Registry write-race + mixed-model resolution (latent bug fix).
+"""Registry write-race + mixed-model resolution.
 
 Two coupled bugs this guards against:
 1. A long-lived process (the server) clobbering another writer's (the CLI's)
-   registry changes with a stale in-memory copy. upsert/delete now reload from
-   disk first, so concurrent writers' other corpora survive.
+   registry changes with a stale in-memory copy. The registry lock spans the
+   complete reload-modify-replace cycle.
 2. The engine being unable to serve corpora embedded with different models —
    query-embed backend now resolves per-corpus, not from one global env model.
 """
 from __future__ import annotations
+
+import multiprocessing
+from pathlib import Path
 
 from vecgrep.backend.store.corpora import Corpus, CorpusRegistry
 
 
 def _corpus(name: str, model: str = "nomic-embed-text", dim: int = 768) -> Corpus:
     return Corpus(name=name, embed_backend="ollama", embed_model=model, dim=dim)
+
+
+def _barrier_upsert(path: str, corpus: str, ready, start) -> None:
+    registry = CorpusRegistry(path=Path(path))
+    ready.put(corpus)
+    start.wait(5)
+    registry.upsert(_corpus(corpus))
 
 
 def test_upsert_reloads_so_concurrent_writes_survive(tmp_path):
@@ -31,6 +41,25 @@ def test_upsert_reloads_so_concurrent_writes_survive(tmp_path):
     final = CorpusRegistry(path)
     names = {c.name for c in final.list()}
     assert names == {"from_a", "from_b"}, f"a writer clobbered the other: {names}"
+
+
+def test_simultaneous_registry_writers_do_not_lose_an_update(tmp_path):
+    path = tmp_path / "corpora.json"
+    ctx = multiprocessing.get_context("spawn")
+    ready, start = ctx.Queue(), ctx.Event()
+    workers = [
+        ctx.Process(target=_barrier_upsert, args=(str(path), name, ready, start))
+        for name in ("alpha", "beta")
+    ]
+    for worker in workers:
+        worker.start()
+    assert {ready.get(timeout=5), ready.get(timeout=5)} == {"alpha", "beta"}
+    start.set()
+    for worker in workers:
+        worker.join(5)
+        assert worker.exitcode == 0
+
+    assert {c.name for c in CorpusRegistry(path).list()} == {"alpha", "beta"}
 
 
 def test_delete_reloads_and_preserves_others(tmp_path):

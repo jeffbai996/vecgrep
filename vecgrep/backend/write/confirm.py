@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -140,6 +141,41 @@ def _verify_searchable(svc, corpus: str, doc_id: str, content: str) -> bool:
 
 
 def confirm(
+    proposal_id: str,
+    store: ProposalStore,
+    svc,
+    corpus: str,
+    corpus_dir: Path,
+    confirmed_by: str | None = None,
+    protected_ack: str | None = None,
+) -> ConfirmResult:
+    """Admit local file + index mutations as one corpus operation.
+
+    Mirror write-throughs mutate their upstream store rather than vecgrep's
+    local file/index, so they deliberately stay outside this lock.
+    """
+    locks = getattr(svc, "locks", None)
+    guard = (
+        nullcontext()
+        if locks is None or _writethrough_cmd(corpus) is not None
+        else locks.write(corpus)
+    )
+    with guard:
+        recover = getattr(svc, "_recover_corpus_locked", None)
+        if locks is not None and _writethrough_cmd(corpus) is None and recover:
+            recover(corpus)
+        return _confirm_locked(
+            proposal_id,
+            store,
+            svc,
+            corpus,
+            corpus_dir,
+            confirmed_by,
+            protected_ack,
+        )
+
+
+def _confirm_locked(
     proposal_id: str,
     store: ProposalStore,
     svc,
