@@ -127,7 +127,10 @@ class BrowseRequest(BaseModel):
     source_path: str | None = None
     since: str | None = None
     until: str | None = None
-    tail: int | None = Field(default=100, ge=1, le=1000)
+    # The REST boundary must always enforce a finite response window. The
+    # service accepts None for trusted in-process callers, but accepting JSON
+    # null here would let remote callers bypass this cap entirely.
+    tail: int = Field(default=100, ge=1, le=1000)
 
 
 class TimelineEvent(BaseModel):
