@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.routing import Mount, Route
@@ -127,16 +126,6 @@ def create_app() -> FastAPI:
             backup_thread.join(timeout=2)
 
     app = FastAPI(title="vecgrep", version=__version__, lifespan=lifespan)
-
-    # CORS is permissive in dev to let the Vite dev server hit the API while
-    # we're iterating on the frontend. Lock down in production deployments.
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
 
     app.include_router(public_router)
     app.include_router(router)
