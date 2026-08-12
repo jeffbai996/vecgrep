@@ -82,6 +82,15 @@ def test_browse_and_incident_routes_expose_service_tools(monkeypatch) -> None:
     assert seen[1][1]["filters"] == ["after:7d"]
 
 
+def test_browse_request_requires_a_bounded_tail() -> None:
+    assert BrowseRequest(corpus="cli", channel="discord").tail == 100
+
+    with pytest.raises(ValidationError):
+        BrowseRequest.model_validate(
+            {"corpus": "cli", "source_path": "*", "tail": None}
+        )
+
+
 def test_web_ui_uses_dense_budgeted_results_and_insight_views() -> None:
     app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
     search = (FRONTEND / "components" / "SearchBar.tsx").read_text(encoding="utf-8")
