@@ -1556,6 +1556,10 @@ class VecgrepService:
             Always fixable (recount, or re-index if sources exist).
           - "orphan_collection": a vecgrep__* collection with points but no
             registry entry — searchable via Qdrant but invisible to the app.
+          - "orphaned_source": a registered source whose file no longer exists.
+            Its chunks are still indexed, so a deleted document keeps being
+            returned as a live answer. Always fixable — the fix is to purge it
+            from both backends. Carries an extra "source_id" key.
 
         Read-only. `reconcile()` acts on what this reports."""
         issues: list[dict] = []
@@ -1585,6 +1589,24 @@ class VecgrepService:
                     "detail": f"registry {c.chunk_count} vs vector store {live}",
                     "fixable": True,
                 })
+            # A source the indexer recorded, whose file has since been
+            # deleted. Nothing in the write path notices this: an ingest
+            # pipeline unlinks the file and vecgrep is never told, so the
+            # chunks outlive the document they came from. Observed in a live
+            # deployment: a deleted document was still the top hit at 94.4%
+            # for a question it should no longer have answered, and 198 such
+            # points across 24 dead files had to be removed by hand.
+            # Reported per source so a purge names exactly what it removes.
+            for src_id in (c.sources or []):
+                if not _source_exists(src_id):
+                    issues.append({
+                        "corpus": name,
+                        "kind": "orphaned_source",
+                        "source_id": src_id,
+                        "detail": f"source no longer exists: {src_id}",
+                        "fixable": True,
+                    })
+
             if c.chunk_count > 0 and not self.bm25.exists(name):
                 issues.append({
                     "corpus": name,
@@ -1728,6 +1750,19 @@ class VecgrepService:
                     actions.append({"corpus": name, "kind": kind, "action": "rebuilt_bm25"})
                 else:
                     actions.append({"corpus": name, "kind": kind, "action": "needs_reindex"})
+            elif kind == "orphaned_source":
+                # delete_source drops Qdrant points AND BM25 entries under one
+                # write lock with a mutation-journal record, so an interrupted
+                # purge resumes instead of leaving the half-purged state —
+                # which is the worst one: vectors gone, BM25 still serving the
+                # dead document at a plausible mid rank that reads as real.
+                self.delete_source(name, issue["source_id"])
+                actions.append({
+                    "corpus": name,
+                    "kind": kind,
+                    "source_id": issue["source_id"],
+                    "action": "purged",
+                })
             else:  # orphan_collection
                 actions.append({"corpus": name, "kind": kind, "action": "needs_manual_index"})
         return actions

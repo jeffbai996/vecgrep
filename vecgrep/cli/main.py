@@ -1408,12 +1408,18 @@ def doctor(
 
     Catches vector-store drift plus a missing BM25 sidecar: a corpus a Qdrant
     restart wiped (registry says N chunks, store has 0), a chunk_count that
-    drifted, an orphan collection with no registry entry, or a missing keyword
-    index. Read-only by default — pass --fix to recount drift, re-index any
-    wiped corpus from its recorded sources, and rebuild a missing BM25 index
-    from existing Qdrant payloads without embedding again (orphans are reported
-    for a manual `vecgrep index`, since rebuilding the registry row needs the
-    original source).
+    drifted, an orphan collection with no registry entry, a missing keyword
+    index, or a registered source whose file is gone. Read-only by default —
+    pass --fix to recount drift, re-index any wiped corpus from its recorded
+    sources, rebuild a missing BM25 index from existing Qdrant payloads without
+    embedding again, and PURGE sources that no longer exist from both the
+    vector store and BM25 (orphan collections are still reported for a manual
+    `vecgrep index`, since rebuilding the registry row needs the original
+    source).
+
+    The purge is the one destructive repair: a deleted document otherwise keeps
+    being returned as a live answer forever. Run without --fix first to see
+    exactly which sources would go.
 
     Run it after a Qdrant/host restart, or on a timer, so a wiped corpus
     surfaces immediately instead of silently returning nothing at search time.
