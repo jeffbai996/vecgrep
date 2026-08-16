@@ -43,6 +43,7 @@ from .ingestion.chunkers import (
     MarkdownSectionChunker,
     CodeSymbolChunker,
     SentenceWindowChunker,
+    TurnWindowChunker,
 )
 from .store import (
     BM25Store,
@@ -69,6 +70,10 @@ CHUNKERS: dict[str, type[Chunker]] = {
     "fixed_token": FixedTokenChunker,
     "markdown_section": MarkdownSectionChunker,
     "code_symbol": CodeSymbolChunker,
+    # Groups whole chat messages instead of cutting every N sentences:
+    # a sentence window starts mid-answer and usually carries no speaker
+    # line, so "who said what" is lost from the chunk that states it.
+    "turn_window": TurnWindowChunker,
 }
 
 SearchMode = Literal["hybrid", "vector", "bm25"]

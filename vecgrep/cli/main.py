@@ -268,7 +268,7 @@ def backup_restore(archive: Path, confirm: str) -> None:
 @click.option(
     "--chunker",
     default="sentence_window",
-    type=click.Choice(["sentence_window", "fixed_token", "markdown_section", "code_symbol"]),
+    type=click.Choice(["sentence_window", "fixed_token", "markdown_section", "code_symbol", "turn_window"]),
     show_default=True,
 )
 @click.option("--ephemeral", is_flag=True, help="Don't persist to disk.")
@@ -962,7 +962,7 @@ def serve(host: str | None, port: int | None, reload: bool, open_browser: bool) 
 @click.option(
     "--chunker",
     default="sentence_window",
-    type=click.Choice(["sentence_window", "fixed_token", "markdown_section", "code_symbol"]),
+    type=click.Choice(["sentence_window", "fixed_token", "markdown_section", "code_symbol", "turn_window"]),
     show_default=True,
 )
 @click.option(
