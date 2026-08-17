@@ -73,12 +73,18 @@ def build_timeline(
     payload_for: "callable",
     max_groups: int = MAX_GROUPS,
     padding: int = SLICE_PADDING,
+    source_text_for: "callable | None" = None,
 ) -> list[dict]:
     """Assemble timeline groups from anchor SearchResults.
 
     `payload_for(result)` must return the stored payload dict for a result's
-    chunk (carrying `source_text`) or None. Groups come back ordered by
-    document date (undated last), events chronological within each group.
+    chunk, or None. `source_text_for(corpus, source_id)` returns that
+    source's full document; slices span a file's anchors plus `padding` on
+    each side, which routinely reaches past the bounded context stored with
+    any single chunk. When it is not supplied, the payload's own
+    `source_text` is used — the pre-v1.1 layout, where every chunk carried
+    the document. Groups come back ordered by document date (undated last),
+    events chronological within each group.
     """
     by_file: dict[tuple[str, str], list] = {}
     for r in anchors:
@@ -98,7 +104,11 @@ def build_timeline(
                 break
         if not payload:
             continue
-        source_text = payload.get("source_text", "") or ""
+        source_text = ""
+        if source_text_for is not None:
+            source_text = source_text_for(corpus, source_id) or ""
+        if not source_text:
+            source_text = payload.get("source_text", "") or ""
         if not source_text:
             continue
         lo = max(0, min(h.chunk_start for h in hits) - padding)

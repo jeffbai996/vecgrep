@@ -6,21 +6,34 @@ to its own Qdrant collection. Payload schema:
     {
       "corpus": str,
       "source_id": str,
-      "source_text": str,        # the full source text, duplicated onto
-                                  #   every chunk so any single hit can
-                                  #   reconstruct surrounding context
-                                  #   without a second store lookup. Wastes
-                                  #   space (one copy per chunk, not per
-                                  #   source) — fine at MVP scale, slated
-                                  #   for v1.0 cleanup once ingestion
-                                  #   targets large corpora like full
-                                  #   Discord/ChatGPT exports.
+      "source_text": str,        # the FULL source document — stored only on
+                                  #   the chunk_index==0 point of each source
+                                  #   ("the carrier"). Absent on every other
+                                  #   chunk. Whole-document readers reach it
+                                  #   in O(1) by recomputing the carrier's
+                                  #   deterministic uuid5 id; see
+                                  #   service._source_text_for.
+      "source_length": int,       # len(source_text), on EVERY chunk, so a
+                                  #   reader can bound a window without
+                                  #   fetching the carrier.
       "chunk_index": int,
       "chunk_start": int,
       "chunk_end": int,
       "text": str,                # the chunk itself
+      "context_before": str,      # <=CONTEXT_CHARS before chunk_start, and
+      "context_after": str,       #   <=CONTEXT_CHARS after chunk_end. The
+                                  #   search path renders these on every hit;
+                                  #   precomputing keeps it lookup-free.
+      "line_start": int | None,   # 1-based inclusive line span of the chunk,
+      "line_end": int | None,     #   computed once at write time instead of
+                                  #   rescanning the document per hit.
       "metadata": {...},
     }
+
+Until v1.1 source_text was duplicated byte-identically onto every chunk so
+any hit could rebuild context without a second lookup. That cost ~8.3 GB
+across a 186k-point install (91%+ redundant, growing as S^2/chunk_size in
+document size). The carrier layout keeps every reader exact for ~40x less.
 """
 from __future__ import annotations
 
@@ -29,6 +42,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
 
@@ -38,12 +52,23 @@ class StoredHit:
     score: float
     chunk_text: str
     source_id: str
+    # Empty on every chunk but the carrier (chunk_index 0). Rendering context
+    # comes from context_before/context_after, not from this.
     source_text: str
     chunk_start: int
     chunk_end: int
     chunk_index: int
     metadata: dict
     corpus: str
+    # None means "this point predates the derived fields", which is NOT the
+    # same as "" -- an empty context_before is correct for a document's
+    # first chunk. Readers key their pre-v1.1 fallback on None, so coercing
+    # absence to "" silently strips context from every legacy hit.
+    context_before: str | None = None
+    context_after: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    source_length: int | None = None
     # Document's own date (epoch seconds) for recency decay; None if undated
     # or indexed before doc_timestamp existed.
     doc_timestamp: float | None = None
@@ -59,7 +84,23 @@ class QdrantStore:
             # block while Qdrant flushes/indexes a batch. The client default is
             # too short and surfaced as ResponseHandlingException('timed out')
             # partway through indexing big corpora (e.g. chat transcripts).
-            self.client = QdrantClient(url=url, timeout=120)
+            #
+            # limits: qdrant-client ships max_keepalive_connections=0, i.e.
+            # connection pooling OFF — every request opens a fresh TCP
+            # connection and leaves it in TIME_WAIT for 60s. At the request
+            # rates indexing and migration produce that exhausts the host's
+            # ephemeral port range and the next connect() is refused with
+            # ECONNRESET. Re-enabling keepalive takes 300 requests from ~400
+            # sockets to 2.
+            self.client = QdrantClient(
+                url=url,
+                timeout=120,
+                limits=httpx.Limits(
+                    max_connections=32,
+                    max_keepalive_connections=16,
+                    keepalive_expiry=120.0,
+                ),
+            )
         elif path is None:
             self.client = QdrantClient(":memory:")
         else:
@@ -224,11 +265,11 @@ class QdrantStore:
             [dict(r["payload"]) for r in records],
         )
 
-    # Max points per upsert request. We store the full source_text on every
-    # chunk, so a large document's chunks can sum to >256MB — Qdrant's default
-    # request-payload ceiling — and a single all-points upsert 400s. Batching
-    # keeps each request well under the limit. 64 is conservative for sources
-    # up to a few MB; smaller if individual chunks are unusually large.
+    # Max points per upsert request. Only the carrier chunk holds the full
+    # source_text now, so batches are far smaller than they were — but one
+    # oversized document still lands its whole body in a single point, and
+    # Qdrant's default request-payload ceiling is 256MB. Batching keeps every
+    # request well clear of it.
     _UPSERT_BATCH = 64
 
     def upsert(
@@ -281,6 +322,11 @@ class QdrantStore:
                     chunk_index=int(p.get("chunk_index", 0)),
                     metadata=p.get("metadata", {}) or {},
                     corpus=p.get("corpus", collection),
+                    context_before=p.get("context_before"),
+                    context_after=p.get("context_after"),
+                    line_start=p.get("line_start"),
+                    line_end=p.get("line_end"),
+                    source_length=p.get("source_length"),
                     doc_timestamp=p.get("doc_timestamp"),
                 )
             )
@@ -324,6 +370,99 @@ class QdrantStore:
         if not points:
             return None
         return points[0].payload or {}
+
+    def get_many_by_id(
+        self, collection: str, point_ids: list[str]
+    ) -> dict[str, dict]:
+        """Fetch several payloads in one round trip, keyed by point id.
+
+        Missing ids are simply absent from the result — callers treat that
+        the same as get_by_id returning None.
+        """
+        if not point_ids:
+            return {}
+        existing = {c.name for c in self.client.get_collections().collections}
+        if collection not in existing:
+            return {}
+        try:
+            points = self.client.retrieve(
+                collection_name=collection,
+                ids=point_ids,
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception:
+            return {}
+        return {str(p.id): (p.payload or {}) for p in points}
+
+    def set_payload(self, collection: str, point_id: str, patch: dict) -> None:
+        """Merge keys into one point's payload. Vectors are untouched."""
+        self.client.set_payload(
+            collection_name=collection,
+            payload=patch,
+            points=[point_id],
+            wait=True,
+        )
+
+    def clear_payload_keys(
+        self, collection: str, point_id: str, keys: list[str]
+    ) -> None:
+        """Remove payload keys from one point. Vectors are untouched."""
+        if not keys:
+            return
+        self.client.delete_payload(
+            collection_name=collection,
+            keys=list(keys),
+            points=[point_id],
+            wait=True,
+        )
+
+    def apply_payload_ops(
+        self,
+        collection: str,
+        set_ops: list[tuple[str, dict]],
+        delete_keys: list[tuple[str, list[str]]],
+    ) -> None:
+        """Apply many per-point payload edits in ONE request.
+
+        Each point needs a different patch, so these can't be collapsed into
+        a single set_payload call — but they can ride in one batch request.
+        That matters beyond speed: a request-per-point run burns an
+        ephemeral port per point, and a host with a narrow
+        net.ipv4.ip_local_port_range will exhaust it and start refusing
+        connections long before the walk finishes.
+        """
+        ops: list = []
+        for point_id, patch in set_ops:
+            ops.append(
+                qm.SetPayloadOperation(
+                    set_payload=qm.SetPayload(payload=patch, points=[point_id])
+                )
+            )
+        for point_id, keys in delete_keys:
+            ops.append(
+                qm.DeletePayloadOperation(
+                    delete_payload=qm.DeletePayload(keys=list(keys), points=[point_id])
+                )
+            )
+        if not ops:
+            return
+        self.client.batch_update_points(
+            collection_name=collection, update_operations=ops, wait=True
+        )
+
+    def clear_payload_keys_bulk(
+        self, collection: str, point_ids: list[str], keys: list[str]
+    ) -> None:
+        """clear_payload_keys over many points in one request."""
+        if not keys or not point_ids:
+            return
+        self.client.delete_payload(
+            collection_name=collection,
+            keys=list(keys),
+            points=list(point_ids),
+            wait=True,
+        )
 
     def delete_by_source(self, collection: str, source_id: str) -> None:
         existing = {c.name for c in self.client.get_collections().collections}
