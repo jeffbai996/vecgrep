@@ -97,7 +97,12 @@ def test_recovery_rolls_back_partial_qdrant_batch(svc, make_doc, monkeypatch):
     assert svc.recover_pending_mutations() == ["notes"]
     payloads = list(svc.store.iter_payloads(_collection_for("notes")))
     assert payloads
-    assert {p[1]["source_text"] for p in payloads} == {old_text}
+    # Only the carrier chunk holds the document, so assert on the carriers
+    # rather than on every payload -- and check no chunk kept the new text.
+    assert {p[1]["source_text"] for p in payloads if p[1].get("source_text")} == {
+        old_text
+    }
+    assert all("New " not in (p[1].get("text") or "") for p in payloads)
     assert svc.search("Old two", "notes")
 
 

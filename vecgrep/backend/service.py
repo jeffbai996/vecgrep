@@ -330,6 +330,7 @@ class VecgrepService:
 
         corpus = Corpus(**metadata)
         sources: list[str] = []
+        seen_sources: set[str] = set()
         source_hashes: dict[str, str] = {}
         bm25_records: list[tuple[str, str, dict]] = []
         for point_id, payload in self.store.iter_payloads(collection):
@@ -342,10 +343,16 @@ class VecgrepService:
             compact_payload.pop("source_text", None)
             bm25_records.append((point_id, text, compact_payload))
             sid = payload.get("source_id")
-            if isinstance(sid, str) and sid not in source_hashes:
-                sources.append(sid)
+            if isinstance(sid, str):
+                # Dedup the source list on its own. Gating it on the hash
+                # (as this used to) appends a source once per chunk whenever
+                # the hash can't be taken — which is now every non-carrier
+                # chunk, since only chunk 0 holds the document.
+                if sid not in seen_sources:
+                    seen_sources.add(sid)
+                    sources.append(sid)
                 source_text = payload.get("source_text")
-                if isinstance(source_text, str):
+                if isinstance(source_text, str) and source_text and sid not in source_hashes:
                     source_hashes[sid] = hashlib.sha256(
                         source_text.encode("utf-8")
                     ).hexdigest()
@@ -587,10 +594,14 @@ class VecgrepService:
                 {
                     "corpus": corpus_name,
                     "source_id": doc.source_id,
-                    # Store full source text on every chunk so any hit can
-                    # reconstruct surrounding context without a second lookup.
-                    # Storage overhead is acceptable at MVP scale.
-                    "source_text": doc.text,
+                    # The full document rides on chunk 0 only — "the carrier".
+                    # Duplicating it onto every chunk cost ~8.3 GB across a
+                    # 186k-point install and grows as S^2/chunk_size in
+                    # document size. Whole-document readers fetch the carrier
+                    # in O(1) via _source_text_for; per-chunk context comes
+                    # from the precomputed fields below.
+                    **({"source_text": doc.text} if c.index == 0 else {}),
+                    **_chunk_context_fields(doc.text, c.start, c.end),
                     "chunk_index": c.index,
                     "chunk_start": c.start,
                     "chunk_end": c.end,
@@ -782,6 +793,7 @@ class VecgrepService:
             self._payload_for_result,
             max_groups=max_groups,
             padding=padding,
+            source_text_for=self._source_text_for,
         )
 
     def incident(
@@ -811,6 +823,7 @@ class VecgrepService:
         groups = build_timeline(
             anchors,
             lambda r: self._payload_for_result(r),
+            source_text_for=self._source_text_for,
         )
         if not groups:
             return None
@@ -913,7 +926,9 @@ class VecgrepService:
                 ts is None or float(ts) >= until_ts + _SECONDS_IN_DAY
             ):
                 continue
-            source_text = payload.get("source_text", "") or ""
+            # browse reads whole documents ("channel Y on day Z", "the last
+            # N messages"), so this must be the full text, not the hit chunk.
+            source_text = self._source_text_for(corpus.name, source_id)
             events = parse_events(source_text)
             groups.append(
                 {
@@ -972,7 +987,8 @@ class VecgrepService:
         )
         if qdrant_payload is not None:
             payload = qdrant_payload
-        source_text = payload.get("source_text", "") or ""
+        # Whole document, not the hit's chunk — resolved from the carrier.
+        source_text = self._source_text_for(corpus.name, source_id)
         ts = payload.get("doc_timestamp")
         events = parse_events(source_text)
         return {
@@ -1168,8 +1184,55 @@ class VecgrepService:
             "sample_chunks": sample_chunks,
         }
 
+    def _source_text_for(self, corpus_name: str, source_id: str) -> str:
+        """Full document text for one source, from its carrier point.
+
+        O(1): the carrier is chunk_index 0 and _chunk_id is a pure function
+        of (corpus, source_id, index), so this is a direct retrieve. A
+        filtered lookup would be a full scan — the collections carry no
+        payload indexes.
+
+        Falls back to scanning the source's points when the carrier is
+        missing, which also covers stores written before v1.1 (where every
+        chunk carried the text) and sources whose chunk 0 was pruned.
+        """
+        collection = _collection_for(corpus_name)
+        carrier_id = _chunk_id(corpus_name, source_id, 0)
+        payload = self.store.get_by_id(collection, carrier_id)
+        if payload is None:
+            payload = self.bm25.get_by_id(corpus_name, carrier_id)
+        text = (payload or {}).get("source_text", "") or ""
+        if text:
+            return text
+        for record in self.store.source_records(collection, source_id):
+            text = (record.get("payload") or {}).get("source_text", "") or ""
+            if text:
+                return text
+        return ""
+
+    def _source_texts_for(
+        self, corpus_name: str, source_ids: list[str]
+    ) -> dict[str, str]:
+        """_source_text_for over many sources in one round trip."""
+        if not source_ids:
+            return {}
+        collection = _collection_for(corpus_name)
+        wanted = list(dict.fromkeys(source_ids))
+        by_carrier = {_chunk_id(corpus_name, s, 0): s for s in wanted}
+        found = self.store.get_many_by_id(collection, list(by_carrier))
+        out: dict[str, str] = {}
+        for pid, payload in found.items():
+            text = (payload or {}).get("source_text", "") or ""
+            if text:
+                out[by_carrier[pid]] = text
+        for sid in wanted:
+            if sid not in out:
+                out[sid] = self._source_text_for(corpus_name, sid)
+        return out
+
     def _payload_for_result(self, r: SearchResult) -> dict | None:
-        """Stored payload (with source_text) for a result's chunk."""
+        """Stored payload for a result's chunk. Carries the precomputed
+        context fields; source_text only when the chunk is its carrier."""
         corpus = self.registry.get(r.corpus)
         payload = self.store.get_by_id(_collection_for(corpus.name), r.chunk_id)
         if payload is None:
@@ -1277,7 +1340,7 @@ class VecgrepService:
             out = []
             max_score = max((s for _, s, _ in bm25_hits), default=0.0)
             for rank, (cid, score, payload) in enumerate(bm25_hits[:top_k]):
-                if not payload.get("source_text"):
+                if "context_before" not in payload:
                     payload = self.store.get_by_id(collection, cid) or payload
                 r = _bm25_to_result(corpus.name, cid, score, payload, ["bm25"], max_score=max_score)
                 r.explain = {
@@ -1344,7 +1407,9 @@ class VecgrepService:
         out = []
         for cid, fused_score in fused:
             payload = payloads_by_id[cid]
-            if not payload.get("source_text"):
+            # A recovery-built BM25 sidecar omits the derived context fields;
+            # Qdrant is canonical, so refetch when they are absent.
+            if "context_before" not in payload:
                 payload = self.store.get_by_id(collection, cid) or payload
             matched_by = sources.get(cid, [])
             # similarity_pct: pick the most informative signal for display.
@@ -1461,9 +1526,16 @@ class VecgrepService:
             payload = self.bm25.get_by_id(corpus.name, chunk_id)
         if payload is None:
             return None
-        source_text = payload.get("source_text", "") or ""
         chunk_start = int(payload.get("chunk_start", 0))
         chunk_end = int(payload.get("chunk_end", 0))
+        # An expanded window is explicitly asking to see past the chunk, so
+        # resolve the whole document from the carrier rather than clamping to
+        # the CONTEXT_CHARS stored alongside this chunk.
+        source_text = payload.get("source_text", "") or ""
+        if not source_text:
+            source_text = self._source_text_for(
+                corpus.name, payload.get("source_id", "") or ""
+            )
         if window < 0:
             before_start = 0
             after_end = len(source_text)
@@ -2280,10 +2352,15 @@ def _hit_payload(hit: StoredHit) -> dict:
         "corpus": hit.corpus,
         "source_id": hit.source_id,
         "source_text": hit.source_text,
+        "source_length": hit.source_length,
         "chunk_index": hit.chunk_index,
         "chunk_start": hit.chunk_start,
         "chunk_end": hit.chunk_end,
         "text": hit.chunk_text,
+        "context_before": hit.context_before,
+        "context_after": hit.context_after,
+        "line_start": hit.line_start,
+        "line_end": hit.line_end,
         "metadata": hit.metadata,
         "doc_timestamp": hit.doc_timestamp,
     }
@@ -2659,30 +2736,75 @@ def _bm25_to_result(
     return _payload_to_result(payload, score, pct, matched_by)
 
 
+# How much text on each side of a chunk is stored with the chunk itself.
+# Sized to what the search path renders per hit; anything wider resolves
+# against the carrier point instead (see VecgrepService._source_text_for).
+CONTEXT_CHARS = 400
+
+
+def _line_anchors(text: str, start: int, end: int) -> tuple[int | None, int | None]:
+    """1-based inclusive line span of text[start:end].
+
+    chunk_end is exclusive, so the end line is counted at the last char
+    INSIDE the span (end-1) — otherwise a chunk ending exactly at a newline
+    would claim the following line too.
+    """
+    if not text or end <= start:
+        return None, None
+    return (
+        text.count("\n", 0, start) + 1,
+        text.count("\n", 0, max(start, end - 1)) + 1,
+    )
+
+
+def _chunk_context_fields(source_text: str, start: int, end: int) -> dict:
+    """Per-chunk payload fields derived from the full document at write time.
+
+    Storing these (~800 bytes) beats storing the whole document on every
+    chunk (~97 KB on the chats corpus) and keeps the search path free of
+    per-hit store lookups.
+    """
+    line_start, line_end = _line_anchors(source_text, start, end)
+    return {
+        "source_length": len(source_text),
+        "context_before": source_text[max(0, start - CONTEXT_CHARS):start],
+        "context_after": source_text[end:end + CONTEXT_CHARS],
+        "line_start": line_start,
+        "line_end": line_end,
+    }
+
+
 def _payload_to_result(
     payload: dict,
     score: float,
     pct: float,
     matched_by: list[str],
 ) -> SearchResult:
-    source_text = payload.get("source_text", "") or ""
     chunk_start = int(payload.get("chunk_start", 0))
     chunk_end = int(payload.get("chunk_end", 0))
-    before = source_text[max(0, chunk_start - 400) : chunk_start] if source_text else ""
-    after = source_text[chunk_end : chunk_end + 400] if source_text else ""
     corpus_name = payload.get("corpus", "") or ""
     source_id = payload.get("source_id", "") or ""
     chunk_index = int(payload.get("chunk_index", 0))
     cid = _chunk_id(corpus_name, source_id, chunk_index) if corpus_name and source_id else ""
     doc_ts = payload.get("doc_timestamp")
-    # Line anchors: 1-based inclusive range, computed from the source text
-    # while we still have it. chunk_end is exclusive, so the end line is
-    # counted at the last char INSIDE the span (end-1) — otherwise a chunk
-    # ending exactly at a newline would claim the next line too.
-    line_start = line_end = None
-    if source_text and chunk_end > chunk_start:
-        line_start = source_text.count("\n", 0, chunk_start) + 1
-        line_end = source_text.count("\n", 0, max(chunk_start, chunk_end - 1)) + 1
+    # Context and line anchors are precomputed at write time (see
+    # _chunk_context_fields) so the hot search path never needs the full
+    # document. Points written before v1.1 still carry source_text on every
+    # chunk; derive from it so a pre-migration store keeps rendering.
+    before = payload.get("context_before")
+    after = payload.get("context_after")
+    line_start = payload.get("line_start")
+    line_end = payload.get("line_end")
+    if before is None or after is None or line_start is None:
+        legacy = payload.get("source_text", "") or ""
+        if before is None:
+            before = legacy[max(0, chunk_start - CONTEXT_CHARS):chunk_start]
+        if after is None:
+            after = legacy[chunk_end:chunk_end + CONTEXT_CHARS]
+        if line_start is None and legacy:
+            line_start, line_end = _line_anchors(legacy, chunk_start, chunk_end)
+    before = before or ""
+    after = after or ""
     return SearchResult(
         score=score,
         similarity_pct=pct,
