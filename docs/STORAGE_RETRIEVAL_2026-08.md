@@ -167,6 +167,21 @@ each other, not against the round-2 absolutes.
   env-overridable (`VECGREP_RERANKER`) and stays `bge-reranker-base` until the
   model is warmed at startup or predicted off the event loop. That is the
   next reranker task; measuring is done.
+
+  **Resolved the same day — v2-m3 IS the default now (`a195207`).** The
+  blocker was never compute, it was a 2.2 GB weight download happening
+  *inside* a request. Search runs in FastAPI's sync threadpool, capped at 8
+  (`VECGREP_THREAD_POOL_SIZE`), so that load held one of eight slots for its
+  whole duration and starved the health route — which is what squad-watchdog
+  saw. The fix is structural rather than a bigger timeout: `ensure_warm()`
+  loads the model in a background thread from the app lifespan, and
+  `wait_ready()` gives a search a bounded wait (`VECGREP_RERANK_WAIT_S`,
+  default 5s) before falling through to plain fusion order. A cold search
+  loses reranking for that one query; it never holds a thread. Measured on
+  restart with the weights already cached: ready in under 5s, health 200 at
+  1-2 ms throughout, `NRestarts=0`. A failed load is retried no more than
+  once per 300s, so a missing extra or a dead network degrades to unreranked
+  instead of hammering.
 - **Embed cache sweep + compact ran on live:** 335,161 -> 226,970 rows,
   `embed_cache.db` 4.45 GB -> 1.07 GB, integrity ok, search unaffected.
 - **float16 — measured, recommend adopting on `chats`.** `eval-chats-f16`
