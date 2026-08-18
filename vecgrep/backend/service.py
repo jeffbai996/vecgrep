@@ -134,6 +134,10 @@ _ID_NAMESPACE = uuid.UUID("3a7d9e5f-0c1b-4a2e-9f4d-abcdef000001")
 
 _SECONDS_PER_DAY = 86400.0
 
+# Lowest multiplier recency decay may apply (1.0 disables decay's effect,
+# 0.0 restores the unfloored curve). See _recency_factor.
+DECAY_FLOOR = float(os.environ.get("VECGREP_DECAY_FLOOR", "0.0"))
+
 
 def _recency_factor(doc_ts: float | None, half_life_days: float | None, now: float) -> float:
     """Multiplier in (0, 1] applied to a hit's fused score for recency decay.
@@ -147,7 +151,13 @@ def _recency_factor(doc_ts: float | None, half_life_days: float | None, now: flo
     if not half_life_days or half_life_days <= 0 or doc_ts is None:
         return 1.0
     age_days = max(0.0, (now - doc_ts) / _SECONDS_PER_DAY)
-    return 0.5 ** (age_days / half_life_days)
+    # DECAY_FLOOR caps how far age alone can push a hit down. Unfloored, a
+    # 100-day-old chunk on a 45-day half-life scores at 0.21x, so an EXACT
+    # match on an old fact loses to a vague match on a recent one — measured
+    # 2026-08-17: a Chinese-language query whose only correct transcript was
+    # 100 days old ranked #1 on vector-only and dropped out of the top 10 the
+    # moment decay was applied. Recency should break ties, not veto relevance.
+    return max(DECAY_FLOOR, 0.5 ** (age_days / half_life_days))
 
 
 @dataclass
