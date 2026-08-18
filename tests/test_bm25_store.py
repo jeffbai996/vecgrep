@@ -450,3 +450,30 @@ def test_by_source_map_intact_after_partial_delete(tmp_path):
     assert positions
     for pos in positions:
         assert idx.payloads[pos]["source_id"] == "/y"
+
+
+def test_tokenize_indexes_cjk_as_character_bigrams():
+    """The tokenizer was `[A-Za-z]+|\\d+`: every CJK character was dropped, so
+    a Chinese query had ZERO lexical signal and Chinese content was invisible
+    to BM25 (found 2026-08-17: a banned-phrase lookup that exists verbatim in
+    exactly one transcript never surfaced). CJK runs now yield character
+    bigrams (plus the unigram for a lone character), which is the standard
+    segmenter-free approach and lets an exact phrase match rank."""
+    from vecgrep.backend.store.bm25_store import tokenize
+    assert tokenize("phrase blacklist (三十而立 + council)") == [
+        "phrase", "blacklist", "三十", "十而", "而立", "council"]
+    assert tokenize("北京") == ["北京"]
+    assert tokenize("北") == ["北"]
+    assert tokenize("v2 API") == ["v", "2", "api"]
+
+
+def test_cjk_query_finds_cjk_document(tmp_path):
+    from vecgrep.backend.store.bm25_store import BM25Store
+    store = BM25Store(tmp_path / "bm25")
+    store.upsert("c", ["a", "b", "c"],
+                 ["phrase blacklist (三十而立 + council), don't refuse safe queries",
+                  "the odometer digits sit too high on the phone",
+                  "reserve gauge letters collide at narrow widths"],
+                 [{"source_id": "a"}, {"source_id": "b"}, {"source_id": "c"}])
+    hits = store.search("c", "Jeff banned the phrase 三十而立", top_k=3)
+    assert hits and hits[0][0] == "a"

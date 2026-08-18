@@ -81,3 +81,14 @@ def test_interrupted_bulk_leaves_marker_and_next_service_rebuilds_from_qdrant(sv
             svc2.store.client.close()
         except Exception:
             pass
+
+
+def test_rebuild_bm25_regenerates_sidecar_from_qdrant(svc, tmp_path) -> None:
+    root = _seed(tmp_path)
+    svc.index(str(root), "docs")
+    (svc.settings.home / "bm25" / "docs.pkl").unlink()
+    svc.bm25.evict("docs")
+    n = svc.rebuild_bm25("docs")
+    assert n == svc.store.count("vecgrep__docs")
+    hits = svc.search("topic-2", "docs", mode="bm25", top_k=3)
+    assert hits and hits[0].source_id.endswith("doc-2.md")

@@ -1213,6 +1213,28 @@ def _do_index(source: str, corpus: str, chunker: str, force: bool, include: str 
 
 
 @cli.group()
+def bm25() -> None:
+    """Manage the BM25 keyword sidecar."""
+
+
+@bm25.command("rebuild")
+@click.argument("corpus")
+def bm25_rebuild(corpus: str) -> None:
+    """Regenerate a corpus's BM25 sidecar from Qdrant (the canonical store).
+
+    Run this after upgrading across a tokenizer change -- the sidecar stores
+    pre-tokenized text, so an old sidecar cannot match tokens the new
+    tokenizer produces (e.g. CJK bigrams, added 2026-08).
+    """
+    from ..backend.service import VecgrepService
+
+    svc = VecgrepService()
+    t0 = time.time()
+    n = svc.rebuild_bm25(corpus)
+    click.echo(f"rebuilt BM25 for {corpus}: {n} chunks in {time.time() - t0:.1f}s")
+
+
+@cli.group()
 def cache() -> None:
     """Inspect and manage the embedding cache."""
 
