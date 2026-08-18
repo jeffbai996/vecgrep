@@ -127,7 +127,15 @@ class QdrantSnapshots:
             return
         if snapshot_format != "portable-jsonl":
             raise BackupError(f"Unsupported snapshot format: {snapshot_format}")
-        self.service.store.ensure_collection(collection, dim)
+        # Read the datatype back off the (already restored) registry entry.
+        # Missing entry -> float32, which is what an old archive predates
+        # anyway. Getting this wrong is silent: the restore succeeds and the
+        # corpus is simply float32 again.
+        try:
+            dtype = self.service.registry.get(corpus).datatype
+        except Exception:
+            dtype = "float32"
+        self.service.store.ensure_collection(collection, dim, datatype=dtype)
         ids: list[str] = []
         vectors: list[list[float]] = []
         payloads: list[dict] = []

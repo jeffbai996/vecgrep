@@ -59,6 +59,16 @@ class Corpus:
     # transcript corpus full of names, dates and exact phrases; the 2026-08
     # eval measured the two optima a factor of three apart.
     bm25_weight: float | None = None
+    # On-disk vector storage type: "float32" (default) or "float16". Halves
+    # the dominant term of a large collection's footprint at no measured recall
+    # cost (docs/STORAGE_RETRIEVAL_2026-08, 60 chats gold cases: identical
+    # hit@1/3/10, qdrant -35%, vector p50 312ms -> 100ms). It is pinned when a
+    # qdrant collection is CREATED and cannot be changed in place, so it lives
+    # here rather than in a setting: every path that can (re)create a
+    # collection -- index, create, rename-migrate, crash recovery, backup
+    # restore -- has to read it back, or the collection silently reverts to
+    # float32 and the corpus quietly gets slower and bigger again.
+    datatype: str = "float32"
 
 
 class CorpusRegistry:
