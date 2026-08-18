@@ -35,8 +35,43 @@ a stalled connection.
 """
 from __future__ import annotations
 
+import base64
 import json
 from typing import Any
+
+
+# --- MCP server icon (SEP-973) ------------------------------------------
+# A lens over scattered points: nearest-neighbour search in a vector space.
+# Teal #56d4bc, chosen to stay legible on both light and dark (this SDK
+# revision has no per-theme icon field). Base64 into a data URI so no client
+# has to fetch anything to draw it.
+_ICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+    '<circle cx="5" cy="6" r="1.8" fill="#56d4bc" opacity=".55"/>'
+    '<circle cx="12" cy="4" r="1.8" fill="#56d4bc" opacity=".55"/>'
+    '<circle cx="6" cy="15" r="1.8" fill="#56d4bc" opacity=".55"/>'
+    '<circle cx="19" cy="9" r="1.8" fill="#56d4bc" opacity=".55"/>'
+    '<circle cx="13" cy="13" r="4" fill="none" stroke="#56d4bc" '
+    'stroke-width="2"/>'
+    '<path d="M16 16l4 4" stroke="#56d4bc" stroke-width="2" '
+    'stroke-linecap="round"/>'
+    '</svg>'
+)
+
+
+def _server_icons() -> list:
+    """SEP-973 icons for the server's Implementation metadata.
+
+    The mcp import stays inside the function on purpose: importing this module
+    must not require the optional `vecgrep[mcp]` extra (see module docstring).
+    """
+    from mcp.types import Icon
+    return [Icon(
+        src="data:image/svg+xml;base64,"
+            + base64.b64encode(_ICON_SVG.encode()).decode(),
+        mimeType="image/svg+xml",
+        sizes=["any"],
+    )]
 
 from ..backend.service import VecgrepService
 
@@ -1593,6 +1628,7 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
         )
         fmcp_kwargs["auth_server_provider"] = _shared_provider()
 
+    fmcp_kwargs["icons"] = _server_icons()
     fmcp = FastMCP("vecgrep", **fmcp_kwargs)
     fmcp.settings.json_response = True
     fmcp.settings.stateless_http = True
