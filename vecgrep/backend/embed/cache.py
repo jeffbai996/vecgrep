@@ -294,6 +294,12 @@ class EmbedCache:
             already -= converted
             if vacuum:
                 self._conn.execute("VACUUM")
+                # In WAL mode VACUUM writes the rebuilt database INTO the WAL;
+                # the main file only shrinks once that WAL is checkpointed,
+                # which a long-lived reader (vecgrep-serve) can defer forever.
+                # Best effort: if a reader pins it, the size settles on the
+                # next restart instead.
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return {"converted": converted, "already_blob": already, "vacuumed": vacuum}
 
     def sweep(
