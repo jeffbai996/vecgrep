@@ -281,6 +281,17 @@ class VecgrepService:
                 recovered.append(corpus_name)
         return recovered
 
+    def rebuild_bm25(self, corpus_name: str) -> int:
+        """Regenerate one corpus's BM25 sidecar from qdrant under the corpus
+        write lock. Needed after a tokenizer change (the sidecar stores
+        pre-tokenized documents) or whenever the sidecar is suspect. Returns
+        the point count rebuilt."""
+        with self.locks.write(corpus_name):
+            self._recover_corpus_locked(corpus_name)
+            corpus = self.registry.get(corpus_name)
+            self._rebuild_bm25_from_store(corpus)
+            return self.bm25.count(corpus_name)
+
     def _rebuild_bm25_from_store(self, corpus: Corpus) -> None:
         """Regenerate one corpus's BM25 sidecar from qdrant, the canonical
         payload store. Raises if the point count read back differs."""

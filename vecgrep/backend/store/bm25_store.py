@@ -23,7 +23,13 @@ from rank_bm25 import BM25Okapi
 # Match runs of letters/digits, treating underscore and CamelCase as
 # token boundaries so identifiers like `sharpe_ratio` and `getUserName`
 # are searchable as their constituent words. Pure prose is unaffected.
-_TOKEN = re.compile(r"[A-Za-z]+|\d+", re.UNICODE)
+# Latin words, digit runs, and CJK runs. CJK (Han, kana, hangul) has no word
+# spaces; each run is broken into character bigrams below (unigram for a lone
+# character) so an exact phrase can match lexically. Before 2026-08-17 the
+# pattern was `[A-Za-z]+|\d+` and every CJK character was silently dropped.
+_CJK = "\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff\uac00-\ud7af"
+_TOKEN = re.compile(rf"[A-Za-z]+|\d+|[{_CJK}]+", re.UNICODE)
+_CJK_RUN = re.compile(rf"^[{_CJK}]+$")
 _CAMEL_SPLIT = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 # Minimum query-term coverage required for a doc to be a BM25 candidate.
@@ -66,6 +72,12 @@ BM25_COVERAGE_PENALTY_EXPONENT = 2.0
 def tokenize(text: str) -> list[str]:
     out: list[str] = []
     for chunk in _TOKEN.findall(text):
+        if _CJK_RUN.match(chunk):
+            if len(chunk) == 1:
+                out.append(chunk)
+            else:
+                out.extend(chunk[i:i + 2] for i in range(len(chunk) - 1))
+            continue
         for piece in _CAMEL_SPLIT.split(chunk):
             if piece:
                 out.append(piece.lower())
