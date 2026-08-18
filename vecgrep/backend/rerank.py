@@ -20,8 +20,13 @@ import os
 #   large  hit@3 79.6  mrr .697  neg FP  3.8%  +3.5 s
 # v2-m3 is the first reranker that does not demote answers the pool already
 # had (base lost hit@3 vs unreranked; v2-m3 gains it) and it calibrates the
-# negatives. Override per install with VECGREP_RERANKER.
-DEFAULT_RERANKER = os.environ.get("VECGREP_RERANKER", "BAAI/bge-reranker-v2-m3")
+# negatives. It is NOT the default yet: rerank runs synchronously inside the
+# serve request path, and the first v2-m3 load+predict in that process blocked
+# the event loop for 5+ minutes on 2026-08-18, long enough for squad-watchdog
+# (strikes=1) to kill and restart the server mid-request. Until model loading
+# is warmed at startup (or off the event loop), the smaller model stays.
+# Override per install with VECGREP_RERANKER=BAAI/bge-reranker-v2-m3.
+DEFAULT_RERANKER = os.environ.get("VECGREP_RERANKER", "BAAI/bge-reranker-base")
 
 
 class RerankerError(RuntimeError):
