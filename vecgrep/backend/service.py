@@ -849,7 +849,11 @@ class VecgrepService:
         # quoted replies) don't each eat a top_k slot.
         results = dedup_near_duplicates(results)
 
-        if rerank:
+        # A cold cross-encoder takes minutes to load and would hold a sync
+        # threadpool slot for all of it (see rerank.RERANK_WAIT_S). Falling
+        # through to the plain path costs accuracy on one search; blocking
+        # costs the server.
+        if rerank and self._rerank_ready(rerank_model):
             results = self._apply_rerank(query, results, top_k, rerank_model, explain=explain)
         else:
             # Diversity-aware top_k: MMR keeps relevance dominant but skips
@@ -1360,6 +1364,26 @@ class VecgrepService:
         if payload is None:
             payload = self.bm25.get_by_id(corpus.name, r.chunk_id)
         return payload
+
+    def _rerank_ready(self, model_name: str | None) -> bool:
+        """Is the cross-encoder loaded (or loadable within the wait budget)?
+
+        Kicks off the background warm on the way past, so the first search
+        after a cold start pays nothing and the second one usually reranks."""
+        from .rerank import DEFAULT_RERANKER, wait_ready
+
+        name = model_name or DEFAULT_RERANKER
+        try:
+            ready = wait_ready(name)
+        except Exception as exc:   # never let warming break a search
+            logger.warning("reranker readiness check failed: %s", exc)
+            return False
+        if not ready:
+            logger.info(
+                "reranker %s not ready — returning fusion order for this search",
+                name,
+            )
+        return ready
 
     def _apply_rerank(
         self,
