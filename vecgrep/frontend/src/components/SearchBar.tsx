@@ -10,7 +10,6 @@ type Props = {
 
 const MODES: {
   value: SearchMode;
-  badge: "V" | "K" | "VK";
   label: string;
   hint: string;
   active: string;
@@ -18,7 +17,6 @@ const MODES: {
 }[] = [
   {
     value: "hybrid",
-    badge: "VK",
     label: "Hybrid",
     hint: "meaning + exact terms",
     active: "border-violet-700/80 bg-violet-950/70 text-violet-300",
@@ -26,7 +24,6 @@ const MODES: {
   },
   {
     value: "vector",
-    badge: "V",
     label: "Semantic",
     hint: "meaning only",
     active: "border-sky-700/80 bg-sky-950/70 text-sky-300",
@@ -34,7 +31,6 @@ const MODES: {
   },
   {
     value: "bm25",
-    badge: "K",
     label: "Keyword",
     hint: "exact terms only",
     active: "border-emerald-700/80 bg-emerald-950/70 text-emerald-300",
@@ -118,12 +114,11 @@ export default function SearchBar({ onSearch, disabled, corpus, corpusCount }: P
               onClick={() => setMode(item.value)}
               title={item.hint}
               aria-pressed={mode === item.value}
-              className={`flex items-center gap-1.5 border px-2.5 py-1 rounded-md transition-colors ${
+              className={`border px-2.5 py-1 rounded-md leading-none transition-colors ${
                 mode === item.value ? item.active : item.idle
               }`}
             >
-              <span className="text-[9px] font-semibold">{item.badge}</span>
-              <span>{item.label}</span>
+              {item.label}
             </button>
           ))}
         </div>
@@ -133,7 +128,7 @@ export default function SearchBar({ onSearch, disabled, corpus, corpusCount }: P
             type="checkbox"
             checked={rerank}
             onChange={(e) => setRerank(e.target.checked)}
-            className="accent-violet-400"
+            className="accent-violet-400 h-3 w-3 shrink-0"
           />
           Deep rerank
         </label>
