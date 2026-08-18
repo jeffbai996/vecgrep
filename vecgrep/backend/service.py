@@ -135,8 +135,10 @@ _ID_NAMESPACE = uuid.UUID("3a7d9e5f-0c1b-4a2e-9f4d-abcdef000001")
 _SECONDS_PER_DAY = 86400.0
 
 # Lowest multiplier recency decay may apply (1.0 disables decay's effect,
-# 0.0 restores the unfloored curve). See _recency_factor.
-DECAY_FLOOR = float(os.environ.get("VECGREP_DECAY_FLOOR", "0.0"))
+# 0.0 restores the pre-2026-08 unfloored curve). 0.5 measured best on the
+# eval harness: transcript hit@3 82 -> 84, hit@5 86 -> 89, nothing lost
+# elsewhere. See _recency_factor and docs/STORAGE_RETRIEVAL_2026-08.md.
+DECAY_FLOOR = float(os.environ.get("VECGREP_DECAY_FLOOR", "0.5"))
 
 
 def _bm25_fusion_weight(corpus: Corpus | None) -> float:
