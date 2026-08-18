@@ -108,11 +108,27 @@ def test_web_ui_uses_dense_budgeted_results_and_insight_views() -> None:
 
 
 def test_search_modes_share_the_result_badge_color_language() -> None:
-    search = (FRONTEND / "components" / "SearchBar.tsx").read_text(encoding="utf-8")
+    """Each mode button carries the retriever colour its result badge uses.
 
-    assert 'badge: "VK"' in search and "violet" in search
-    assert 'badge: "V"' in search and "sky" in search
-    assert 'badge: "K"' in search and "emerald" in search
+    ResultList tones a hit violet for VK, sky for V, emerald for K. The mode
+    buttons must speak the same colour language so a violet result reads as
+    "the mode I am on". Colour is the contract -- the literal VK/V/K letters
+    were dropped from the buttons (2026-08-18) because a 9px badge span next
+    to an 11px label cannot optically centre under items-center; the letters
+    still appear on the result badges, where they have their own line box.
+    """
+    search = (FRONTEND / "components" / "SearchBar.tsx").read_text(encoding="utf-8")
+    results = (FRONTEND / "components" / "ResultList.tsx").read_text(encoding="utf-8")
+
+    for value, colour in (("hybrid", "violet"), ("vector", "sky"), ("bm25", "emerald")):
+        block = search.split(f'value: "{value}"', 1)
+        assert len(block) == 2, f"mode {value} missing from SearchBar"
+        entry = block[1].split("},", 1)[0]
+        assert colour in entry, f"mode {value} must use the {colour} retriever colour"
+
+    # The colours are only a shared language if the result badges use them too.
+    for colour in ("violet", "sky", "emerald"):
+        assert colour in results, f"ResultList lost the {colour} badge tone"
 
 
 def test_committed_web_bundle_has_no_private_companion_url() -> None:
