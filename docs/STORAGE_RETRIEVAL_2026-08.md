@@ -158,9 +158,15 @@ each other, not against the round-2 absolutes.
 - **Negative FP is now measured on 26 cases, not 8.** The round-2 "directional"
   caveat is retired: unreranked hybrid really does surface a confident top
   hit for almost every off-topic query, and a reranker really does fix it.
-- Adopted: `DEFAULT_RERANKER` -> `BAAI/bge-reranker-v2-m3`, overridable via
-  `VECGREP_RERANKER`. Rerank stays opt-in on the API/CLI and on for the
-  recall hook.
+- **Not adopted as default — blocked by the serve path, not the numbers.**
+  Rerank runs synchronously in the request handler. The first v2-m3
+  load+predict inside `vecgrep-serve` blocked the event loop for 5+ minutes
+  (20 GB box, 5.2 GB RSS + swap already), `squad-watchdog` (strikes=1) killed
+  and restarted the server mid-request, and a hook that reranks by default
+  would re-trigger that on every restart. `DEFAULT_RERANKER` is now
+  env-overridable (`VECGREP_RERANKER`) and stays `bge-reranker-base` until the
+  model is warmed at startup or predicted off the event loop. That is the
+  next reranker task; measuring is done.
 - **Embed cache sweep + compact ran on live:** 335,161 -> 226,970 rows,
   `embed_cache.db` 4.45 GB -> 1.07 GB, integrity ok, search unaffected.
 - **float16:** see the row below this section once `eval-chats-f16` finishes.
