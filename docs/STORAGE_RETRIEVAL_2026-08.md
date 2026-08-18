@@ -135,3 +135,32 @@ Rows were JSON text (~13.8 KB per 1024-dim vector). 292k rows = 4.0 GB, of
 which ~96k rows referenced chunks no live corpus held. Now: float32 blobs
 (4 KB), `vecgrep cache sweep` (keep-set derived from qdrant per embedding
 identity), `vecgrep cache compact` (rewrite legacy rows + VACUUM).
+
+## Round 3 (2026-08-18) — reranker, negatives, cache, float16
+
+Negatives grown 8 -> 26 (out-of-domain EN + CJK across all three corpora),
+gold now 119 cases. Same eval-* corpora as round 2, `DECAY_FLOOR` 0.5 and
+per-corpus BM25 weights live. Latencies were measured on a busy box (a cache
+compaction and a corpus build overlapped the run) so read them relative to
+each other, not against the round-2 absolutes.
+
+| config | hit@1 | hit@3 | hit@5 | hit@10 | MRR | neg FP (26) | p50 ms |
+|---|---|---|---|---|---|---|---|
+| hybrid (no rerank) | 49.5 | 79.6 | 84.9 | 92.5 | .648 | 92.3% | 1028 |
+| + bge-reranker-base | 55.9 | 76.3 | 87.1 | 91.4 | .681 | 11.5% | 1282 |
+| + bge-reranker-v2-m3 | 55.9 | **82.8** | **89.2** | 92.5 | **.702** | **3.8%** | 2425 |
+| + bge-reranker-large | **57.0** | 79.6 | 89.2 | **93.5** | .697 | 3.8% | 4518 |
+
+- **v2-m3 is the reranker round 2 asked for.** It keeps base's hit@1 gain
+  and stops paying for it at hit@3 (76 -> 83, above the unreranked pool),
+  and 1 in 26 negatives leaks vs 3 in 26 for base and 24 in 26 unreranked.
+  `large` buys +1 hit@1 for double the latency; not worth it.
+- **Negative FP is now measured on 26 cases, not 8.** The round-2 "directional"
+  caveat is retired: unreranked hybrid really does surface a confident top
+  hit for almost every off-topic query, and a reranker really does fix it.
+- Adopted: `DEFAULT_RERANKER` -> `BAAI/bge-reranker-v2-m3`, overridable via
+  `VECGREP_RERANKER`. Rerank stays opt-in on the API/CLI and on for the
+  recall hook.
+- **Embed cache sweep + compact ran on live:** 335,161 -> 226,970 rows,
+  `embed_cache.db` 4.45 GB -> 1.07 GB, integrity ok, search unaffected.
+- **float16:** see the row below this section once `eval-chats-f16` finishes.

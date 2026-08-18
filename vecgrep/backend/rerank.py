@@ -12,7 +12,16 @@ when the user actually asks for reranking.
 """
 from __future__ import annotations
 
-DEFAULT_RERANKER = "BAAI/bge-reranker-base"
+import os
+
+# Round 3 (2026-08-18, 119 gold cases / 26 negatives, docs/STORAGE_RETRIEVAL):
+#   base   hit@3 76.3  mrr .681  neg FP 11.5%  +250 ms
+#   v2-m3  hit@3 82.8  mrr .702  neg FP  3.8%  +1.4 s
+#   large  hit@3 79.6  mrr .697  neg FP  3.8%  +3.5 s
+# v2-m3 is the first reranker that does not demote answers the pool already
+# had (base lost hit@3 vs unreranked; v2-m3 gains it) and it calibrates the
+# negatives. Override per install with VECGREP_RERANKER.
+DEFAULT_RERANKER = os.environ.get("VECGREP_RERANKER", "BAAI/bge-reranker-v2-m3")
 
 
 class RerankerError(RuntimeError):
