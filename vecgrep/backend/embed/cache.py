@@ -15,8 +15,10 @@ import hashlib
 import json
 import os
 import sqlite3
+import sys
 import threading
 import time
+from array import array
 from pathlib import Path
 
 from .base import EmbedBackend
@@ -62,6 +64,30 @@ def _max_rows() -> int:
         return int(os.environ.get("VECGREP_EMBED_CACHE_MAX_ROWS", DEFAULT_MAX_ROWS))
     except ValueError:
         return DEFAULT_MAX_ROWS
+
+
+# Vector storage format. Rows written before 2026-08-17 hold the vector as
+# JSON text -- ~13.8 KB for a 1024-dim model, which is how a 292k-row cache
+# came to weigh 4.0 GB, three times the qdrant store it was meant to make
+# cheap to rebuild. New rows are packed little-endian float32 (4 KB at
+# 1024-dim, 3.4x smaller); reads accept both so nothing has to be re-embedded,
+# and compact() rewrites the legacy rows in place.
+
+def _encode(vec: list[float]) -> bytes:
+    a = array("f", vec)
+    if sys.byteorder != "little":
+        a.byteswap()
+    return a.tobytes()
+
+
+def _decode(raw) -> list[float]:
+    if isinstance(raw, (bytes, memoryview)):
+        a = array("f")
+        a.frombytes(bytes(raw))
+        if sys.byteorder != "little":
+            a.byteswap()
+        return a.tolist()
+    return json.loads(raw)
 
 
 class EmbedCache:
@@ -142,8 +168,8 @@ class EmbedCache:
                     f"WHERE identity = ? AND text_sha IN ({placeholders})",
                     [identity, *batch],
                 )
-                for sha, vec_json in cur.fetchall():
-                    out[sha] = json.loads(vec_json)
+                for sha, raw in cur.fetchall():
+                    out[sha] = _decode(raw)
             if out and not self._read_only:
                 # A read is what makes an entry worth keeping. One UPDATE per
                 # batch, not per row, so this stays cheap on the hot path.
@@ -183,7 +209,7 @@ class EmbedCache:
             return
         now = self._now()
         rows = [
-            (identity, self._sha(t), json.dumps(v), now)
+            (identity, self._sha(t), _encode(v), now)
             for t, v in zip(texts, vectors)
         ]
         with self._lock:
@@ -227,6 +253,89 @@ class EmbedCache:
                 "SELECT identity, COUNT(*) FROM embed_cache GROUP BY identity"
             )
             return {row[0]: row[1] for row in cur.fetchall()}
+
+    def stats_bytes(self) -> dict[str, dict]:
+        """{identity: {rows, bytes}} -- bytes is the stored vector payload
+        (JSON text or float32 blob), which is what actually fills the file."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT identity, COUNT(*), COALESCE(SUM(LENGTH(vector)), 0) "
+                "FROM embed_cache GROUP BY identity"
+            )
+            return {row[0]: {"rows": row[1], "bytes": row[2]} for row in cur.fetchall()}
+
+    def compact(self, *, vacuum: bool = True, batch: int = 2000) -> dict:
+        """Rewrite legacy JSON rows as float32 blobs, then optionally VACUUM so
+        the file actually shrinks (sqlite reuses freed pages but never returns
+        them without a VACUUM; VACUUM needs up to 2x the file in free disk).
+        Safe to run against a live cache: work is done in small committed
+        batches under the busy timeout, so writers queue rather than fail."""
+        if self._read_only:
+            raise RuntimeError("embed cache is read-only")
+        converted = already = 0
+        while True:
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT rowid, vector FROM embed_cache "
+                    "WHERE typeof(vector) = 'text' LIMIT ?", (batch,)
+                ).fetchall()
+                if not rows:
+                    break
+                self._conn.executemany(
+                    "UPDATE embed_cache SET vector = ? WHERE rowid = ?",
+                    [(_encode(json.loads(raw)), rid) for rid, raw in rows],
+                )
+                self._conn.commit()
+            converted += len(rows)
+        with self._lock:
+            (already,) = self._conn.execute(
+                "SELECT COUNT(*) FROM embed_cache WHERE typeof(vector) = 'blob'"
+            ).fetchone()
+            already -= converted
+            if vacuum:
+                self._conn.execute("VACUUM")
+        return {"converted": converted, "already_blob": already, "vacuumed": vacuum}
+
+    def sweep(
+        self,
+        keep: dict[str, set[str]],
+        *,
+        identities: list[str] | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        """Delete every row whose (identity, sha) is not in `keep`.
+
+        `keep` maps identity -> set of text shas some live corpus still holds.
+        An identity absent from `keep` (a model no corpus uses any more) is
+        entirely orphaned. `identities` restricts the sweep to those
+        identities; default is every identity present. Returns
+        {identity: rows deleted (or would be, under dry_run)}.
+        """
+        if self._read_only and not dry_run:
+            raise RuntimeError("embed cache is read-only")
+        out: dict[str, int] = {}
+        with self._lock:
+            present = [r[0] for r in self._conn.execute(
+                "SELECT DISTINCT identity FROM embed_cache").fetchall()]
+            for ident in present:
+                if identities is not None and ident not in identities:
+                    continue
+                keep_shas = keep.get(ident, set())
+                cur = self._conn.execute(
+                    "SELECT text_sha FROM embed_cache WHERE identity = ?", (ident,))
+                victims = [row[0] for row in cur.fetchall() if row[0] not in keep_shas]
+                out[ident] = len(victims)
+                if dry_run or not victims:
+                    continue
+                for i in range(0, len(victims), 500):
+                    part = victims[i:i + 500]
+                    self._conn.execute(
+                        f"DELETE FROM embed_cache WHERE identity = ? AND text_sha IN "
+                        f"({','.join('?' * len(part))})",
+                        [ident, *part],
+                    )
+                self._conn.commit()
+        return {k: v for k, v in out.items() if v or dry_run}
 
     def clear(self, identity: str | None = None) -> int:
         if self._read_only:

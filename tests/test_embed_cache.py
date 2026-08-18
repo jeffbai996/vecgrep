@@ -270,3 +270,83 @@ def test_read_only_cache_serves_hits_without_any_mutation(tmp_path):
     ).fetchone()
     assert after == before
     assert cold is None
+
+
+# ── storage format + housekeeping (M4, 2026-08-17) ───────────────────────────
+#
+# The live cache reached 4.0 GB for 292k rows because every vector was a JSON
+# text of ~13.8 KB. Rows are now float32 blobs (4 KB at 1024-dim); legacy JSON
+# rows still read; `compact()` rewrites them; `sweep()` deletes rows no live
+# corpus references so the cache stops being append-only.
+
+def _raw_rows(db):
+    conn = sqlite3.connect(db)
+    try:
+        return conn.execute("SELECT identity, text_sha, vector FROM embed_cache").fetchall()
+    finally:
+        conn.close()
+
+
+def test_new_rows_are_float32_blobs_that_round_trip(tmp_path):
+    db = tmp_path / "embed.db"
+    cache = EmbedCache(db)
+    vec = [0.1234567, -0.75, 1e-3, 2.5]
+    cache.put_many("id", ["t"], [vec])
+    rows = _raw_rows(db)
+    assert len(rows) == 1 and isinstance(rows[0][2], bytes)
+    assert len(rows[0][2]) == 4 * len(vec)          # float32, not JSON text
+    got = cache.get_many("id", ["t"])[EmbedCache._sha("t")]
+    assert len(got) == 4
+    for a, b in zip(got, vec):
+        assert abs(a - b) < 1e-6                     # float32 precision
+
+
+def test_legacy_json_rows_still_read_and_compact_converts_them(tmp_path):
+    db = tmp_path / "embed.db"
+    cache = EmbedCache(db)
+    sha = EmbedCache._sha("old")
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO embed_cache (identity, text_sha, vector, last_used) VALUES (?,?,?,0)",
+                 ("id", sha, "[1.0, 2.0, 3.0]"))
+    conn.commit(); conn.close()
+    assert cache.get_many("id", ["old"])[sha] == [1.0, 2.0, 3.0]
+    cache.put_many("id", ["new"], [[4.0, 5.0, 6.0]])
+    rep = cache.compact(vacuum=False)
+    assert rep["converted"] == 1 and rep["already_blob"] == 1
+    rows = {r[1]: r[2] for r in _raw_rows(db)}
+    assert isinstance(rows[sha], bytes) and len(rows[sha]) == 12
+    assert cache.get_many("id", ["old"])[sha] == [1.0, 2.0, 3.0]
+    # idempotent
+    assert cache.compact(vacuum=False)["converted"] == 0
+
+
+def test_sweep_deletes_only_rows_outside_the_keep_set(tmp_path):
+    cache = EmbedCache(tmp_path / "embed.db")
+    live = ["a", "b"]
+    dead = ["c", "d", "e"]
+    cache.put_many("id", live + dead, [[1.0]] * 5)
+    cache.put_many("other", ["x"], [[1.0]])
+    keep = {"id": {EmbedCache._sha(t) for t in live}}
+    dry = cache.sweep(keep, dry_run=True)
+    assert dry == {"id": 3, "other": 1}
+    assert sum(cache.stats().values()) == 6, "dry run must not delete"
+    real = cache.sweep(keep)
+    assert real == {"id": 3, "other": 1}
+    assert cache.stats() == {"id": 2}
+    assert len(cache.get_many("id", live)) == 2
+
+
+def test_sweep_can_be_scoped_to_one_identity(tmp_path):
+    cache = EmbedCache(tmp_path / "embed.db")
+    cache.put_many("id", ["a", "dead"], [[1.0]] * 2)
+    cache.put_many("other", ["x"], [[1.0]])
+    got = cache.sweep({"id": {EmbedCache._sha("a")}}, identities=["id"])
+    assert got == {"id": 1}
+    assert cache.stats() == {"id": 1, "other": 1}, "identities outside the scope are untouched"
+
+
+def test_stats_bytes_reports_per_identity_size(tmp_path):
+    cache = EmbedCache(tmp_path / "embed.db")
+    cache.put_many("id", ["a", "b"], [[1.0] * 8] * 2)
+    s = cache.stats_bytes()
+    assert s["id"]["rows"] == 2 and s["id"]["bytes"] == 2 * 8 * 4

@@ -1251,16 +1251,18 @@ def cache_stats(json_out: bool) -> None:
         click.echo("no cache yet.")
         return
     cache = EmbedCache(db)
-    stats = cache.stats()
+    stats = cache.stats_bytes()
+    file_bytes = db.stat().st_size
     if json_out:
-        click.echo(json.dumps(stats, indent=2))
+        click.echo(json.dumps({"identities": stats, "file_bytes": file_bytes}, indent=2))
         return
     if not stats:
         click.echo("cache is empty.")
         return
-    click.echo(f"{'IDENTITY':<40} {'COUNT':>10}")
-    for ident, count in sorted(stats.items()):
-        click.echo(f"{ident:<40} {count:>10}")
+    click.echo(f"{'IDENTITY':<40} {'ROWS':>10} {'MB':>10}")
+    for ident, row in sorted(stats.items()):
+        click.echo(f"{ident:<40} {row['rows']:>10} {row['bytes'] / 1e6:>10.1f}")
+    click.echo(f"{'file on disk':<40} {'':>10} {file_bytes / 1e6:>10.1f}")
 
 
 @cache.command("clear")
@@ -1283,6 +1285,56 @@ def cache_clear(identity: str | None, yes: bool) -> None:
     cache = EmbedCache(db)
     n = cache.clear(identity)
     click.echo(f"cleared: {n} entries")
+
+
+@cache.command("sweep")
+@click.option("--dry-run", is_flag=True, help="Report what would be deleted; delete nothing.")
+@click.option("--identity", default=None, help="Only sweep this identity.")
+@click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
+def cache_sweep(dry_run: bool, identity: str | None, json_out: bool) -> None:
+    """Delete cached vectors that no registered corpus references.
+
+    The keep-set is derived from qdrant (every chunk text every live corpus
+    holds), so a sweep never removes a vector a re-index would ask for. Rows
+    for deleted sources, dropped corpora and old chunker output are what go.
+    Run with --dry-run first; follow with `vecgrep cache compact` to give the
+    space back to the filesystem.
+    """
+    from ..backend.service import VecgrepService
+
+    svc = VecgrepService()
+    rep = svc.cache_sweep(dry_run=dry_run, identities=[identity] if identity else None)
+    if json_out:
+        click.echo(json.dumps(rep, indent=2))
+        return
+    verb = "would delete" if dry_run else "deleted"
+    for ident in sorted(set(rep["kept"]) | set(rep["deleted"])):
+        click.echo(f"{ident:<40} keep {rep['kept'].get(ident, 0):>8}  {verb} {rep['deleted'].get(ident, 0):>8}")
+    if not dry_run:
+        click.echo("run `vecgrep cache compact` to shrink the file.")
+
+
+@cache.command("compact")
+@click.option("--no-vacuum", is_flag=True, help="Convert rows but skip VACUUM (no disk shrink).")
+def cache_compact(no_vacuum: bool) -> None:
+    """Rewrite legacy JSON vectors as float32 blobs (~3.4x smaller) and VACUUM.
+
+    VACUUM needs free disk up to the size of the cache file and holds a write
+    lock for its duration; live searches keep reading (WAL) but indexing
+    waits. Safe to interrupt: conversion commits in batches.
+    """
+    from ..backend.embed.cache import EmbedCache
+
+    s = get_settings()
+    db = s.home / "embed_cache.db"
+    if not db.exists():
+        click.echo("no cache yet.")
+        return
+    before = db.stat().st_size
+    rep = EmbedCache(db).compact(vacuum=not no_vacuum)
+    after = db.stat().st_size
+    click.echo(f"converted {rep['converted']} rows ({rep['already_blob']} already compact); "
+               f"file {before / 1e6:.1f} MB -> {after / 1e6:.1f} MB")
 
 
 @cli.command()
