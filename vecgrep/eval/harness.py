@@ -218,6 +218,7 @@ class RunConfig:
     bm25_weight: float | None = None
     rrf_k: int | None = None
     cosine_floor_margin: float | None = None
+    decay_floor: float | None = None
     decay_half_life_days: float | None | str = "keep"    # per actual corpus, restored after
     notes: str = ""
 
@@ -234,6 +235,7 @@ class _Patched:
             "BM25_WEIGHT": self.cfg.bm25_weight,
             "RRF_K": self.cfg.rrf_k,
             "COSINE_FLOOR_MARGIN": self.cfg.cosine_floor_margin,
+            "DECAY_FLOOR": self.cfg.decay_floor,
         }
         for k, v in pairs.items():
             if v is not None:
