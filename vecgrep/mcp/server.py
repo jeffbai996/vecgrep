@@ -387,7 +387,7 @@ def _run_list_aliases() -> str:
     return json.dumps(describe_aliases(), indent=2, ensure_ascii=False)
 
 
-def _run_list_corpora() -> str:
+def _run_list_corpora(include_hidden: bool = False) -> str:
     svc = _svc()
     corpora = [
         {
@@ -399,6 +399,7 @@ def _run_list_corpora() -> str:
             "chunker": c.chunker,
         }
         for c in svc.list_corpora()
+        if include_hidden or not svc.is_hidden_corpus(c.name)
     ]
     return json.dumps(corpora, indent=2)
 
@@ -1858,9 +1859,12 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
     @fmcp.tool(
         description="List every vecgrep corpus and its stats (doc count, chunk count, embedding model)."
     )
-    def list_corpora() -> str:
-        """Returns JSON array of corpus metadata."""
-        return _run_list_corpora()
+    def list_corpora(include_hidden: bool = False) -> str:
+        """Returns JSON array of corpus metadata.
+
+        include_hidden: also list eval-* builds (side-by-side copies).
+        """
+        return _run_list_corpora(include_hidden=include_hidden)
 
     @fmcp.tool(
         description="Get full metadata for one corpus including its source list."

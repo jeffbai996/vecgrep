@@ -758,14 +758,22 @@ class VecgrepService:
         Skips names matching settings.cross_corpus_exclude (fnmatch). Never
         applied to an explicitly named corpus -- see search().
         """
+        return [c for c in self.registry.list()
+                if not self.is_hidden_corpus(c.name)]
+
+    def is_hidden_corpus(self, name: str) -> bool:
+        """Is this corpus a build artifact rather than one someone curates?
+
+        Reads settings.cross_corpus_exclude -- the same patterns that keep an
+        eval-* copy out of an unscoped fan-out. Deliberately one setting, so a
+        corpus cannot end up hidden from search but still offered in a picker.
+
+        Callers that present a LIST use this; list_corpora() itself stays
+        unfiltered, because backup and the eval harness read it and a backup
+        that silently skips corpora is a much worse bug than an untidy list.
+        """
         patterns = list(getattr(self.settings, "cross_corpus_exclude", None) or [])
-        corpora = self.registry.list()
-        if not patterns:
-            return corpora
-        return [
-            c for c in corpora
-            if not any(fnmatch.fnmatch(c.name, pat) for pat in patterns)
-        ]
+        return any(fnmatch.fnmatch(name, pat) for pat in patterns)
 
     def search(
         self,
