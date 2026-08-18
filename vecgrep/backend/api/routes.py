@@ -132,6 +132,16 @@ def set_rank_weight(name: str, req: WeightRequest) -> CorpusOut:
     return CorpusOut(**asdict(corpus))
 
 
+@router.post("/corpora/{name}/bm25-weight", response_model=CorpusOut)
+def set_bm25_weight(name: str, req: WeightRequest) -> CorpusOut:
+    svc = _service()
+    try:
+        corpus = svc.set_bm25_weight(name, req.weight)
+    except CorpusError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return CorpusOut(**asdict(corpus))
+
+
 @router.delete("/corpora/{name}/source/{id:path}")
 def delete_source(name: str, id: str) -> dict:
     svc = _service()

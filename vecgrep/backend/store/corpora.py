@@ -54,6 +54,11 @@ class Corpus:
     # reference corpus can outrank a high-volume transcript corpus at
     # comparable relevance. 1.0 = neutral (default, no change).
     rank_weight: float = 1.0
+    # Per-corpus BM25 fusion weight. None = the install-wide default
+    # (VECGREP_BM25_WEIGHT). Short semantic notes want less lexical pull than a
+    # transcript corpus full of names, dates and exact phrases; the 2026-08
+    # eval measured the two optima a factor of three apart.
+    bm25_weight: float | None = None
 
 
 class CorpusRegistry:

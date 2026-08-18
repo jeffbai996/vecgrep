@@ -924,6 +924,25 @@ def corpora_weight(name: str, factor: float | None) -> None:
     click.echo(f"{name}: cross-corpus rank weight = {w:g}")
 
 
+@corpora.command("bm25-weight")
+@click.argument("name")
+@click.option("--factor", type=float, default=None,
+              help="BM25 fusion weight for this corpus (0 = vector-only ranking). Omit to use the default.")
+def corpora_bm25_weight(name: str, factor: float | None) -> None:
+    """Pin or reset a corpus's BM25 fusion weight (no re-index needed)."""
+    if _api_alive():
+        c = _post(f"/api/corpora/{name}/bm25-weight", {"weight": factor})
+        w = c.get("bm25_weight")
+    else:
+        svc = VecgrepService()
+        try:
+            corpus = svc.set_bm25_weight(name, factor)
+        except CorpusError as e:
+            raise click.ClickException(str(e))
+        w = corpus.bm25_weight
+    click.echo(f"{name}: bm25 weight = {'default' if w is None else format(w, 'g')}")
+
+
 @cli.command()
 @click.option("--host", default=None, help="Override host.")
 @click.option("--port", default=None, type=int, help="Override port.")

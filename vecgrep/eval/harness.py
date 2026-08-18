@@ -220,6 +220,7 @@ class RunConfig:
     cosine_floor_margin: float | None = None
     decay_floor: float | None = None
     decay_half_life_days: float | None | str = "keep"    # per actual corpus, restored after
+    bm25_weight_by_corpus: dict[str, float] = field(default_factory=dict)  # logical -> weight, restored after
     notes: str = ""
 
 
@@ -273,6 +274,13 @@ def run_config(
         for a in set(actual_corpora.values()):
             saved_decay[a] = svc.registry.get(a).decay_half_life_days
             svc.set_decay(a, cfg.decay_half_life_days)  # type: ignore[arg-type]
+    saved_bm25w: dict[str, float | None] = {}
+    for logical, w in cfg.bm25_weight_by_corpus.items():
+        a = cfg.corpora.get(logical, logical)
+        if a in saved_bm25w or not svc.registry.has(a):
+            continue
+        saved_bm25w[a] = getattr(svc.registry.get(a), "bm25_weight", None)
+        svc.set_bm25_weight(a, w)
     try:
         with _Patched(cfg):
             if warmup and cases:
@@ -297,6 +305,8 @@ def run_config(
     finally:
         for a, d in saved_decay.items():
             svc.set_decay(a, d)
+        for a, w in saved_bm25w.items():
+            svc.set_bm25_weight(a, w)
 
     storage = {}
     for logical, actual in sorted(set(actual_corpora.items())):

@@ -139,6 +139,12 @@ _SECONDS_PER_DAY = 86400.0
 DECAY_FLOOR = float(os.environ.get("VECGREP_DECAY_FLOOR", "0.0"))
 
 
+def _bm25_fusion_weight(corpus: Corpus | None) -> float:
+    """The corpus's pinned BM25 fusion weight, else the install default."""
+    w = getattr(corpus, "bm25_weight", None) if corpus is not None else None
+    return float(w) if w is not None else BM25_WEIGHT
+
+
 def _recency_factor(doc_ts: float | None, half_life_days: float | None, now: float) -> float:
     """Multiplier in (0, 1] applied to a hit's fused score for recency decay.
 
@@ -1446,7 +1452,7 @@ class VecgrepService:
             vector_rank_by_id[cid] = rank + 1
 
         for rank, (cid, score, payload) in enumerate(bm25_hits):
-            rrf[cid] = rrf.get(cid, 0.0) + BM25_WEIGHT / (RRF_K + rank + 1)
+            rrf[cid] = rrf.get(cid, 0.0) + _bm25_fusion_weight(corpus) / (RRF_K + rank + 1)
             sources.setdefault(cid, []).append("bm25")
             payloads_by_id.setdefault(cid, payload)
             bm25_score_by_id[cid] = score
@@ -1605,6 +1611,17 @@ class VecgrepService:
             if half_life_days is not None and half_life_days <= 0:
                 raise CorpusError("half-life must be positive (or omit to disable decay)")
             corpus.decay_half_life_days = half_life_days
+            self.registry.upsert(corpus)
+            return corpus
+
+    def set_bm25_weight(self, name: str, weight: float | None) -> Corpus:
+        """Pin (or with None, unpin) a corpus's BM25 fusion weight."""
+        with self.locks.write(name):
+            self._recover_corpus_locked(name)
+            corpus = self.registry.get(name)
+            if weight is not None and weight < 0:
+                raise CorpusError("bm25 weight must be >= 0 (or omit to use the default)")
+            corpus.bm25_weight = None if weight is None else float(weight)
             self.registry.upsert(corpus)
             return corpus
 
