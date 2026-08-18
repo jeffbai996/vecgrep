@@ -8,6 +8,7 @@ without dragging in nltk.
 from __future__ import annotations
 
 import math
+import contextlib
 import os
 import pickle
 import re
@@ -164,6 +165,10 @@ class BM25Store:
         # previously cached an empty index notices the replacement without a
         # service restart.
         self._disk_versions: dict[str, tuple[int, int] | None] = {}
+        # Corpora inside a bulk() block: _persist is deferred until the block
+        # exits, and a `.dirty` marker sits beside the pickle for the duration
+        # (see bulk()).
+        self._bulk: set[str] = set()
         if root is not None:
             root.mkdir(parents=True, exist_ok=True)
 
@@ -217,7 +222,60 @@ class BM25Store:
         self._bm25_instances.pop(corpus, None)
         self._disk_versions.pop(corpus, None)
 
+    def _marker(self, corpus: str) -> Path | None:
+        p = self._path(corpus)
+        return None if p is None else p.with_name(p.name + ".dirty")
+
+    def dirty_corpora(self) -> list[str]:
+        """Corpora whose sidecar may be behind qdrant: a bulk() block that never
+        exited (crashed writer). The next service start rebuilds them."""
+        if self.root is None:
+            return []
+        return sorted(p.name[: -len(".pkl.dirty")] for p in self.root.glob("*.pkl.dirty"))
+
+    def clear_dirty(self, corpus: str) -> None:
+        m = self._marker(corpus)
+        if m is not None and m.exists():
+            m.unlink()
+
+    @contextlib.contextmanager
+    def bulk(self, corpus: str):
+        """Defer persistence for a batch of upserts on one corpus.
+
+        Every upsert() used to re-pickle the entire corpus index, so indexing
+        a directory of N sources wrote the growing sidecar N times (O(N^2)
+        bytes; ~125 GB for one 1,000-source rebuild at 250 MB). Inside this
+        block the in-memory index is written once, on exit. A `.dirty` marker
+        is held for the duration so a crash mid-block is visible: the marker
+        outlives the process and VecgrepService rebuilds that corpus's sidecar
+        from qdrant on next start rather than serving a silently stale one.
+        """
+        if corpus in self._bulk or self.root is None:
+            yield
+            return
+        m = self._marker(corpus)
+        if m is not None:
+            m.parent.mkdir(parents=True, exist_ok=True)
+            m.write_text("bulk in progress", encoding="utf-8")
+        self._bulk.add(corpus)
+        try:
+            yield
+            if corpus in self._cache:
+                self._persist_now(corpus)
+        finally:
+            self._bulk.discard(corpus)
+            if m is not None and m.exists():
+                m.unlink()
+
+    def count(self, corpus: str) -> int:
+        return len(self._load(corpus).ids)
+
     def _persist(self, corpus: str) -> None:
+        if corpus in self._bulk:
+            return
+        self._persist_now(corpus)
+
+    def _persist_now(self, corpus: str) -> None:
         p = self._path(corpus)
         if p is None:
             return

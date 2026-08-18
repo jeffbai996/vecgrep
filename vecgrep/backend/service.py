@@ -5,6 +5,8 @@ corpus lifecycle so callers don't have to coordinate four subsystems.
 """
 from __future__ import annotations
 
+import contextlib
+
 import fnmatch
 import hashlib
 import json
@@ -257,13 +259,55 @@ class VecgrepService:
         Admission is reacquired per corpus. If the journal belongs to a live
         writer this waits; once that writer commits the record disappears and
         there is nothing to recover.
+
+        Also rebuilds any BM25 sidecar left `.dirty` by a bulk index that
+        died before its single deferred persist (see BM25Store.bulk): qdrant
+        is canonical, so the sidecar is regenerated from it.
         """
         recovered: list[str] = []
         for corpus_name in self.mutations.pending_corpora():
             with self.locks.write(corpus_name):
                 if self._recover_corpus_locked(corpus_name):
                     recovered.append(corpus_name)
+        for corpus_name in self.bm25.dirty_corpora():
+            with self.locks.write(corpus_name):
+                if not self.bm25.dirty_corpora().count(corpus_name):
+                    continue    # the live writer finished while we waited
+                if self.registry.has(corpus_name):
+                    self._rebuild_bm25_from_store(self.registry.get(corpus_name))
+                else:
+                    self.bm25.drop(corpus_name)
+                self.bm25.clear_dirty(corpus_name)
+                recovered.append(corpus_name)
         return recovered
+
+    def _rebuild_bm25_from_store(self, corpus: Corpus) -> None:
+        """Regenerate one corpus's BM25 sidecar from qdrant, the canonical
+        payload store. Raises if the point count read back differs."""
+        collection = _collection_for(corpus.name)
+        expected = self.store.count(collection)
+
+        def records():
+            for point_id, payload in self.store.iter_payloads(
+                collection,
+                exclude_payload_fields={"source_text"},
+            ):
+                text = payload.get("text")
+                if not isinstance(text, str):
+                    raise RuntimeError(
+                        f"cannot rebuild BM25 for {corpus.name}: {point_id} has no chunk text"
+                    )
+                # Qdrant is the canonical source payload store. The scroll
+                # omits source_text, which would otherwise repeat the same
+                # large transcript once per chunk in both RAM and the pickle.
+                yield point_id, text, payload
+
+        rebuilt = self.bm25.replace(corpus.name, records())
+        if rebuilt != expected:
+            self.bm25.drop(corpus.name)
+            raise RuntimeError(
+                f"BM25 rebuild for {corpus.name} read {rebuilt} points; expected {expected}"
+            )
 
     def _recover_if_pending(self, corpus_name: str) -> None:
         if self.mutations.read(corpus_name) is None:
@@ -528,126 +572,134 @@ class VecgrepService:
         total_docs = 0
         total_chunks = 0
         skipped = 0
-        for doc in _expand(source, adapter, include=include):
-            # doc-aware chunkers (code_symbol) see the source path for
-            # language detection; text-only chunkers keep the old contract
-            chunks = (chunker.chunk_doc(doc)
-                      if hasattr(chunker, "chunk_doc") else chunker.chunk(doc.text))
-            if not chunks:
-                continue
+        docs = _expand(source, adapter, include=include)
+        # A multi-source index (a directory) defers the BM25 sidecar write to
+        # the end of the batch: persisting per source re-pickled the whole
+        # growing index N times (O(N^2) bytes -- see BM25Store.bulk).
+        _bulk = contextlib.ExitStack()
+        if update_bm25 and len(docs) > 1:
+            _bulk.enter_context(self.bm25.bulk(corpus_name))
+        with _bulk:
+            for doc in docs:
+                # doc-aware chunkers (code_symbol) see the source path for
+                # language detection; text-only chunkers keep the old contract
+                chunks = (chunker.chunk_doc(doc)
+                          if hasattr(chunker, "chunk_doc") else chunker.chunk(doc.text))
+                if not chunks:
+                    continue
 
-            doc_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
-            matches_recorded_source = corpus.source_hashes.get(doc.source_id) == doc_hash
-            if (
-                resume_source_counts is not None
-                and matches_recorded_source
-                and resume_source_counts.get(doc.source_id) == len(chunks)
-            ):
-                # This source already has every deterministic point for the
-                # exact content recorded in the registry. Leave it alone.
-                skipped += 1
-                continue
-            if not force and corpus.source_hashes.get(doc.source_id) == doc_hash:
-                # Already indexed at this exact content — skip embed call.
-                skipped += 1
-                continue
+                doc_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
+                matches_recorded_source = corpus.source_hashes.get(doc.source_id) == doc_hash
+                if (
+                    resume_source_counts is not None
+                    and matches_recorded_source
+                    and resume_source_counts.get(doc.source_id) == len(chunks)
+                ):
+                    # This source already has every deterministic point for the
+                    # exact content recorded in the registry. Leave it alone.
+                    skipped += 1
+                    continue
+                if not force and corpus.source_hashes.get(doc.source_id) == doc_hash:
+                    # Already indexed at this exact content — skip embed call.
+                    skipped += 1
+                    continue
 
-            # Normal re-indexing removes a prior version so a source that
-            # shrank cannot leave old tail chunks behind. A partial Qdrant
-            # recovery can skip that scan: point IDs are deterministic for the
-            # same corpus/source/chunk index, so upsert overwrites completed
-            # sources and fills only the missing points.
-            if replace_existing and not (
-                resume_source_counts is not None and matches_recorded_source
-            ):
-                old_records = self.store.source_records(collection, doc.source_id)
-            else:
-                old_records = []
-
-            journaled = update_bm25 and update_registry
-            if journaled:
-                target = Corpus(**asdict(corpus))
-                if doc.source_id not in target.sources:
-                    target.sources.append(doc.source_id)
-                target.source_hashes[doc.source_id] = doc_hash
-                self.mutations.write({
-                    "version": 1,
-                    "corpus": corpus_name,
-                    "operation": "index_source",
-                    "phase": "prepared",
-                    "source_id": doc.source_id,
-                    "corpus_before": asdict(corpus) if self.registry.has(corpus_name) else None,
-                    "corpus_target": asdict(target),
-                    "old_points": old_records,
-                })
-
-            if replace_existing and not (
-                resume_source_counts is not None and matches_recorded_source
-            ):
-                self.store.delete_by_source(collection, doc.source_id)
-            if update_bm25:
-                self.bm25.delete_by_source(corpus_name, doc.source_id)
-
-            ids = [_chunk_id(corpus_name, doc.source_id, c.index) for c in chunks]
-            vectors = backend.embed([c.text for c in chunks])
-            payloads = [
-                {
-                    "corpus": corpus_name,
-                    "source_id": doc.source_id,
-                    # The full document rides on chunk 0 only — "the carrier".
-                    # Duplicating it onto every chunk cost ~8.3 GB across a
-                    # 186k-point install and grows as S^2/chunk_size in
-                    # document size. Whole-document readers fetch the carrier
-                    # in O(1) via _source_text_for; per-chunk context comes
-                    # from the precomputed fields below.
-                    **({"source_text": doc.text} if c.index == 0 else {}),
-                    **_chunk_context_fields(doc.text, c.start, c.end),
-                    "chunk_index": c.index,
-                    "chunk_start": c.start,
-                    "chunk_end": c.end,
-                    "text": c.text,
-                    # Doc metadata + per-chunk enrichment (speakers, bot flag,
-                    # content shapes) — powers speaker:/bot:/has: filters.
-                    "metadata": {**doc.metadata, **chunk_enrichment(c.text),
-                                 **(getattr(c, "meta", None) or {})},
-                    # Document's own date (epoch seconds) when discoverable.
-                    # Powers optional recency decay at search time. None is fine.
-                    "doc_timestamp": doc.timestamp,
-                }
-                for c in chunks
-            ]
-            self.store.ensure_collection(collection, corpus.dim)
-            self.store.upsert(collection, ids, vectors, payloads)
-            if journaled:
-                record = self.mutations.read(corpus_name) or {}
-                record["phase"] = "qdrant_done"
-                self.mutations.write(record)
-            if update_bm25:
-                self.bm25.upsert(corpus_name, ids, [c.text for c in chunks], payloads)
-                if journaled:
-                    record = self.mutations.read(corpus_name) or {}
-                    record["phase"] = "bm25_done"
-                    self.mutations.write(record)
-
-            total_docs += 1
-            total_chunks += len(chunks)
-            if doc.source_id not in corpus.sources:
-                corpus.sources.append(doc.source_id)
-            corpus.source_hashes[doc.source_id] = doc_hash
-
-            if update_registry:
-                corpus.doc_count = len(corpus.sources)
-                corpus.chunk_count = self.store.count(collection)
-                corpus.updated_at = time.time()
-                if self.ephemeral:
-                    self.registry._corpora[corpus.name] = corpus
+                # Normal re-indexing removes a prior version so a source that
+                # shrank cannot leave old tail chunks behind. A partial Qdrant
+                # recovery can skip that scan: point IDs are deterministic for the
+                # same corpus/source/chunk index, so upsert overwrites completed
+                # sources and fills only the missing points.
+                if replace_existing and not (
+                    resume_source_counts is not None and matches_recorded_source
+                ):
+                    old_records = self.store.source_records(collection, doc.source_id)
                 else:
-                    self.registry.upsert(corpus)
+                    old_records = []
+
+                journaled = update_bm25 and update_registry
+                if journaled:
+                    target = Corpus(**asdict(corpus))
+                    if doc.source_id not in target.sources:
+                        target.sources.append(doc.source_id)
+                    target.source_hashes[doc.source_id] = doc_hash
+                    self.mutations.write({
+                        "version": 1,
+                        "corpus": corpus_name,
+                        "operation": "index_source",
+                        "phase": "prepared",
+                        "source_id": doc.source_id,
+                        "corpus_before": asdict(corpus) if self.registry.has(corpus_name) else None,
+                        "corpus_target": asdict(target),
+                        "old_points": old_records,
+                    })
+
+                if replace_existing and not (
+                    resume_source_counts is not None and matches_recorded_source
+                ):
+                    self.store.delete_by_source(collection, doc.source_id)
+                if update_bm25:
+                    self.bm25.delete_by_source(corpus_name, doc.source_id)
+
+                ids = [_chunk_id(corpus_name, doc.source_id, c.index) for c in chunks]
+                vectors = backend.embed([c.text for c in chunks])
+                payloads = [
+                    {
+                        "corpus": corpus_name,
+                        "source_id": doc.source_id,
+                        # The full document rides on chunk 0 only — "the carrier".
+                        # Duplicating it onto every chunk cost ~8.3 GB across a
+                        # 186k-point install and grows as S^2/chunk_size in
+                        # document size. Whole-document readers fetch the carrier
+                        # in O(1) via _source_text_for; per-chunk context comes
+                        # from the precomputed fields below.
+                        **({"source_text": doc.text} if c.index == 0 else {}),
+                        **_chunk_context_fields(doc.text, c.start, c.end),
+                        "chunk_index": c.index,
+                        "chunk_start": c.start,
+                        "chunk_end": c.end,
+                        "text": c.text,
+                        # Doc metadata + per-chunk enrichment (speakers, bot flag,
+                        # content shapes) — powers speaker:/bot:/has: filters.
+                        "metadata": {**doc.metadata, **chunk_enrichment(c.text),
+                                     **(getattr(c, "meta", None) or {})},
+                        # Document's own date (epoch seconds) when discoverable.
+                        # Powers optional recency decay at search time. None is fine.
+                        "doc_timestamp": doc.timestamp,
+                    }
+                    for c in chunks
+                ]
+                self.store.ensure_collection(collection, corpus.dim)
+                self.store.upsert(collection, ids, vectors, payloads)
                 if journaled:
                     record = self.mutations.read(corpus_name) or {}
-                    record["phase"] = "registry_done"
+                    record["phase"] = "qdrant_done"
                     self.mutations.write(record)
-                    self.mutations.finish(corpus_name)
+                if update_bm25:
+                    self.bm25.upsert(corpus_name, ids, [c.text for c in chunks], payloads)
+                    if journaled:
+                        record = self.mutations.read(corpus_name) or {}
+                        record["phase"] = "bm25_done"
+                        self.mutations.write(record)
+
+                total_docs += 1
+                total_chunks += len(chunks)
+                if doc.source_id not in corpus.sources:
+                    corpus.sources.append(doc.source_id)
+                corpus.source_hashes[doc.source_id] = doc_hash
+
+                if update_registry:
+                    corpus.doc_count = len(corpus.sources)
+                    corpus.chunk_count = self.store.count(collection)
+                    corpus.updated_at = time.time()
+                    if self.ephemeral:
+                        self.registry._corpora[corpus.name] = corpus
+                    else:
+                        self.registry.upsert(corpus)
+                    if journaled:
+                        record = self.mutations.read(corpus_name) or {}
+                        record["phase"] = "registry_done"
+                        self.mutations.write(record)
+                        self.mutations.finish(corpus_name)
 
         # During recovery, do not persist an intermediate point count as the
         # corpus's expected total. If interrupted, diagnose() must retain count
@@ -1457,6 +1509,45 @@ class VecgrepService:
         # order so the outer caller can fuse multi-corpus results sensibly.
         return out
 
+    # ----- embed cache housekeeping ------------------------------------------------
+    def cache_keep_set(self) -> dict[str, set[str]]:
+        """{embed identity: shas of every chunk text a REGISTERED corpus holds}.
+
+        Derived from qdrant, not from the cache, so it is exactly the set a
+        re-index of any live corpus would ask the cache for. Identity is the
+        backend's `name:model`, which is what CachedBackend keys rows under."""
+        keep: dict[str, set[str]] = {}
+        for c in self.registry.list():
+            ident = f"{c.embed_backend}:{c.embed_model}"
+            shas = keep.setdefault(ident, set())
+            for _pid, payload in self.store.iter_payloads(
+                _collection_for(c.name), include_payload_fields={"text"}
+            ):
+                text = payload.get("text")
+                if text:
+                    shas.add(EmbedCache._sha(text))
+        return keep
+
+    def cache_sweep(
+        self, *, dry_run: bool = False, identities: list[str] | None = None
+    ) -> dict:
+        """Delete cached vectors no registered corpus references.
+
+        The cache exists to make a re-index cheap; rows for chunks that no
+        longer exist in any corpus (deleted sources, retired corpora, a
+        chunker change) buy nothing and were making it effectively
+        append-only. Returns {kept: {identity: n}, deleted: {identity: n},
+        dry_run: bool}."""
+        if self._embed_cache is None:
+            return {"kept": {}, "deleted": {}, "dry_run": dry_run}
+        keep = self.cache_keep_set()
+        deleted = self._embed_cache.sweep(keep, identities=identities, dry_run=dry_run)
+        return {
+            "kept": {k: len(v) for k, v in keep.items()},
+            "deleted": deleted,
+            "dry_run": dry_run,
+        }
+
     # ----- corpus management ----------------------------------------------------
     def delete_corpus(self, name: str) -> None:
         with self.locks.write(name):
@@ -1768,34 +1859,7 @@ class VecgrepService:
                 active=False,
             )
 
-        def rebuild_bm25_only(corpus: Corpus) -> None:
-            collection = _collection_for(corpus.name)
-            expected = self.store.count(collection)
-
-            def records():
-                for point_id, payload in self.store.iter_payloads(
-                    collection,
-                    exclude_payload_fields={"source_text"},
-                ):
-                    text = payload.get("text")
-                    if not isinstance(text, str):
-                        raise RuntimeError(
-                            f"cannot rebuild BM25 for {corpus.name}: {point_id} has no chunk text"
-                        )
-                    # Qdrant is the canonical source payload store. The
-                    # scroll omits source_text, which would otherwise repeat
-                    # the same large transcript once per chunk in both RAM
-                    # and the BM25 pickle. Search results hydrate their small
-                    # final set from Qdrant above, so the keyword sidecar only
-                    # needs text, IDs, filters, and chunk offsets.
-                    yield point_id, text, payload
-
-            rebuilt = self.bm25.replace(corpus.name, records())
-            if rebuilt != expected:
-                self.bm25.drop(corpus.name)
-                raise RuntimeError(
-                    f"BM25 rebuild for {corpus.name} read {rebuilt} points; expected {expected}"
-                )
+        rebuild_bm25_only = self._rebuild_bm25_from_store
 
         actions: list[dict] = []
         for issue in self.diagnose(corpora=corpora):
