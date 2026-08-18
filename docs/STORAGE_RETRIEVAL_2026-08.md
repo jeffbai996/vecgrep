@@ -169,4 +169,21 @@ each other, not against the round-2 absolutes.
   next reranker task; measuring is done.
 - **Embed cache sweep + compact ran on live:** 335,161 -> 226,970 rows,
   `embed_cache.db` 4.45 GB -> 1.07 GB, integrity ok, search unaffected.
-- **float16:** see the row below this section once `eval-chats-f16` finishes.
+- **float16 — measured, recommend adopting on `chats`.** `eval-chats-f16`
+  is the live `chats` sources rebuilt with `datatype=float16` (same
+  chunker, same include, 123,215 pts vs base 122,224 — base is two days
+  older). 60 chats-scoped gold cases:
+
+  | config | hit@1 | hit@3 | hit@5 | hit@10 | MRR | p50 ms | qdrant MB |
+  |---|---|---|---|---|---|---|---|
+  | f32 hybrid | 61.4 | 84.1 | 88.6 | 95.5 | .736 | 1965 | 776 |
+  | f16 hybrid | 61.4 | 84.1 | 88.6 | 95.5 | .735 | 1519 | 502 |
+  | f32 vector | 56.8 | 68.2 | 72.7 | 86.4 | .648 | 312 | 776 |
+  | f16 vector | 56.8 | 68.2 | 75.0 | 86.4 | .648 | 100 | 502 |
+
+  Zero recall cost at every k (hit@5 vector is +1 case), qdrant on disk
+  −35% (the vector segment halves; payload does not), and vector search
+  latency roughly a third — half the bytes through the page cache. It is
+  a reindex of the live collection, not a toggle, so it is Jeff's call;
+  the build takes ~20 min from a warm embed cache. `eval-chats-f16` is
+  left in place as the reference until then.
