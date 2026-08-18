@@ -107,10 +107,38 @@ class QdrantStore:
             path.mkdir(parents=True, exist_ok=True)
             self.client = QdrantClient(path=str(path))
 
-    def ensure_collection(self, name: str, dim: int) -> None:
+    def ensure_collection(
+        self,
+        name: str,
+        dim: int,
+        *,
+        datatype: str = "float32",
+        quantization: str | None = None,
+    ) -> None:
+        """Create the collection if missing.
+
+        `datatype` is the ON-DISK vector storage type: "float32" (default) or
+        "float16", which halves the dominant term of a large collection's
+        footprint. `quantization` ("int8" | "binary") adds a compressed copy
+        used for the search pass with rescoring against the originals -- it
+        buys RAM and latency, NOT disk (qdrant keeps the originals), so it is
+        not the lever for storage. Both are pinned at creation; measure any
+        change on the eval harness before adopting it for a live corpus.
+        """
         existing = {c.name for c in self.client.get_collections().collections}
         if name in existing:
             return
+        dt = {"float32": qm.Datatype.FLOAT32, "float16": qm.Datatype.FLOAT16}.get(datatype)
+        if dt is None:
+            raise ValueError(f"unsupported vector datatype {datatype!r}")
+        quant = None
+        if quantization == "int8":
+            quant = qm.ScalarQuantization(scalar=qm.ScalarQuantizationConfig(
+                type=qm.ScalarType.INT8, quantile=0.99, always_ram=False))
+        elif quantization == "binary":
+            quant = qm.BinaryQuantization(binary=qm.BinaryQuantizationConfig(always_ram=False))
+        elif quantization:
+            raise ValueError(f"unsupported quantization {quantization!r}")
         self.client.create_collection(
             collection_name=name,
             # Vecgrep corpora can grow well beyond available WSL RAM. Keep
@@ -120,8 +148,10 @@ class QdrantStore:
                 size=dim,
                 distance=qm.Distance.COSINE,
                 on_disk=True,
+                datatype=dt,
             ),
             hnsw_config=qm.HnswConfigDiff(on_disk=True),
+            quantization_config=quant,
         )
 
     def drop_collection(self, name: str) -> None:
@@ -181,6 +211,7 @@ class QdrantStore:
         name: str,
         *,
         exclude_payload_fields: set[str] | None = None,
+        include_payload_fields: set[str] | None = None,
     ) -> Iterator[tuple[str, dict]]:
         """Stream every point ID and payload from one collection.
 
@@ -193,11 +224,12 @@ class QdrantStore:
         if name not in existing:
             return
         offset = None
-        selector = (
-            qm.PayloadSelectorExclude(exclude=sorted(exclude_payload_fields))
-            if exclude_payload_fields
-            else True
-        )
+        if include_payload_fields:
+            selector = qm.PayloadSelectorInclude(include=sorted(include_payload_fields))
+        elif exclude_payload_fields:
+            selector = qm.PayloadSelectorExclude(exclude=sorted(exclude_payload_fields))
+        else:
+            selector = True
         while True:
             points, offset = self.client.scroll(
                 collection_name=name,
