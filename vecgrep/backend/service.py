@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 
 import fnmatch
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import math
@@ -751,6 +752,21 @@ class VecgrepService:
         return total_docs, total_chunks, skipped
 
     # ----- search ---------------------------------------------------------------
+    def _searchable_corpora(self) -> list[Corpus]:
+        """Corpora an unscoped search fans out over.
+
+        Skips names matching settings.cross_corpus_exclude (fnmatch). Never
+        applied to an explicitly named corpus -- see search().
+        """
+        patterns = list(getattr(self.settings, "cross_corpus_exclude", None) or [])
+        corpora = self.registry.list()
+        if not patterns:
+            return corpora
+        return [
+            c for c in corpora
+            if not any(fnmatch.fnmatch(c.name, pat) for pat in patterns)
+        ]
+
     def search(
         self,
         query: str,
@@ -774,9 +790,11 @@ class VecgrepService:
             if alias_map:
                 query, _matched = expand_query(query, alias_map)
         if corpus_name:
+            # An explicitly named corpus is always searched, exclusions or not
+            # -- otherwise the eval harness could not query its own build.
             corpora = [self.registry.get(corpus_name)]
         else:
-            corpora = self.registry.list()
+            corpora = self._searchable_corpora()
         if not corpora:
             return []
 
@@ -788,8 +806,23 @@ class VecgrepService:
         per_corpus_k = max(CANDIDATE_POOL, top_k)
 
         results: list[SearchResult] = []
-        for c in corpora:
-            results.extend(self._search_one(c, query, per_corpus_k, mode, explain=explain))
+        workers = min(
+            len(corpora), max(1, int(getattr(self.settings, "search_fanout_workers", 8) or 1))
+        )
+        if workers > 1 and len(corpora) > 1:
+            # Serial fan-out made unscoped latency the SUM of per-corpus cost.
+            # Each _search_one is an independent read (its own qdrant query and
+            # BM25 lookup), so they overlap cleanly. Results are concatenated in
+            # corpus order, not completion order, to keep output deterministic.
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for chunk in pool.map(
+                    lambda c: self._search_one(c, query, per_corpus_k, mode, explain=explain),
+                    corpora,
+                ):
+                    results.extend(chunk)
+        else:
+            for c in corpora:
+                results.extend(self._search_one(c, query, per_corpus_k, mode, explain=explain))
 
         # Default to active-only retrieval (write-tool status schema): a
         # superseded version never surfaces as current truth. Caller opts out

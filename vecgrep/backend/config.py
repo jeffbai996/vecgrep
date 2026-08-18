@@ -50,6 +50,8 @@ EDITABLE_FIELDS = {
     "backup_weekday",
     "backup_destination",
     "backup_retention",
+    "cross_corpus_exclude",
+    "search_fanout_workers",
 }
 SECRET_FIELDS = {"openai_api_key", "api_token", "admin_token"}
 STRUCTURAL_FIELDS = {"api_host", "api_port", "qdrant_url", "oauth_enabled", "oauth_issuer_url"}
@@ -109,6 +111,17 @@ class Settings:
     # observed holding 63 threads under a few requests/minute. 8 comfortably
     # covers real concurrent bursts without carrying that idle overhead.
     thread_pool_size: int = 8
+    # Corpora an UNSCOPED search skips, as fnmatch patterns. `eval-*` corpora
+    # are side-by-side copies built by vecgrep.eval to price a config change
+    # (see vecgrep/eval/__init__.py); fanning out over one double-counts its
+    # source corpus -- every hit returns twice, verbatim, eating two slots --
+    # and doubles the fan-out cost. Naming a corpus explicitly always reaches
+    # it, so the eval harness can still query its own build.
+    cross_corpus_exclude: list[str] = field(default_factory=lambda: ["eval-*"])
+    # Corpora searched concurrently on an unscoped query. The fan-out was
+    # serial, so latency was the SUM of per-corpus cost: measured 16.3s across
+    # 8 corpora where the slowest single corpus was 5.3s. 1 restores serial.
+    search_fanout_workers: int = 8
 
     @property
     def qdrant_path(self) -> Path:
