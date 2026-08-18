@@ -92,6 +92,17 @@ def create_app() -> FastAPI:
             _get_settings().thread_pool_size
         )
 
+        # Start loading the cross-encoder now, in the background, so the
+        # first search that wants it does not pay the load inside a
+        # threadpool slot. Best-effort: a box without the rerank extra logs
+        # and carries on serving unreranked.
+        try:
+            from .rerank import ensure_warm as _warm_reranker
+
+            _warm_reranker()
+        except Exception as exc:
+            logger.warning("reranker warm-up could not start: %s", exc)
+
         stop = threading.Event()
 
         def _backup_loop() -> None:
