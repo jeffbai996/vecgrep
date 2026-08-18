@@ -24,12 +24,19 @@ _TURN_RE = re.compile(r"^\*\*(.+?)\*\*\s*·\s*(\d{1,2}:\d{2})", re.MULTILINE)
 
 
 class TurnWindowChunker(Chunker):
-    def __init__(self, turns: int = 4, stride: int = 3, min_chars: int = 30) -> None:
+    # Upper bound on a chunk. bge-m3 under Ollama accepts 8192 tokens; four
+    # bot turns with code blocks blew past that on the first real build
+    # ("the input length exceeds the context length"). 4000 chars is
+    # ~1000-1500 tokens for English and stays inside every model in the
+    # dimensions table with room for CJK, which tokenizes denser.
+    def __init__(self, turns: int = 4, stride: int = 3, min_chars: int = 30,
+                 max_chars: int = 4000) -> None:
         if stride <= 0 or turns <= 0 or stride > turns:
             raise ValueError("Need 0 < stride <= turns")
         self.turns = turns
         self.stride = stride
         self.min_chars = min_chars
+        self.max_chars = max_chars
         # Used verbatim when a document carries no turn markers at all.
         self._fallback = SentenceWindowChunker(min_chars=min_chars)
 
@@ -60,14 +67,36 @@ class TurnWindowChunker(Chunker):
                 continue
             # Re-derive offsets after stripping so highlight ranges stay true.
             lead = len(text[start:end]) - len(text[start:end].lstrip())
-            chunks.append(Chunk(
-                text=body,
-                start=start + lead,
-                end=start + lead + len(body),
-                index=idx,
-                meta={"turns": len(group)},
-            ))
-            idx += 1
+            if len(body) > self.max_chars:
+                # Too big to embed as one piece: sentence-window this span
+                # instead, re-based to document offsets. Loses the
+                # whole-message guarantee for this window only.
+                for sub in self._fallback.chunk(body):
+                    if len(sub.text) > self.max_chars:
+                        # a single run-on "sentence" (a code block, a log
+                        # dump): hard-split it rather than ship it whole
+                        for off in range(0, len(sub.text), self.max_chars):
+                            piece = sub.text[off:off + self.max_chars]
+                            chunks.append(Chunk(
+                                text=piece, start=start + lead + sub.start + off,
+                                end=start + lead + sub.start + off + len(piece),
+                                index=idx, meta={"turns": len(group), "split": True}))
+                            idx += 1
+                        continue
+                    chunks.append(Chunk(
+                        text=sub.text, start=start + lead + sub.start,
+                        end=start + lead + sub.end, index=idx,
+                        meta={"turns": len(group), "split": True}))
+                    idx += 1
+            else:
+                chunks.append(Chunk(
+                    text=body,
+                    start=start + lead,
+                    end=start + lead + len(body),
+                    index=idx,
+                    meta={"turns": len(group)},
+                ))
+                idx += 1
             if i + self.turns >= len(spans):
                 break  # last window already covered the tail
         return chunks or self._fallback.chunk(text)
