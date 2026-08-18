@@ -22,7 +22,16 @@ def test_recency_factor_math() -> None:
     # Exactly one half-life old -> 0.5.
     assert abs(_recency_factor(now - 30 * day, 30.0, now) - 0.5) < 1e-9
     # Two half-lives -> 0.25.
-    assert abs(_recency_factor(now - 60 * day, 30.0, now) - 0.25) < 1e-9
+    # two half-lives would be 0.25 on the raw curve; DECAY_FLOOR (0.5 by
+    # default since 2026-08) stops age alone from pushing a hit below it
+    assert abs(_recency_factor(now - 60 * day, 30.0, now) - 0.5) < 1e-9
+    import vecgrep.backend.service as sm
+    saved = sm.DECAY_FLOOR
+    sm.DECAY_FLOOR = 0.0
+    try:
+        assert abs(_recency_factor(now - 60 * day, 30.0, now) - 0.25) < 1e-9
+    finally:
+        sm.DECAY_FLOOR = saved
     # Fresh (now) -> ~1.0.
     assert abs(_recency_factor(now, 30.0, now) - 1.0) < 1e-9
     # Future-dated (clock skew) clamps to 1.0, never boosts.
