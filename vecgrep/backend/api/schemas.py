@@ -171,6 +171,7 @@ class CorpusOut(BaseModel):
     updated_at: float
     decay_half_life_days: float | None = None
     rank_weight: float = 1.0
+    bm25_weight: float | None = None
 
 
 class WeightRequest(BaseModel):
