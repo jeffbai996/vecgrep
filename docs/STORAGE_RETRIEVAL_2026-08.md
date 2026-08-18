@@ -202,3 +202,25 @@ each other, not against the round-2 absolutes.
   a reindex of the live collection, not a toggle, so it is Jeff's call;
   the build takes ~20 min from a warm embed cache. `eval-chats-f16` is
   left in place as the reference until then.
+
+  **Adopted on live `chats` 2026-08-18 (`6b44aff`).** 123,664 points, no
+  re-embedding — float16 is a storage width, so the migration scrolls the
+  existing vectors into a new collection. Result: collection **741 MB ->
+  486 MB (-34%)**, status green, search verified. `datatype` is now a
+  persisted field on the corpus record because the five production paths that
+  create a collection all hard-coded float32; without that a reindex or a
+  restore would have quietly handed the corpus back.
+
+  Three things the live run taught that the eval build could not:
+  - **The writer is not vecgrep-serve.** `vecgrep-indexer-chats` runs
+    `vecgrep watch` as its own daemon. Stopping the server is not enough; it
+    added 19 points mid-copy and the count check aborted the migration. The
+    migration now takes the corpus WRITE lock.
+  - **`wait=True` per 256-point batch is 1,900 points/min** — 90 minutes of
+    downtime on this corpus. Batching to 2048 with unacknowledged writes and a
+    settle-and-count is ~23,000/min.
+  - **Fully unacknowledged writes are too far the other way.** Pushing ~100k
+    points with `wait=False` on a 19 GB box got `Server disconnected without
+    sending a response` from qdrant mid-copy. Flush every 8th batch.
+  `eval-chats-base` (741 MB) and `eval-chats-f16` (479 MB) have served their
+  purpose and can be dropped to reclaim ~1.2 GB.
