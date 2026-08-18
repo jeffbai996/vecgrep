@@ -87,9 +87,13 @@ def get_config() -> ConfigOut:
 
 
 @router.get("/corpora", response_model=list[CorpusOut])
-def list_corpora() -> list[CorpusOut]:
+def list_corpora(include_hidden: bool = False) -> list[CorpusOut]:
+    # An eval-* build is a side-by-side copy of a live corpus, so listing it
+    # shadows every real corpus with a near-identical name. Hidden by default,
+    # available on request for the harness that built it.
     svc = _service()
-    return [CorpusOut(**asdict(c)) for c in svc.list_corpora()]
+    return [CorpusOut(**asdict(c)) for c in svc.list_corpora()
+            if include_hidden or not svc.is_hidden_corpus(c.name)]
 
 
 @router.delete("/corpora/{name}")
