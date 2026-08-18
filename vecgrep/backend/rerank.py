@@ -25,13 +25,15 @@ logger = logging.getLogger(__name__)
 #   large  hit@3 79.6  mrr .697  neg FP  3.8%  +3.5 s
 # v2-m3 is the first reranker that does not demote answers the pool already
 # had (base lost hit@3 vs unreranked; v2-m3 gains it) and it calibrates the
-# negatives. It is NOT the default yet: rerank runs synchronously inside the
-# serve request path, and the first v2-m3 load+predict in that process blocked
-# the event loop for 5+ minutes on 2026-08-18, long enough for squad-watchdog
-# (strikes=1) to kill and restart the server mid-request. Until model loading
-# is warmed at startup (or off the event loop), the smaller model stays.
-# Override per install with VECGREP_RERANKER=BAAI/bge-reranker-v2-m3.
-DEFAULT_RERANKER = os.environ.get("VECGREP_RERANKER", "BAAI/bge-reranker-base")
+# negatives, so it is the default as of 2026-08-18. It was held back until now
+# for a serve-path reason, not a quality one: loading it took 5+ minutes inside
+# a request, which held one of eight sync-threadpool slots and starved the
+# health route until squad-watchdog (strikes=1) restarted the server
+# mid-request. ensure_warm() + wait_ready() below removed that — the model
+# loads in a background thread at startup and a search that arrives before it
+# is ready returns fusion order instead of waiting. Fall back per install with
+# VECGREP_RERANKER=BAAI/bge-reranker-base.
+DEFAULT_RERANKER = os.environ.get("VECGREP_RERANKER", "BAAI/bge-reranker-v2-m3")
 
 
 # How long a search waits for a cold reranker before giving up and returning
