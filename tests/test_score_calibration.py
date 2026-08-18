@@ -75,6 +75,11 @@ def test_rerank_sets_unified_display_pct(svc, make_doc, monkeypatch) -> None:
     # _apply_rerank imports rerank lazily from .rerank; patch there too.
     import vecgrep.backend.rerank as rr_mod
     monkeypatch.setattr(rr_mod, "rerank", fake_rerank, raising=False)
+    # Stubbing the scorer is no longer enough: search() gates on the model
+    # being LOADED before it reranks at all, so a cold cross-encoder cannot
+    # hold a threadpool slot open (2026-08-18). The stub bypasses the loader,
+    # so the gate would otherwise report not-ready and skip reranking here.
+    monkeypatch.setattr(rr_mod, "wait_ready", lambda *a, **k: True)
 
     hits = svc.search("alpha beta gamma", "c", top_k=5, rerank=True)
     assert hits

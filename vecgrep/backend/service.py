@@ -11,6 +11,7 @@ import fnmatch
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -66,6 +67,8 @@ from .timeline import (
 )
 from .mutation import CorpusLocks
 from .mutation_journal import MutationJournal
+
+logger = logging.getLogger(__name__)
 
 
 CHUNKERS: dict[str, type[Chunker]] = {
@@ -377,7 +380,10 @@ class VecgrepService:
             metadata = before_data
             old_points = list(record.get("old_points") or [])
             if old_points and metadata:
-                self.store.ensure_collection(collection, int(metadata["dim"]))
+                self.store.ensure_collection(
+                    collection, int(metadata["dim"]),
+                    datatype=str(metadata.get("datatype") or "float32"),
+                )
             self.store.restore_source(collection, source_id, old_points)
         elif operation == "delete_source":
             # A persisted delete intent is always completed. The source file
@@ -585,7 +591,10 @@ class VecgrepService:
                 created_at=time.time(),
                 updated_at=time.time(),
             )
-            self.store.ensure_collection(_collection_for(corpus_name), corpus.dim)
+            self.store.ensure_collection(
+                _collection_for(corpus_name), corpus.dim,
+                datatype=corpus.datatype,
+            )
 
         backend = self._backend_for(corpus)
         chunker = self.chunker(chunker_name)
@@ -698,7 +707,9 @@ class VecgrepService:
                     }
                     for c in chunks
                 ]
-                self.store.ensure_collection(collection, corpus.dim)
+                self.store.ensure_collection(
+                    collection, corpus.dim, datatype=corpus.datatype,
+                )
                 self.store.upsert(collection, ids, vectors, payloads)
                 if journaled:
                     record = self.mutations.read(corpus_name) or {}
@@ -1365,6 +1376,117 @@ class VecgrepService:
             payload = self.bm25.get_by_id(corpus.name, r.chunk_id)
         return payload
 
+    def _copy_points(self, src: str, dst: str, expect: int) -> None:
+        """Bulk-copy every point from one collection to another.
+
+        `wait=False` on the upserts: waiting for each 256-point batch to be
+        flushed measured ~1,900 points/min on a 123k-point corpus, which is
+        90 minutes of downtime for a copy qdrant can do in a fraction of that.
+        Correctness does not depend on per-batch acknowledgement — it depends
+        on the count check below, which the caller then re-verifies before
+        anything is dropped.
+        """
+        from qdrant_client.http import models as qm
+
+        offset: object = None
+        while True:
+            points, offset = self.store.client.scroll(
+                collection_name=src,
+                with_payload=True,
+                with_vectors=True,
+                limit=2048,
+                offset=offset,
+            )
+            if points:
+                self.store.client.upsert(
+                    collection_name=dst,
+                    points=[
+                        qm.PointStruct(id=p.id, vector=p.vector, payload=p.payload or {})
+                        for p in points
+                    ],
+                    wait=False,
+                )
+            if offset is None:
+                break
+
+        # Unacknowledged writes are still in flight; settle before counting.
+        deadline = time.time() + 900
+        while time.time() < deadline:
+            if self.store.client.count(dst, exact=True).count >= expect:
+                return
+            time.sleep(2)
+        raise CorpusError(
+            f"copy {src!r} -> {dst!r} settled at "
+            f"{self.store.client.count(dst, exact=True).count} of {expect} points"
+        )
+
+    def migrate_datatype(self, name: str, datatype: str) -> "Corpus":
+        """Rebuild a corpus's qdrant collection with a different on-disk vector
+        datatype, in place, WITHOUT re-embedding anything.
+
+        Qdrant pins the vector datatype at collection creation, so changing it
+        means a new collection. The vectors themselves are already correct --
+        float16 is a storage width, not a different embedding -- so this
+        scrolls the existing points across rather than re-running the embedder.
+
+        Two passes, because qdrant cannot rename: live -> temp, then back into
+        a freshly-created live at the new datatype. The original is only
+        dropped after the temp copy is verified point-for-point, so an
+        interrupted run loses nothing.
+
+        BM25 is untouched: it holds no vectors.
+
+        Takes the corpus WRITE lock for the whole run. A scroll+copy is not
+        atomic, so a concurrent indexer makes the copy come up short and the
+        migration abort — which is exactly what happened on the first live
+        attempt (2026-08-18): `vecgrep-indexer-chats` runs `vecgrep watch` as
+        its own daemon, independent of vecgrep-serve, and added 19 points
+        mid-copy. Stopping the server is not enough; the lock is what actually
+        excludes the writer.
+        """
+        if datatype not in ("float32", "float16"):
+            raise ValueError(f"unsupported vector datatype {datatype!r}")
+        corpus = self.registry.get(name)
+        if corpus.datatype == datatype:
+            return corpus
+        with self.locks.write(name):
+            return self._migrate_datatype_locked(name, datatype, corpus)
+
+    def _migrate_datatype_locked(self, name: str, datatype: str, corpus) -> "Corpus":
+        live = _collection_for(name)
+        temp = _collection_for(f"{name}__dt")
+        src_n = self.store.client.count(live, exact=True).count
+
+        # A leftover temp from an interrupted run must not be appended to.
+        self.store.drop_collection(temp)
+        self.store.ensure_collection(temp, corpus.dim, datatype=datatype)
+        self._copy_points(live, temp, src_n)
+
+        # Verify BEFORE dropping the original: it is the only copy.
+        dst_n = self.store.client.count(temp, exact=True).count
+        if dst_n != src_n:
+            self.store.drop_collection(temp)
+            raise CorpusError(
+                f"datatype migration for {name!r} copied {dst_n} of {src_n} "
+                f"points; original left untouched"
+            )
+
+        self.store.drop_collection(live)
+        self.store.ensure_collection(live, corpus.dim, datatype=datatype)
+        self._copy_points(temp, live, src_n)
+        final_n = self.store.client.count(live, exact=True).count
+        if final_n != src_n:
+            raise CorpusError(
+                f"datatype migration for {name!r} left {final_n} of {src_n} "
+                f"points on the live collection; temp {temp!r} still holds a "
+                f"full copy"
+            )
+        self.store.drop_collection(temp)
+
+        corpus.datatype = datatype
+        self.registry.upsert(corpus)
+        return corpus
+
     def _rerank_ready(self, model_name: str | None) -> bool:
         """Is the cross-encoder loaded (or loadable within the wait budget)?
 
@@ -1833,6 +1955,16 @@ class VecgrepService:
             Its chunks are still indexed, so a deleted document keeps being
             returned as a live answer. Always fixable — the fix is to purge it
             from both backends. Carries an extra "source_id" key.
+          - "embed_model_split": corpora on the same backend disagree about
+            which embedding model to use. Not corruption — everything still
+            answers — which is exactly why it hides. Ollama treats each model
+            name as a separate model and only keeps OLLAMA_MAX_LOADED_MODELS
+            resident, so any search crossing the split evicts and reloads.
+            Measured on a live install 2026-08-18: 900 loads in 6 hours and
+            embeds at 13-28s against a 0.13s warm baseline, presenting as
+            "retrieval feels slow" for who knows how long. NOT auto-fixable:
+            repointing a corpus is only safe when the two models emit the same
+            vectors, which is a human call.
 
         Read-only. `reconcile()` acts on what this reports."""
         issues: list[dict] = []
@@ -1843,7 +1975,29 @@ class VecgrepService:
             if not selected or c.name in selected
         }
 
+        # Majority is taken over EVERY corpus, not just the selected ones, so
+        # `--corpora x` still compares x against the install rather than
+        # against itself.
+        by_backend: dict[str, list] = {}
+        for c in self.registry.list():
+            by_backend.setdefault(c.embed_backend, []).append(c)
+        majority: dict[str, str] = {}
+        for backend, group in by_backend.items():
+            models = [c.embed_model for c in group]
+            if len(set(models)) > 1:
+                majority[backend] = max(set(models), key=models.count)
+
         for name, c in registered.items():
+            want = majority.get(c.embed_backend)
+            if want is not None and c.embed_model != want:
+                issues.append({
+                    "corpus": name,
+                    "kind": "embed_model_split",
+                    "detail": f"embed_model {c.embed_model!r} differs from the "
+                              f"{c.embed_backend!r} majority {want!r}; every "
+                              f"search crossing the two reloads the model",
+                    "fixable": False,
+                })
             live = self.store.count(_collection_for(name))
             if live == 0 and c.chunk_count > 0:
                 srcs = list(c.sources or [])
@@ -2213,7 +2367,9 @@ class VecgrepService:
         # collection, then drop temp.
         temp_collection = _collection_for(temp_name)
         new_collection = _collection_for(name)
-        self.store.ensure_collection(new_collection, new_corpus.dim)
+        self.store.ensure_collection(
+            new_collection, new_corpus.dim, datatype=new_corpus.datatype,
+        )
         offset: object = None
         from qdrant_client.http import models as qm
         while True:
