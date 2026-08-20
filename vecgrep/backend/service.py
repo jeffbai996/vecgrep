@@ -864,9 +864,24 @@ class VecgrepService:
         # threadpool slot for all of it (see rerank.RERANK_WAIT_S). Falling
         # through to the plain path costs accuracy on one search; blocking
         # costs the server.
+        reranked = False
         if rerank and self._rerank_ready(rerank_model):
-            results = self._apply_rerank(query, results, top_k, rerank_model, explain=explain)
-        else:
+            try:
+                results = self._apply_rerank(
+                    query, results, top_k, rerank_model, explain=explain)
+                reranked = True
+            except Exception as exc:
+                # Readiness only proves the model LOADED. predict() can still
+                # blow up later — a wedged GPU is the live example: the host's
+                # card started reporting a garbage VRAM figure and every
+                # rerank raised `CUDA error: unknown error`, which 500'd the
+                # whole search for every bot in the squad (2026-08-20).
+                # Reranking is an enhancement over a result set we already
+                # have; losing it must degrade the answer, never fail it.
+                logger.warning(
+                    "rerank failed (%s: %s) — returning fusion order",
+                    type(exc).__name__, exc)
+        if not reranked:
             # Diversity-aware top_k: MMR keeps relevance dominant but skips
             # near-clones of already-selected results, so the returned set is
             # distinct evidence, not five slices of one exchange. On corpora
