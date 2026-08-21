@@ -53,6 +53,23 @@ def test_single_source_index_still_persists_immediately(svc, tmp_path, monkeypat
     assert calls.count("docs") == 1
 
 
+def test_cross_corpus_access_cannot_evict_an_active_bulk_index(tmp_path) -> None:
+    store = BM25Store(tmp_path / "bm25", max_cached_corpora=1)
+    payload = lambda source: {"source_id": source, "text": source}
+    store.upsert("chats", ["base"], ["base"], [payload("base")])
+
+    with store.bulk("chats"):
+        store.upsert("chats", ["first"], ["first"], [payload("first")])
+        # A request for another corpus used to evict chats here. The next
+        # chats write then reloaded the stale on-disk pre-bulk snapshot.
+        store.upsert("notes", ["note"], ["note"], [payload("note")])
+        store.upsert("chats", ["second"], ["second"], [payload("second")])
+
+    reloaded = BM25Store(tmp_path / "bm25", max_cached_corpora=1)
+    assert reloaded.count("chats") == 3
+    assert set(reloaded._load("chats").ids) == {"base", "first", "second"}
+
+
 def test_interrupted_bulk_leaves_marker_and_next_service_rebuilds_from_qdrant(svc, tmp_path) -> None:
     root = _seed(tmp_path)
     svc.index(str(root), "docs")
