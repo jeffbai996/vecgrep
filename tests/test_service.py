@@ -169,6 +169,33 @@ def test_reconcile_rebuilds_missing_bm25_from_qdrant(svc, make_doc):
     assert source["text"] == p.read_text()
 
 
+def test_reconcile_rebuilds_bm25_count_drift_from_qdrant(svc, make_doc):
+    first = make_doc("first.md", "Quartzite belongs in the first document.")
+    second = make_doc("second.md", "Feldspar belongs in the second document.")
+    svc.index(str(first), "test")
+    svc.index(str(second), "test")
+    expected = svc.list_corpora()[0].chunk_count
+    assert expected > 1
+
+    idx = svc.bm25._load("test")
+    svc.bm25.replace("test", [
+        (idx.ids[0], idx.payloads[0]["text"], idx.payloads[0]),
+    ])
+
+    issue = next(i for i in svc.diagnose() if i["kind"] == "bm25_count_drift")
+    assert issue["fixable"] is True
+    assert issue["detail"] == f"vector store {expected} vs BM25 1"
+
+    actions = svc.reconcile()
+    assert actions == [{
+        "corpus": "test",
+        "kind": "bm25_count_drift",
+        "action": "rebuilt_bm25",
+    }]
+    assert svc.bm25.count("test") == expected
+    assert svc.diagnose() == []
+
+
 def test_reconcile_can_be_scoped_to_one_corpus(svc, make_doc):
     """A targeted recovery must not repair unrelated live corpora.
 

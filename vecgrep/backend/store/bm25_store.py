@@ -224,7 +224,18 @@ class BM25Store:
         if self.max_cached_corpora is None or incoming in self._cache:
             return
         while len(self._cache) >= self.max_cached_corpora:
-            evicted, _ = self._cache.popitem(last=False)
+            # A bulk index is newer than its on-disk pickle until the context
+            # exits. Evicting it loses every unpersisted update; the next write
+            # reloads the stale pickle and the final persist silently saves a
+            # truncated corpus. Temporarily exceed the LRU cap when every
+            # resident corpus is pinned by bulk().
+            evicted = next(
+                (name for name in self._cache if name not in self._bulk),
+                None,
+            )
+            if evicted is None:
+                return
+            self._cache.pop(evicted)
             self._bm25_instances.pop(evicted, None)
             self._disk_versions.pop(evicted, None)
 
@@ -278,6 +289,17 @@ class BM25Store:
             self._bulk.discard(corpus)
             if m is not None and m.exists():
                 m.unlink()
+            # Cross-corpus access may have temporarily exceeded the cache cap
+            # while this corpus was pinned. Prefer retaining the just-finished
+            # corpus and shed older unpinned entries now that persistence is
+            # complete.
+            if self.max_cached_corpora is not None:
+                for cached in list(self._cache):
+                    if len(self._cache) <= self.max_cached_corpora:
+                        break
+                    if cached == corpus or cached in self._bulk:
+                        continue
+                    self.evict(cached)
 
     def count(self, corpus: str) -> int:
         return len(self._load(corpus).ids)

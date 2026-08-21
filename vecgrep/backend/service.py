@@ -2049,13 +2049,23 @@ class VecgrepService:
                         "fixable": True,
                     })
 
-            if c.chunk_count > 0 and not self.bm25.exists(name):
-                issues.append({
-                    "corpus": name,
-                    "kind": "missing_bm25",
-                    "detail": f"registry has {c.chunk_count} chunks but the BM25 index is absent",
-                    "fixable": live > 0,
-                })
+            if c.chunk_count > 0:
+                if not self.bm25.exists(name):
+                    issues.append({
+                        "corpus": name,
+                        "kind": "missing_bm25",
+                        "detail": f"registry has {c.chunk_count} chunks but the BM25 index is absent",
+                        "fixable": live > 0,
+                    })
+                elif live > 0:
+                    bm25_count = self.bm25.count(name)
+                    if bm25_count != live:
+                        issues.append({
+                            "corpus": name,
+                            "kind": "bm25_count_drift",
+                            "detail": f"vector store {live} vs BM25 {bm25_count}",
+                            "fixable": True,
+                        })
 
         # Orphan collections: in Qdrant under our prefix, absent from registry.
         for coll in self.store.list_collections():
@@ -2159,7 +2169,13 @@ class VecgrepService:
                     actions.append({"corpus": name, "kind": kind, "action": "reindexed"})
                 else:
                     actions.append({"corpus": name, "kind": kind, "action": "needs_reindex"})
-            elif kind == "missing_bm25":
+            elif kind in {"missing_bm25", "bm25_count_drift"}:
+                if kind == "bm25_count_drift":
+                    live = self.store.count(_collection_for(name))
+                    if self.bm25.count(name) == live:
+                        # An earlier count-drift repair in this same pass may
+                        # already have restored Qdrant to the sidecar's count.
+                        continue
                 if issue["fixable"]:
                     rebuild_bm25_only(self.registry.get(name))
                     actions.append({"corpus": name, "kind": kind, "action": "rebuilt_bm25"})
