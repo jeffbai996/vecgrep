@@ -52,6 +52,40 @@ RERANK_WAIT_S = float(os.environ.get("VECGREP_RERANK_WAIT_S", "5"))
 # someone restarts the process either. Retry no more often than this.
 _RETRY_AFTER_S = 300.0
 
+# How many (query, chunk) pairs go through the cross-encoder at once.
+# sentence-transformers defaults to 32, and a batch is padded to its longest
+# member -- so 32 transcript chunks (up to 4000 chars each) become one enormous
+# padded tensor. On 2026-08-20 a single reranked search on the transcript
+# corpus took the 24 GB card from 5.0 GB to 17.5 GB; three of those filled it
+# and the next allocation came back as `CUDA error: unknown error`, which is
+# what made the card look wedged that morning. Batch size bounds the peak and
+# changes nothing about the scores: each pair is scored independently, so the
+# only thing that moves is how many are in flight. Raise it on a card with
+# room to spare.
+RERANK_BATCH = int(os.environ.get("VECGREP_RERANK_BATCH", "8"))
+
+
+def _release_cuda_cache() -> None:
+    """Hand torch's reserve back to the driver.
+
+    The caching allocator keeps every block it has ever used, so the high-water
+    mark of one unlucky batch stays charged to the card for the life of the
+    process. That is fine when torch owns the GPU; here it shares a 24 GB card
+    with the transcription model and the desktop, and an idle search server
+    holding 19 GB starves both. Costs a sync (tens of ms) against a rerank that
+    already takes over a second.
+
+    Best-effort by design: reranking is an optional extra, so torch may be
+    absent entirely, and on a CPU-only box there is nothing to release.
+    """
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001 -- releasing memory must never fail a search
+        pass
+
 
 class RerankerError(RuntimeError):
     pass
@@ -155,7 +189,12 @@ def rerank(
         return []
     model = _load(model_name)
     pairs = [(query, text) for text, _ in candidates]
-    raw = model.predict(pairs)  # numpy array of logits
+    try:
+        raw = model.predict(pairs, batch_size=RERANK_BATCH)  # numpy logits
+    finally:
+        # Release on the failure path too: a rerank that dies mid-batch is
+        # exactly when the card is most full and the next caller needs room.
+        _release_cuda_cache()
 
     # bge-reranker emits raw logits; squashing through sigmoid puts them in
     # 0..1 which is more useful for percentage display than raw values.
