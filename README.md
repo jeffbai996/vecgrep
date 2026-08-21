@@ -254,13 +254,14 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 | `OPENAI_API_KEY` | unset | If set, used as fallback when Ollama is down |
 | `VECGREP_API_HOST` | `127.0.0.1` | API bind host |
 | `VECGREP_API_PORT` | `8765` | API port |
-| `VECGREP_API_TOKEN` | unset | If set, `/api/*` requires `Authorization: Bearer <token>` (health stays public) |
+| `VECGREP_API_TOKEN` | unset | If set, `/api/*` requires `Authorization: Bearer <token>` (health stays public). A non-loopback bind requires at least 32 characters. |
 | `VECGREP_ADMIN_TOKEN` | unset | Separate bearer token for `/api/admin/*`. Without it, admin access requires both a loopback peer and loopback Host header. |
 | `VECGREP_QDRANT_URL` | unset | Use Qdrant server mode, e.g. `http://localhost:6333`. Required when `serve`, `watch`, and CLI processes need the same live store concurrently. |
 | `VECGREP_TOP_K` | `5` | Default `--top` value |
 | `VECGREP_ALIASES_FILE` | `$VECGREP_HOME/aliases.json` | Entity alias map (personal data — keep it out of any repo). See `docs/aliases.example.json`. Missing = no expansion. |
 | `VECGREP_OAUTH_ENABLED` | unset | `1` enables OAuth 2.1 on `/mcp` (embedded auth server: /authorize, /token, /.well-known). |
 | `VECGREP_OAUTH_ISSUER_URL` | unset | Public base URL the MCP endpoint is reachable at. Required when OAuth is on. |
+| `VECGREP_OAUTH_APPROVAL_TOKEN` | unset | Strong owner approval code entered in the browser before an OAuth client may receive a code. Required when OAuth is on. |
 | `VECGREP_THREAD_POOL_SIZE` | `8` | AnyIO worker-thread cap for the HTTP service. |
 | `VECGREP_BM25_WEIGHT` | `1.5` | Weight on BM25 contribution to RRF fusion. >1 boosts literal-keyword matches over semantic noise on short queries. Set to `1.0` for pure RRF, higher for keyword-leaning ranking. |
 | `VECGREP_BM25_COVERAGE_MODE` | `penalty` | How BM25 treats docs that match only some query tokens. `penalty` keeps them but demotes the score by `(matched/total)²`; `filter` drops anything below a coverage threshold (higher precision, but can zero out the BM25 half of a multi-token query). |
@@ -421,10 +422,11 @@ index. Authentication is intentionally separate: `VECGREP_API_TOKEN` gates the
 REST API, while MCP is either network-trusted (OAuth off) or protected by its
 own OAuth 2.1 flow (OAuth on).
 
-For a private LAN/VPN deployment, bind to the private interface and keep the
-endpoint inside that trust boundary:
+For a private LAN/VPN deployment, set a REST token before binding to a private
+interface. vecgrep refuses a non-loopback bind without it:
 
 ```bash
+export VECGREP_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 vecgrep serve --host 0.0.0.0
 ```
 
@@ -469,13 +471,16 @@ Claude.ai's web app supports remote HTTP MCP servers and OAuth discovery. Set:
 ```bash
 export VECGREP_OAUTH_ENABLED=1
 export VECGREP_OAUTH_ISSUER_URL=https://your-public-host.example/mcp
-vecgrep serve --host 0.0.0.0
+export VECGREP_OAUTH_APPROVAL_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+vecgrep serve
 ```
 
-Terminate TLS at the public hostname, then add that `/mcp` URL under Claude.ai
+Keep vecgrep on its default loopback bind and expose only the MCP and OAuth
+routes through the TLS proxy. Then add that `/mcp` URL under Claude.ai
 → Settings → Connectors → Custom MCP server. The client dynamically
-registers and runs the authorization-code + PKCE flow; there is no client ID or
-secret to copy. OAuth scopes are `read` and `propose`; no OAuth grant can bypass
+registers and runs the authorization-code + PKCE flow; the browser asks for the
+owner approval code before granting it. OAuth scopes are `read` and `propose`;
+write-shaped tools require `propose`, and no OAuth grant can bypass
 human confirmation. `/api/*` and local stdio are unaffected. See
 [docs/OAUTH.md](docs/OAUTH.md) for token lifetimes, proxy gotchas, revocation,
 and troubleshooting.

@@ -33,6 +33,23 @@ def require_admin(
     request: Request,
     authorization: str | None = Header(default=None),
 ) -> None:
+    # Loopback is the machine-auth boundary for a tokenless local admin call,
+    # but a browser on that machine can be driven by an arbitrary website. Block
+    # known foreign browser provenance on unsafe methods while preserving
+    # headerless local CLI calls (Origin is a CSRF signal, not authentication).
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        fetch_site = request.headers.get("sec-fetch-site", "").lower()
+        if fetch_site in {"cross-site", "same-site"}:
+            raise HTTPException(status_code=403, detail="Cross-origin admin request refused")
+        request_host = urlsplit(f"//{request.headers.get('host', '')}").netloc.lower()
+        for header_name in ("origin", "referer"):
+            value = request.headers.get(header_name)
+            if not value:
+                continue
+            parsed = urlsplit(value)
+            if value == "null" or not parsed.netloc or parsed.netloc.lower() != request_host:
+                raise HTTPException(status_code=403, detail="Cross-origin admin request refused")
+
     peer = request.client.host if request.client else ""
     host = urlsplit(f"//{request.headers.get('host', '')}").hostname or ""
     if _is_loopback(peer) and _is_loopback(host):

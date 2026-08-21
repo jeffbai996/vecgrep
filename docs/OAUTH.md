@@ -11,17 +11,24 @@ don't need OAuth; leave it off and keep using network trust or
 ## TL;DR — enabling it
 
 ```bash
-# 1. Two env vars on the serve process (systemd unit, .env, shell):
+# 1. Three env vars on the serve process (systemd unit, EnvironmentFile, shell):
 VECGREP_OAUTH_ENABLED=1
 VECGREP_OAUTH_ISSUER_URL=https://<your-public-host>/mcp   # the URL clients dial
+VECGREP_OAUTH_APPROVAL_TOKEN=<strong random owner approval code>
 
 # 2. Restart `vecgrep serve`.
 
 # 3. Point the client at https://<your-public-host>/mcp and connect.
 #    claude.ai: Settings → Connectors → Add custom connector → paste the URL.
-#    It discovers the auth server, registers itself, runs the flow — no
-#    client IDs or secrets to copy anywhere.
+#    It discovers the auth server, registers itself, and opens a browser prompt
+#    for the owner approval code. There is no client ID to pre-provision.
 ```
+
+The TLS proxy must expose the configured MCP path plus `/authorize`, `/token`,
+`/register`, `/oauth/unlock`, `/.well-known/oauth-authorization-server`, and
+the protected-resource metadata path advertised by discovery. Keep `/api/*`
+private. Secret/path-prefixed MCP URLs are supported: the advertised resource
+preserves the complete configured public path.
 
 That's the whole setup. Everything below is what's happening and why.
 
@@ -42,6 +49,12 @@ implements one interface (`OAuthAuthorizationServerProvider`, 9 methods in
   time, which is why there are no client IDs to configure,
 - bearer-token gating of every `/mcp` request once the flow completes.
 
+Dynamic registration does **not** prove that the person connecting is the
+vecgrep owner. Before `/authorize` can mint a code, vecgrep therefore requires
+the separate `VECGREP_OAUTH_APPROVAL_TOKEN` in a no-store browser form. The
+resulting cookie is HttpOnly, Secure, SameSite=Strict, short-lived, and contains
+only an HMAC verifier—not the approval token.
+
 Token lifecycle (the store's invariants):
 
 | Artifact | Lifetime | Notes |
@@ -55,14 +68,16 @@ silently re-runs the flow (it holds a refresh token → gets a clean 401 →
 re-auths). For a single-user deployment this is a feature: revoking
 everything is `systemctl restart`.
 
-Scopes are `read` and `propose` only. The write path stays
+Scopes are `read` and `propose` only, and write-shaped tools enforce `propose`
+at execution. The write path stays
 propose → **human confirm**; confirm is never grantable via OAuth — an
 authenticated client still cannot commit writes by itself.
 
 ## What it does NOT change
 
-- `/api/*` (REST) is untouched — still localhost/tailnet + optional
-  `VECGREP_API_TOKEN` bearer gate. OAuth applies only to `/mcp`.
+- OAuth applies only to `/mcp`. Keep the service loopback-bound and expose only
+  MCP and OAuth routes through the public proxy. A non-loopback vecgrep bind
+  separately requires a strong `VECGREP_API_TOKEN` and fails closed without it.
 - Local stdio MCP (`vecgrep mcp`) is untouched — no network, no auth.
 - With `VECGREP_OAUTH_ENABLED` unset, nothing about your deployment moves.
 

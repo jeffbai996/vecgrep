@@ -4,6 +4,7 @@ Single source of truth: env vars > config.json > defaults.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import tempfile
@@ -15,6 +16,8 @@ from urllib.parse import urlparse
 class ConfigError(ValueError):
     """Invalid or unsafe runtime configuration update."""
 
+
+OAUTH_APPROVAL_ENV = "VECGREP_OAUTH_APPROVAL_TOKEN"
 
 ENV_MAP = {
     "VECGREP_OLLAMA_URL": "ollama_url",
@@ -30,6 +33,7 @@ ENV_MAP = {
     "VECGREP_QDRANT_URL": "qdrant_url",
     "VECGREP_OAUTH_ENABLED": "oauth_enabled",
     "VECGREP_OAUTH_ISSUER_URL": "oauth_issuer_url",
+    OAUTH_APPROVAL_ENV: "oauth_approval_token",
     "VECGREP_THREAD_POOL_SIZE": "thread_pool_size",
 }
 
@@ -53,7 +57,9 @@ EDITABLE_FIELDS = {
     "cross_corpus_exclude",
     "search_fanout_workers",
 }
-SECRET_FIELDS = {"openai_api_key", "api_token", "admin_token"}
+SECRET_FIELDS = {
+    "openai_api_key", "api_token", "admin_token", "oauth_approval_token",
+}
 STRUCTURAL_FIELDS = {"api_host", "api_port", "qdrant_url", "oauth_enabled", "oauth_issuer_url"}
 
 
@@ -77,8 +83,9 @@ class Settings:
     api_port: int = 8765
     default_top_k: int = 5
     # If set, all /api/* routes (except /api/health) require a matching
-    # `Authorization: Bearer <token>` header. Useful when you bind to 0.0.0.0
-    # for Tailscale / LAN access. Unset (None) = no auth, the default.
+    # `Authorization: Bearer <token>` header. A non-loopback bind requires a
+    # strong value. Unset (None) remains valid for the default loopback-only
+    # service when a proxy exposes only the separately authenticated MCP routes.
     api_token: str | None = None
     # Separate credential for the mutation-capable /api/admin surface. Admin
     # routes otherwise accept only requests whose peer socket AND Host header
@@ -93,6 +100,10 @@ class Settings:
     # tailnet with no token (network-trust); OAuth gates only the public /mcp.
     oauth_enabled: bool = False
     oauth_issuer_url: str | None = None
+    # Separate owner-presence credential for the public OAuth authorize page.
+    # Dynamic client registration authenticates no human by itself; without
+    # this gate anyone who discovers the public MCP URL could mint a token.
+    oauth_approval_token: str | None = None
     # If set, use Qdrant in server mode at this URL instead of embedded mode.
     # Embedded mode locks the storage dir to a single process — incompatible
     # with running `vecgrep serve` and `vecgrep watch` simultaneously. Server
@@ -136,8 +147,14 @@ class Settings:
         return self.home / "config.json"
 
     def ensure_dirs(self) -> None:
-        self.home.mkdir(parents=True, exist_ok=True)
-        self.qdrant_path.mkdir(parents=True, exist_ok=True)
+        for path in (self.home, self.qdrant_path):
+            path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            try:
+                path.chmod(0o700)
+            except OSError:
+                # Non-POSIX filesystems may not implement Unix modes. The
+                # service umask still protects files on supported deployments.
+                pass
 
 
 def _load_json(path: Path) -> dict:
@@ -166,6 +183,7 @@ def load_settings() -> Settings:
                 val = val.strip().lower() in ("1", "true", "yes", "on")
             setattr(s, attr, val)
 
+    validate_settings(s)
     return s
 
 
@@ -190,6 +208,15 @@ def _validate_url(name: str, value: str | None) -> None:
         raise ConfigError(f"{name} must be an http or https URL")
 
 
+def _is_loopback_host(value: str) -> bool:
+    if value.strip().lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(value.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
 def validate_settings(settings: Settings) -> None:
     _validate_url("ollama_url", settings.ollama_url)
     _validate_url("ollama_fallback_url", settings.ollama_fallback_url)
@@ -204,6 +231,17 @@ def validate_settings(settings: Settings) -> None:
             raise ConfigError(f"{name} must be non-empty")
     if settings.oauth_enabled and not settings.oauth_issuer_url:
         raise ConfigError("oauth_enabled requires an OAuth issuer URL")
+    approval_token = (settings.oauth_approval_token or "").strip()
+    api_token = (settings.api_token or "").strip()
+    if settings.oauth_enabled and len(approval_token) < 32:
+        raise ConfigError(
+            "oauth_enabled requires VECGREP_OAUTH_APPROVAL_TOKEN with at least 32 characters"
+        )
+    if not _is_loopback_host(settings.api_host) and len(api_token) < 32:
+        raise ConfigError(
+            "a non-loopback api_host requires VECGREP_API_TOKEN with at least "
+            "32 characters"
+        )
     if settings.backup_frequency not in {"daily", "weekly"}:
         raise ConfigError("backup_frequency must be daily or weekly")
     try:

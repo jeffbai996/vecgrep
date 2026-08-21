@@ -22,9 +22,13 @@ from .store import TokenStore, _ACCESS_TTL_S
 
 
 class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
-    """Embedded auth server. Single-user homelab: any registered client can run
-    the flow; the human approval is implicit (it's you). Scope model: read /
-    propose. confirm is never a scope — it stays a human action off-protocol."""
+    """Embedded auth server behind the HTTP owner-approval middleware.
+
+    Dynamic registration is intentionally open for standards-compliant MCP
+    clients, but the web layer must verify the vecgrep owner's approval token
+    before this provider is reached. Scope model: read / propose. confirm is
+    never a scope — it stays a human action off-protocol.
+    """
 
     def __init__(self, valid_scopes: list[str] | None = None) -> None:
         self.store = TokenStore()
@@ -91,8 +95,9 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
         # Narrow to requested scopes (can't widen beyond the refresh token's).
         granted = [s for s in (scopes or refresh_token.scopes) if s in refresh_token.scopes]
         at = self.store.issue_access_token(client.client_id, granted or refresh_token.scopes)
-        # Rotate the refresh token (old one stays valid until expiry/revoke — a
-        # stricter rotate-and-revoke can come later; this is the simple form).
+        # Rotate-and-revoke so replaying an already-used refresh token cannot
+        # mint a second access token.
+        self.store.revoke(refresh_token.token)
         rt = self.store.issue_refresh_token(client.client_id, refresh_token.scopes)
         return _oauth_token(at, rt)
 

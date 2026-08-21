@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
-import os
+import ipaddress
 import json
+import os
 import sys
 import time
 from dataclasses import asdict
@@ -158,6 +159,28 @@ def _print_results(hits: list[dict], json_out: bool) -> None:
 @click.version_option(__version__, prog_name="vecgrep")
 def cli() -> None:
     """grep for meaning, not keywords."""
+    # vecgrep state is private by design: corpora can contain personal notes,
+    # chat history, source paths, and cached text. Do not inherit a permissive
+    # shell/service umask for newly-created runtime state.
+    os.umask(0o077)
+
+
+def _is_loopback_bind(host: str) -> bool:
+    if host.strip().lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def _require_safe_serve_bind(host: str, api_token: str | None) -> None:
+    if not _is_loopback_bind(host) and len((api_token or "").strip()) < 32:
+        raise click.ClickException(
+            "refusing a non-loopback bind without VECGREP_API_TOKEN of at least "
+            "32 characters; the REST API contains private reads and destructive "
+            "mutations"
+        )
 
 
 @cli.command("init")
@@ -955,6 +978,7 @@ def serve(host: str | None, port: int | None, reload: bool, open_browser: bool) 
     s = get_settings()
     actual_host = host or s.api_host
     actual_port = port or s.api_port
+    _require_safe_serve_bind(actual_host, s.api_token)
     if open_browser:
         import threading
         import webbrowser
