@@ -109,5 +109,5 @@ def test_rerank_still_loads_synchronously_for_direct_callers(monkeypatch):
 
 
 class _FakeModel:
-    def predict(self, pairs):
+    def predict(self, pairs, **kwargs):  # kwargs: batch_size, see rerank.RERANK_BATCH
         return [float(i) for i in range(len(pairs))]
