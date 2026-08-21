@@ -100,16 +100,20 @@ class ProposalStore:
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            self.root.chmod(0o700)
+        except OSError:
+            pass
 
     def _path(self, proposal_id: str) -> Path:
         safe = "".join(c for c in proposal_id if c.isalnum() or c in "-_")
         return self.root / f"{safe}.json"
 
     def put(self, proposal: Proposal) -> None:
-        self._path(proposal.proposal_id).write_text(
-            json.dumps(proposal.__dict__, default=str, indent=2)
-        )
+        from ..config import _atomic_write_json
+
+        _atomic_write_json(self._path(proposal.proposal_id), proposal.__dict__)
 
     def get(self, proposal_id: str) -> Proposal | None:
         p = self._path(proposal_id)

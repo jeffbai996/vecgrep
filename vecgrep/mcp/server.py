@@ -128,6 +128,25 @@ def _reset_service_cache() -> None:
     _SVC = None
 
 
+def _require_remote_scope(required: str) -> str | None:
+    """Enforce a tool-specific OAuth scope without changing trusted stdio MCP.
+
+    The SDK's HTTP middleware authenticates the request and places its access
+    token in a context variable. Local stdio calls have no token and retain the
+    existing machine-local trust model.
+    """
+    try:
+        from mcp.server.auth.middleware.auth_context import get_access_token
+    except ImportError:  # optional MCP dependency / stdio-only installation
+        return None
+    token = get_access_token()
+    if token is not None and required not in token.scopes:
+        return json.dumps({
+            "error": f"OAuth token requires the {required!r} scope for this tool."
+        })
+    return None
+
+
 import atexit as _atexit
 _atexit.register(lambda: _reset_service_cache())
 
@@ -553,6 +572,10 @@ def _run_propose(corpus: str, content: str | None, edit_id: str | None = None,
     error, never a silent mis-edit."""
     from ..backend.write import proposal as _P
 
+    denied = _require_remote_scope("propose")
+    if denied:
+        return denied
+
     # Enforce the wall at the TOOL boundary, BEFORE creating any directory or
     # pending proposal: the corpus must be agent-writable, and the content must
     # be within the size cap. A rejected proposal leaves nothing on disk.
@@ -618,7 +641,11 @@ def _run_propose(corpus: str, content: str | None, edit_id: str | None = None,
     # (a mirror corpus keeps them in its source dir, not the write dir); a NEW
     # write picks its next id from the write dir.
     corpus_dir = _corpus_doc_dir(corpus) if edit_id else _write_dir(corpus)
-    corpus_dir.mkdir(parents=True, exist_ok=True)
+    corpus_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        corpus_dir.chmod(0o700)
+    except OSError:
+        pass
     meta = {"origin": origin}
     if source_kind:
         meta["source_kind"] = source_kind
@@ -653,6 +680,10 @@ def _run_propose_delete(corpus: str, delete_id: str,
     corpus, and nothing is removed until a human authorizes it off-protocol."""
     from ..backend.write import proposal as _P
 
+    denied = _require_remote_scope("propose")
+    if denied:
+        return denied
+
     allowed = _allowed_propose_corpora()
     if corpus not in allowed:
         return json.dumps({"error": (
@@ -684,6 +715,10 @@ def _run_propose_merge(corpus: str, doc_ids: list, content: str,
     """PROPOSE merging N docs into doc_ids[0] — WRITES NOTHING. Same wall as
     the other propose tools: allowlisted corpus, size cap, human confirm."""
     from ..backend.write import proposal as _P
+
+    denied = _require_remote_scope("propose")
+    if denied:
+        return denied
 
     allowed = _allowed_propose_corpora()
     if corpus not in allowed:
@@ -781,6 +816,10 @@ def _run_direct_write(content: str, source_kind: str | None = None,
     write from a human-confirmed one."""
     from ..backend.write import proposal as _P
 
+    denied = _require_remote_scope("propose")
+    if denied:
+        return denied
+
     corpus = _direct_write_corpus()
     if not corpus:
         return json.dumps({"error": (
@@ -830,7 +869,11 @@ def _commit_direct_write(corpus: str, content: str, title: str | None,
 
         from datetime import datetime as _datetime, timezone as _timezone
 
-        corpus_dir.mkdir(parents=True, exist_ok=True)
+        corpus_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            corpus_dir.chmod(0o700)
+        except OSError:
+            pass
         doc_id = _P.next_doc_id(corpus_dir, corpus)
         meta = {
             "origin": "agent-direct",
@@ -852,7 +895,7 @@ def _commit_direct_write(corpus: str, content: str, title: str | None,
 
         rendered = _P.render_doc(doc_id, content, meta)
         target = corpus_dir / f"{doc_id}.md"
-        target.write_text(rendered)
+        _atomic_write_private(target, rendered)
 
         # Embed immediately so the entry is searchable now -- the whole point is
         # "save this and be able to find it". Same incremental single-file index
@@ -889,6 +932,10 @@ def _run_direct_edit(doc_id: str, content: str | None = None,
     Deletes are deliberately absent: propose_delete stays the only route, for
     every corpus. Losing an entry should always cross a human."""
     from ..backend.write import proposal as _P
+
+    denied = _require_remote_scope("propose")
+    if denied:
+        return denied
 
     corpus = _direct_write_corpus()
     if not corpus:
@@ -928,16 +975,18 @@ def _commit_direct_edit(corpus: str, doc_id: str, content: str | None,
     with svc.locks.write(corpus):
         svc._recover_corpus_locked(corpus)
 
-        # Resolve the target INSIDE this corpus only. _write_dir(corpus) is the sole
-    # directory consulted, so a doc_id belonging to another corpus simply doesn't
-    # exist here -- the corpus boundary is structural, not a check to forget.
-        target = _write_dir(corpus) / f"{doc_id}.md"
-        if not target.exists():
+        # Validate the id before touching the filesystem, reject file symlinks,
+        # and resolve containment against the canonical corpus directory. The
+        # old lexical join accepted ../../ paths and followed symlinks.
+        try:
+            target = _direct_edit_target(_write_dir(corpus), doc_id)
+            on_disk = _read_nofollow(target)
+        except (OSError, ValueError) as exc:
+            import errno
+            reason = "not found" if getattr(exc, "errno", None) == errno.ENOENT else str(exc)
             return json.dumps({"error": (
-                f"doc {doc_id!r} not found in corpus {corpus!r} — direct edit only "
-                f"touches its own corpus. (Nothing was changed.)")})
-
-        on_disk = target.read_text()
+                f"doc {doc_id!r} is not an editable file in corpus {corpus!r}: "
+                f"{reason}. (Nothing was changed.)")})
         if "tier: protected" in on_disk:
             return json.dumps({"error": (
                 f"{doc_id} is tier: protected — human-only. Use propose_edit so a "
@@ -965,8 +1014,8 @@ def _commit_direct_edit(corpus: str, doc_id: str, content: str | None,
     # body must stay recoverable. Timestamped so repeated edits don't clobber
     # each other's history.
         import time as _t
-        bak = target.with_suffix(f".md.bak-{int(_t.time())}")
-        bak.write_text(on_disk)
+        bak = target.with_suffix(f".md.bak-{_t.time_ns()}")
+        _atomic_write_private(bak, on_disk)
 
     # Preserve the existing frontmatter, swap only the body, and record that an
     # unreviewed edit touched it (and when) for audit.
@@ -976,7 +1025,7 @@ def _commit_direct_edit(corpus: str, doc_id: str, content: str | None,
         from datetime import datetime as _datetime, timezone as _timezone
         meta["edited_at"] = _datetime.now(_timezone.utc).isoformat(timespec="seconds")
         rendered = _P.render_doc(doc_id, new_body, meta)
-        target.write_text(rendered)
+        _atomic_write_private(target, rendered)
 
         index_note = ""
         try:
@@ -990,6 +1039,64 @@ def _commit_direct_edit(corpus: str, doc_id: str, content: str | None,
             "mode": "patch" if is_patch else "overwrite",
             "status": f"edited and re-indexed{index_note}",
         })
+
+
+def _direct_edit_target(corpus_dir, doc_id: str):
+    """Return one canonical, regular, non-symlink Markdown doc in corpus_dir."""
+    from pathlib import Path
+    from ..backend.write.proposal import _ID_RE
+
+    if not _ID_RE.fullmatch(doc_id):
+        raise ValueError("invalid doc id")
+    base = Path(corpus_dir).resolve()
+    candidate = Path(corpus_dir) / f"{doc_id}.md"
+    if candidate.is_symlink():
+        raise ValueError("symbolic links are not editable")
+    target = candidate.resolve(strict=True)
+    if target.parent != base or not target.is_file():
+        raise ValueError("target escapes the corpus directory")
+    return target
+
+
+def _read_nofollow(path) -> str:
+    """Read a checked file descriptor without following a last-component link."""
+    import os
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            return handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _atomic_write_private(path, text: str) -> None:
+    """Write mode-0600 text beside its target, then atomically replace it."""
+    import os
+    import tempfile
+    from pathlib import Path
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 def _fire_propose_hook(pr) -> None:
@@ -1544,11 +1651,12 @@ def _oauth_issuer(issuer_url: str):
 
 
 def _oauth_resource(issuer_url: str):
-    """Protected resource = the MCP endpoint itself (<root>/mcp)."""
+    """Protected resource = the exact public MCP endpoint, prefix included."""
     from pydantic import AnyHttpUrl
     from urllib.parse import urlsplit
     p = urlsplit(issuer_url)
-    return AnyHttpUrl(f"{p.scheme}://{p.netloc}/mcp")
+    path = p.path.rstrip("/") or "/mcp"
+    return AnyHttpUrl(f"{p.scheme}://{p.netloc}{path}")
 
 
 def _oauth_client_reg():
@@ -1999,7 +2107,11 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
             corpus = first.rsplit("-", 1)[0] if "-" in first else first
         return _run_propose_merge(corpus or "", list(doc_ids), content, tags)
 
-    return fmcp.streamable_http_app()
+    http_app = fmcp.streamable_http_app()
+    if oauth_issuer_url:
+        from ..backend.auth.approval import OAuthApprovalMiddleware
+        http_app.add_middleware(OAuthApprovalMiddleware)
+    return http_app
 
 
 def run() -> None:

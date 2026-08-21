@@ -5,20 +5,28 @@ the optional `mcp` extra is installed.
 from __future__ import annotations
 
 import contextlib
+import html
+import hmac
 import logging
 import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.routing import Mount, Route
 
 from .. import __version__
 from .api.routes import public_router, router
 from .api.admin import router as admin_router
+from .auth.approval import (
+    APPROVAL_COOKIE,
+    OAuthApprovalMiddleware,
+    approval_cookie_value,
+    safe_authorize_target,
+)
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
@@ -137,6 +145,10 @@ def create_app() -> FastAPI:
             backup_thread.join(timeout=2)
 
     app = FastAPI(title="vecgrep", version=__version__, lifespan=lifespan)
+    # Covers both the root SDK authorize route and the duplicate mounted route
+    # under /mcp. The MCP sub-app also carries this middleware when constructed
+    # directly, so neither integration path can accidentally omit owner approval.
+    app.add_middleware(OAuthApprovalMiddleware)
 
     app.include_router(public_router)
     app.include_router(router)
@@ -175,6 +187,62 @@ def create_app() -> FastAPI:
                 app.router.routes.append(_r)
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("OAuth root routes not mounted: %s", e)
+
+        def _unlock_form(next_target: str, *, error: bool = False) -> HTMLResponse:
+            safe_next = html.escape(safe_authorize_target(next_target), quote=True)
+            error_html = (
+                '<p role="alert">Approval code was not accepted.</p>' if error else ""
+            )
+            body = f"""<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Approve vecgrep connection</title>
+<body><main><h1>Approve vecgrep connection</h1>
+<p>Enter the server owner approval code to continue this OAuth connection.</p>
+{error_html}<form method="post" action="/oauth/unlock">
+<input type="hidden" name="next" value="{safe_next}">
+<label>Approval code <input name="token" type="password" autocomplete="current-password" required autofocus></label>
+<button type="submit">Continue</button></form></main></body></html>"""
+            return HTMLResponse(
+                body,
+                status_code=401 if error else 200,
+                headers={
+                    "Cache-Control": "no-store",
+                    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+                    "Referrer-Policy": "no-referrer",
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+
+        @app.get("/oauth/unlock", response_class=HTMLResponse)
+        async def oauth_unlock(next: str = "/authorize") -> HTMLResponse:
+            return _unlock_form(next)
+
+        @app.post("/oauth/unlock")
+        async def oauth_unlock_submit(request: Request):
+            content_type = request.headers.get("content-type", "").split(";", 1)[0]
+            body = await request.body()
+            if content_type != "application/x-www-form-urlencoded" or len(body) > 8192:
+                return _unlock_form("/authorize", error=True)
+            from urllib.parse import parse_qs
+
+            fields = parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True)
+            provided = (fields.get("token") or [""])[0]
+            next_target = safe_authorize_target((fields.get("next") or [""])[0])
+            expected = _gs().oauth_approval_token or ""
+            if not provided or not hmac.compare_digest(provided, expected.strip()):
+                return _unlock_form(next_target, error=True)
+            response = RedirectResponse(next_target, status_code=303)
+            response.set_cookie(
+                APPROVAL_COOKIE,
+                approval_cookie_value(expected),
+                max_age=8 * 60 * 60,
+                secure=True,
+                httponly=True,
+                samesite="strict",
+                path="/",
+            )
+            response.headers["Cache-Control"] = "no-store"
+            return response
 
     if FRONTEND_DIR.is_dir():
         app.mount(

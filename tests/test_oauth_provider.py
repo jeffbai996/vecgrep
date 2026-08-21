@@ -107,6 +107,7 @@ async def test_refresh_token_rotation(provider):
     assert tok.access_token
     at = await provider.load_access_token(tok.access_token)
     assert at is not None and at.scopes == ["read"]
+    assert await provider.load_refresh_token(c, rt.token) is None
 
 
 @pytest.mark.anyio
@@ -116,3 +117,38 @@ async def test_revoke_kills_access_token(provider):
     assert await provider.load_access_token(at.token) is not None
     await provider.revoke_token(at)
     assert await provider.load_access_token(at.token) is None
+
+
+def test_read_scope_cannot_invoke_mutation_tools(provider):
+    from mcp.server.auth.middleware.auth_context import auth_context_var
+    from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
+    from vecgrep.mcp.server import _require_remote_scope
+
+    at = provider.store.issue_access_token("claude-ai", ["read"])
+    marker = auth_context_var.set(AuthenticatedUser(at))
+    try:
+        denial = _require_remote_scope("propose")
+    finally:
+        auth_context_var.reset(marker)
+    assert denial is not None
+    assert "requires" in denial
+    assert at.token not in denial
+
+
+def test_propose_scope_allows_mutation_tool_boundary(provider):
+    from mcp.server.auth.middleware.auth_context import auth_context_var
+    from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
+    from vecgrep.mcp.server import _require_remote_scope
+
+    at = provider.store.issue_access_token("claude-ai", ["read", "propose"])
+    marker = auth_context_var.set(AuthenticatedUser(at))
+    try:
+        assert _require_remote_scope("propose") is None
+    finally:
+        auth_context_var.reset(marker)
+
+
+def test_stdio_without_oauth_token_preserves_local_tools():
+    from vecgrep.mcp.server import _require_remote_scope
+
+    assert _require_remote_scope("propose") is None

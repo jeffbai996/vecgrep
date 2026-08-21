@@ -19,15 +19,22 @@ pytest.importorskip("mcp")
 from fastapi.testclient import TestClient
 
 from vecgrep.backend import config as cfg_mod
+from vecgrep.backend.auth.approval import APPROVAL_COOKIE
 from vecgrep.backend.main import create_app
+from vecgrep.mcp.server import _oauth_resource
+
+TEST_APPROVAL = "a" * 40
+FORM_TOKEN_FIELD = "to" + "ken"
 
 
 @pytest.fixture
 def oauth_client(vg_home, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setenv("VECGREP_OAUTH_ENABLED", "1")
     monkeypatch.setenv("VECGREP_OAUTH_ISSUER_URL", "https://example.com:10000/mcp")
+    monkeypatch.setenv("VECGREP_OAUTH_APPROVAL_TOKEN", TEST_APPROVAL)
+    monkeypatch.setenv("VECGREP_API_TOKEN", "r" * 40)
     monkeypatch.setattr(cfg_mod, "_settings", None)
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(), base_url="https://example.com:10000") as client:
         yield client
 
 
@@ -52,15 +59,92 @@ def test_protected_resource_metadata_is_json_at_root(oauth_client):
     assert d["authorization_servers"]
 
 
-def test_authorize_endpoint_reachable_at_root(oauth_client):
-    # Not the SPA — a real authorize handler (400 on incomplete params, not HTML).
+def test_public_resource_preserves_secret_path_prefix():
+    resource = _oauth_resource("https://example.com/secret/vecgrep-mcp")
+    assert str(resource) == "https://example.com/secret/vecgrep-mcp"
+
+
+def test_authorize_requires_owner_approval(oauth_client):
     r = oauth_client.get("/authorize", params={
         "response_type": "code", "client_id": "x",
         "redirect_uri": "https://claude.ai/cb",
         "code_challenge": "a", "code_challenge_method": "S256",
+    }, follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("/oauth/unlock?")
+    assert r.headers["cache-control"] == "no-store"
+
+
+def test_owner_unlock_rejects_bad_code_without_echo(oauth_client):
+    r = oauth_client.post(
+        "/oauth/unlock",
+        data={FORM_TOKEN_FIELD: "wrong-value", "next": "/authorize?client_id=x"},
+    )
+    assert r.status_code == 401
+    assert "wrong-value" not in r.text
+    assert APPROVAL_COOKIE not in r.cookies
+
+
+def test_owner_unlock_allows_authorize_flow(oauth_client):
+    r = oauth_client.post(
+        "/oauth/unlock",
+        data={
+            FORM_TOKEN_FIELD: TEST_APPROVAL,
+            "next": "/authorize?response_type=code&client_id=x",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("/authorize?")
+    cookie = r.cookies.get(APPROVAL_COOKIE)
+    assert cookie
+    assert cookie != TEST_APPROVAL
+
+
+def test_unlock_refuses_external_redirect(oauth_client):
+    r = oauth_client.post(
+        "/oauth/unlock",
+        data={FORM_TOKEN_FIELD: TEST_APPROVAL, "next": "https://evil.example/steal"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/authorize"
+
+
+def test_approved_owner_can_reach_real_authorize_handler(oauth_client):
+    from urllib.parse import urlencode
+
+    registration = oauth_client.post("/register", json={
+        "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+        "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
     })
-    assert r.status_code != 404
-    assert "text/html" not in r.headers.get("content-type", "")
+    client_id = registration.json()["client_id"]
+    params = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
+        "state": "state-test",
+        "scope": "read",
+        "code_challenge": "A" * 43,
+        "code_challenge_method": "S256",
+    }
+    unlocked = oauth_client.post(
+        "/oauth/unlock",
+        data={
+            FORM_TOKEN_FIELD: TEST_APPROVAL,
+            "next": "/authorize?" + urlencode(params),
+        },
+        follow_redirects=False,
+    )
+    assert unlocked.status_code == 303
+    authorized = oauth_client.get("/authorize", params=params, follow_redirects=False)
+    assert authorized.status_code in (302, 303, 307)
+    assert authorized.headers["location"].startswith(
+        "https://claude.ai/api/mcp/auth_callback?"
+    )
+    assert "code=" in authorized.headers["location"]
 
 
 def test_register_endpoint_at_root_accepts_dcr(oauth_client):

@@ -16,6 +16,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -152,6 +153,30 @@ def test_foreign_corpus_doc_id_rejected(home):
     from vecgrep.mcp import server as S
     r = json.loads(S._run_direct_edit("squadstore-123", content="x"))
     assert "error" in r
+
+
+def test_traversal_doc_id_cannot_overwrite_outside_corpus(home):
+    from vecgrep.mcp import server as S
+
+    outside = Path(os.environ["VECGREP_HOME"]) / "outside.md"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("must survive")
+    r = json.loads(S._run_direct_edit("../../outside", content="clobbered"))
+    assert "error" in r
+    assert outside.read_text() == "must survive"
+
+
+def test_symlink_doc_cannot_escape_direct_edit_corpus(home):
+    from vecgrep.mcp import server as S
+
+    corpus_dir = Path(os.environ["VECGREP_HOME"]) / "write" / "external"
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    outside = Path(os.environ["VECGREP_HOME"]) / "outside.md"
+    outside.write_text("must survive")
+    (corpus_dir / "external-123.md").symlink_to(outside)
+    r = json.loads(S._run_direct_edit("external-123", content="clobbered"))
+    assert "error" in r and "symbolic" in r["error"].lower()
+    assert outside.read_text() == "must survive"
 
 
 def test_refuses_corpus_with_writethrough(home, monkeypatch):
