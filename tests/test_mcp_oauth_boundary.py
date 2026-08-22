@@ -165,6 +165,28 @@ def test_unclassifiable_or_non_mcp_requests_fail_closed(scope: dict) -> None:
     assert _is_direct_loopback_mcp(scope) is False
 
 
+@pytest.mark.parametrize(
+    "marker",
+    [
+        (b"x-forwarded-for", b"203.0.113.9"),
+        (b"x-forwarded-host", b"node.example.ts.net"),
+        (b"forwarded", b"for=203.0.113.9"),
+        (b"tailscale-funnel-request", b"?1"),
+        (b"tailscale-headers-info", b"https://tailscale.com/s/serve-headers"),
+        (b"tailscale-user-login", b"someone@example.test"),
+    ],
+)
+def test_any_proxy_or_tailscale_marker_disables_loopback_bypass(marker) -> None:
+    """A Funnel request arrives on the loopback peer via the Windows portproxy;
+    the stamped headers are the only thing that says it is not a local call."""
+    assert _is_direct_loopback_mcp({
+        "type": "http", "path": "/", "client": ("127.0.0.1", 1), "headers": [marker],
+    }) is False
+    assert _is_direct_loopback_mcp({
+        "type": "http", "path": "/", "client": ("127.0.0.1", 1), "headers": [],
+    }) is True
+
+
 def test_tailscale_identity_requires_loopback_listener_and_forwarding_marker() -> None:
     identity = (b"tailscale-user-login", b"owner@example.test")
     forwarded = (b"x-forwarded-for", b"100.64.0.10")
