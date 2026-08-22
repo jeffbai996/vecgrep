@@ -1693,7 +1693,16 @@ def build_oauth_root_routes(oauth_issuer_url: str) -> list:
     return routes
 
 
-_PROXY_TRANSIT_HEADERS = {b"x-forwarded-for", b"x-forwarded-proto"}
+# Any proxy-transit or Tailscale-stamped header disables the loopback bypass.
+# Tailscale Serve/Funnel on a Windows host reaches WSL through a portproxy, so
+# the socket peer is 127.0.0.1 for tailnet AND anonymous public traffic alike;
+# the headers tailscaled stamps are the only thing that tells them apart from
+# a genuine same-machine call, and a request carrying ANY of them is by
+# definition not that call (2026-08-22).
+_PROXY_TRANSIT_HEADERS = {
+    b"x-forwarded-for", b"x-forwarded-proto", b"x-forwarded-host", b"forwarded",
+    b"tailscale-user-login", b"tailscale-headers-info", b"tailscale-funnel-request",
+}
 _TAILSCALE_IDENTITY_HEADER = b"tailscale-user-login"
 _TAILSCALE_FUNNEL_HEADER = b"tailscale-funnel-request"
 _TAILSCALE_HEADERS_INFO = b"https://tailscale.com/s/serve-headers"
