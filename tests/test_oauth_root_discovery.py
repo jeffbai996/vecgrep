@@ -219,3 +219,11 @@ def test_unlock_page_names_the_client_and_its_scopes(oauth_client):
     r = oauth_client.get("/oauth/unlock?next=/authorize?client_id=nope")
     assert r.status_code == 200
     assert "Connect to vecgrep" in r.text
+
+
+def test_metadata_advertises_public_clients(oauth_client):
+    """claude.ai registers with token_endpoint_auth_method=none; the advertised
+    methods must include it or a careful client never attempts /token."""
+    meta = oauth_client.get("/.well-known/oauth-authorization-server").json()
+    assert "none" in meta["token_endpoint_auth_methods_supported"]
+    assert "client_secret_post" in meta["token_endpoint_auth_methods_supported"]

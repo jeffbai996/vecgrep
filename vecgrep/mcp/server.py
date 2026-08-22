@@ -1690,7 +1690,56 @@ def build_oauth_root_routes(oauth_issuer_url: str) -> list:
         authorization_servers=[issuer],
         scopes_supported=["read", "propose"],
     )
-    return routes
+    return [advertise_public_clients(r) for r in routes]
+
+
+def advertise_public_clients(route):
+    """The SDK's metadata says the token endpoint only takes secret-bearing
+    clients, yet dynamic registration hands public clients (claude.ai asks for
+    token_endpoint_auth_method=none) exactly that. A client that checks the
+    advertised methods before exchanging its code finds nothing it can use
+    and gives up without ever calling /token (2026-08-22). Say what we accept.
+    The SDK endpoint is a raw ASGI app (CORS-wrapped), so this wraps at the
+    ASGI layer and rewrites the JSON body on the way out."""
+    from starlette.routing import Route
+    if not isinstance(route, Route) or route.path != "/.well-known/oauth-authorization-server":
+        return route
+    return Route(route.path, endpoint=_PublicClientMetadata(route.endpoint),
+                 methods=list(route.methods or ["GET", "OPTIONS"]))
+
+
+class _PublicClientMetadata:
+    def __init__(self, inner):
+        self._inner = inner
+
+    async def __call__(self, scope, receive, send):
+        import json as _json
+        start = None
+        chunks: list[bytes] = []
+
+        async def capture(message):
+            nonlocal start
+            if message["type"] == "http.response.start":
+                start = message
+            elif message["type"] == "http.response.body":
+                chunks.append(message.get("body", b""))
+
+        await self._inner(scope, receive, capture)
+        if start is None:
+            return
+        body = b"".join(chunks)
+        try:
+            meta = _json.loads(body)
+            methods = list(meta.get("token_endpoint_auth_methods_supported") or [])
+            if "none" not in methods:
+                meta["token_endpoint_auth_methods_supported"] = ["none", *methods]
+            body = _json.dumps(meta).encode()
+        except Exception:
+            pass
+        headers = [(k, v) for k, v in start.get("headers", []) if k.lower() != b"content-length"]
+        headers.append((b"content-length", str(len(body)).encode()))
+        await send({"type": "http.response.start", "status": start["status"], "headers": headers})
+        await send({"type": "http.response.body", "body": body})
 
 
 # Any proxy-transit or Tailscale-stamped header disables the loopback bypass.
