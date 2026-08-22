@@ -101,6 +101,32 @@ def test_owner_unlock_allows_authorize_flow(oauth_client):
     assert cookie != TEST_APPROVAL
 
 
+def test_owner_unlock_trims_pasted_whitespace(oauth_client):
+    """The owner pastes this code from a terminal (grep output, a copied env
+    line) — that copy near-universally carries a trailing newline or space.
+    A correct code with incidental whitespace around it must still unlock
+    (Jeff 2026-08-22: pasted the real code, got rejected)."""
+    r = oauth_client.post(
+        "/oauth/unlock",
+        data={
+            FORM_TOKEN_FIELD: f"  {TEST_APPROVAL}\n",
+            "next": "/authorize?response_type=code&client_id=x",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert APPROVAL_COOKIE in r.cookies
+
+
+def test_owner_unlock_rejects_whitespace_only_token(oauth_client):
+    r = oauth_client.post(
+        "/oauth/unlock",
+        data={FORM_TOKEN_FIELD: "   \n\t  ", "next": "/authorize?client_id=x"},
+    )
+    assert r.status_code == 401
+    assert APPROVAL_COOKIE not in r.cookies
+
+
 def test_unlock_refuses_external_redirect(oauth_client):
     r = oauth_client.post(
         "/oauth/unlock",
