@@ -18,12 +18,18 @@ from __future__ import annotations
 import secrets
 import time
 
+import json
+import os
+
 from mcp.server.auth.provider import AccessToken, AuthorizationCode, RefreshToken
+from mcp.shared.auth import OAuthClientInformationFull
 
 # Default lifetimes. Access tokens are short (the whole point of OAuth); refresh
 # tokens are long-lived but revocable; codes are seconds-scale (used immediately).
-_ACCESS_TTL_S = 3600        # 1 hour
-_REFRESH_TTL_S = 30 * 86400  # 30 days
+# A year: the owner approves a client once and expects it to stay connected
+# (Jeff 2026-08-22: "indefinite or like a year"); revocation is the lever.
+_ACCESS_TTL_S = 365 * 86400
+_REFRESH_TTL_S = 365 * 86400
 _CODE_TTL_S = 300           # 5 minutes
 
 
@@ -36,10 +42,61 @@ def _new_secret(prefix: str) -> str:
 
 
 class TokenStore:
-    def __init__(self) -> None:
+    """Tokens and registered clients, optionally persisted to a 0600 JSON
+    file so a service restart no longer revokes every connected client
+    (2026-08-22). Codes are never persisted — they live seconds."""
+
+    def __init__(self, path: str | None = None) -> None:
         self._access: dict[str, AccessToken] = {}
         self._refresh: dict[str, RefreshToken] = {}
         self._codes: dict[str, AuthorizationCode] = {}
+        self._clients: dict[str, OAuthClientInformationFull] = {}
+        self._path = path
+        self._load()
+
+    # ----- persistence -----
+    def _load(self) -> None:
+        if not self._path or not os.path.exists(self._path):
+            return
+        try:
+            with open(self._path, encoding="utf-8") as fh:
+                raw = json.load(fh)
+            self._access = {k: AccessToken.model_validate(v) for k, v in raw.get("access", {}).items()}
+            self._refresh = {k: RefreshToken.model_validate(v) for k, v in raw.get("refresh", {}).items()}
+            self._clients = {k: OAuthClientInformationFull.model_validate(v) for k, v in raw.get("clients", {}).items()}
+        except Exception:
+            # a corrupt state file must not take the auth server down; it
+            # simply means every client re-approves once
+            self._access, self._refresh, self._clients = {}, {}, {}
+
+    def _save(self) -> None:
+        if not self._path:
+            return
+        now = _now()
+        data = {
+            "access": {k: v.model_dump(mode="json") for k, v in self._access.items()
+                       if v.expires_at is None or v.expires_at > now},
+            "refresh": {k: v.model_dump(mode="json") for k, v in self._refresh.items()
+                        if v.expires_at is None or v.expires_at > now},
+            "clients": {k: v.model_dump(mode="json") for k, v in self._clients.items()},
+        }
+        os.makedirs(os.path.dirname(self._path) or ".", mode=0o700, exist_ok=True)
+        tmp = self._path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, self._path)
+
+    # ----- clients -----
+    def save_client(self, info: OAuthClientInformationFull) -> None:
+        self._clients[info.client_id] = info
+        self._save()
+
+    def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
+        return self._clients.get(client_id)
+
+    def clients(self) -> dict[str, OAuthClientInformationFull]:
+        return self._clients
 
     # ----- access tokens -----
     def issue_access_token(self, client_id: str, scopes: list[str],
@@ -53,6 +110,7 @@ class TokenStore:
             resource=resource,
         )
         self._access[at.token] = at
+        self._save()
         return at
 
     def load_access_token(self, token: str) -> AccessToken | None:
@@ -77,6 +135,7 @@ class TokenStore:
             expires_at=int(_now() + ttl_s),
         )
         self._refresh[rt.token] = rt
+        self._save()
         return rt
 
     def load_refresh_token(self, client_id: str, token: str) -> RefreshToken | None:
@@ -125,6 +184,7 @@ class TokenStore:
         """Revoke an access OR refresh token by its value. Idempotent."""
         self._access.pop(token, None)
         self._refresh.pop(token, None)
+        self._save()
 
     # ----- admin surface (the /inventory OAuth panel reads these) -----
     def counts(self) -> dict:
@@ -156,4 +216,5 @@ class TokenStore:
             self._refresh.pop(t, None)
         self._codes = {c: ac for c, ac in self._codes.items()
                        if ac.client_id != client_id}
+        self._save()
         return len(doomed_a) + len(doomed_r)

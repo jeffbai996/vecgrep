@@ -31,16 +31,21 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
     """
 
     def __init__(self, valid_scopes: list[str] | None = None) -> None:
-        self.store = TokenStore()
-        self._clients: dict[str, OAuthClientInformationFull] = {}
+        import os
+        # persisted when VECGREP_OAUTH_STATE_FILE is set (the service env does)
+        self.store = TokenStore(path=os.environ.get("VECGREP_OAUTH_STATE_FILE", "").strip() or None)
         self.valid_scopes = valid_scopes or ["read", "propose"]
+
+    @property
+    def _clients(self) -> dict[str, OAuthClientInformationFull]:
+        return self.store.clients()
 
     # ----- client registration -----
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        return self._clients.get(client_id)
+        return self.store.get_client(client_id)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
-        self._clients[client_info.client_id] = client_info
+        self.store.save_client(client_info)
 
     # ----- authorize: issue a code, redirect back to the client -----
     async def authorize(
