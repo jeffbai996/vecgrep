@@ -245,3 +245,26 @@ def test_token_store_survives_a_restart(tmp_path):
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
     b.revoke(at.token)
     assert TokenStore(path=path).load_access_token(at.token) is None
+
+
+def test_oauth_trace_does_not_break_the_flow(vg_home, monkeypatch):
+    """The trace wrapper must wrap the SDK's request handlers as handlers —
+    a wrong wrapper shape 500'd /authorize for 10 minutes on 2026-08-22."""
+    monkeypatch.setenv("VECGREP_OAUTH_ENABLED", "1")
+    monkeypatch.setenv("VECGREP_OAUTH_ISSUER_URL", "https://example.com:10000/mcp")
+    monkeypatch.setenv("VECGREP_OAUTH_APPROVAL_TOKEN", TEST_APPROVAL)
+    monkeypatch.setenv("VECGREP_API_TOKEN", "r" * 40)
+    monkeypatch.setenv("VECGREP_OAUTH_TRACE", "1")
+    monkeypatch.setattr(cfg_mod, "_settings", None)
+    with TestClient(create_app(), base_url="https://example.com:10000") as c:
+        reg = c.post("/register", json={"client_name": "t", "redirect_uris": ["https://claude.ai/cb"],
+                                        "grant_types": ["authorization_code", "refresh_token"],
+                                        "response_types": ["code"], "token_endpoint_auth_method": "none"})
+        assert reg.status_code == 201
+        r = c.post("/oauth/unlock", data={FORM_TOKEN_FIELD: TEST_APPROVAL, "next": "/authorize"}, follow_redirects=False)
+        cookie = r.cookies.get(APPROVAL_COOKIE)
+        r = c.get("/authorize", params={"response_type": "code", "client_id": reg.json()["client_id"],
+                                        "redirect_uri": "https://claude.ai/cb", "code_challenge": "x" * 43,
+                                        "code_challenge_method": "S256", "state": "s"},
+                  cookies={APPROVAL_COOKIE: cookie}, follow_redirects=False)
+        assert r.status_code == 302, r.text
