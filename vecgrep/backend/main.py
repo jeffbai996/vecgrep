@@ -48,7 +48,11 @@ def _try_build_mcp_http_app() -> Any | None:
     if s.oauth_enabled and not issuer:
         logger.warning("VECGREP_OAUTH_ENABLED set but no issuer URL; OAuth off.")
     try:
-        return build_http_app(oauth_issuer_url=issuer)
+        return build_http_app(
+            oauth_issuer_url=issuer,
+            oauth_loopback_bypass=s.oauth_loopback_bypass,
+            oauth_tailscale_identity_bypass=s.oauth_tailscale_identity_bypass,
+        )
     except RuntimeError as e:
         # build_http_app raises RuntimeError when the mcp extra is missing
         # (the helpful "pip install vecgrep[mcp]" message).

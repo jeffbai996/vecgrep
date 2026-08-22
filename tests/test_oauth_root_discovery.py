@@ -159,7 +159,7 @@ def test_register_endpoint_at_root_accepts_dcr(oauth_client):
 
 
 def test_mcp_endpoint_still_gated(oauth_client):
-    # The /mcp endpoint itself still requires a token (the bearer gate).
+    # An unclassifiable/non-loopback peer still requires a token.
     r = oauth_client.post("/mcp", json={},
                           headers={"Accept": "application/json, text/event-stream",
                                    "Content-Type": "application/json"})

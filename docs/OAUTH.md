@@ -1,12 +1,13 @@
 # OAuth on the MCP endpoint — setup guide
 
-vecgrep can gate its `/mcp` endpoint with **OAuth 2.1**, using an embedded
+vecgrep can gate untrusted `/mcp` traffic with **OAuth 2.1**, using an embedded
 authorization server. You want this in exactly one situation: **a remote MCP
 client that speaks OAuth needs to reach your vecgrep over the public
 internet** — the main example being claude.ai's custom connectors. If your
 only clients are local (Claude Code over stdio, tools on your tailnet), you
-don't need OAuth; leave it off and keep using network trust or
-`VECGREP_API_TOKEN`.
+can leave it off and keep using network trust. When OAuth is enabled for a
+public connector, direct loopback clients and authenticated Tailscale Serve
+users retain network trust by default; anonymous Funnel clients do not.
 
 ## TL;DR — enabling it
 
@@ -15,6 +16,10 @@ don't need OAuth; leave it off and keep using network trust or
 VECGREP_OAUTH_ENABLED=1
 VECGREP_OAUTH_ISSUER_URL=https://<your-public-host>/mcp   # the URL clients dial
 VECGREP_OAUTH_APPROVAL_TOKEN=<strong random owner approval code>
+# Optional master rollback: false requires OAuth for every MCP request.
+VECGREP_OAUTH_LOOPBACK_BYPASS=true
+# Optional: false also requires OAuth for authenticated Tailscale Serve users.
+VECGREP_OAUTH_TAILSCALE_IDENTITY_BYPASS=true
 
 # 2. Restart `vecgrep serve`.
 
@@ -47,7 +52,8 @@ implements one interface (`OAuthAuthorizationServerProvider`, 9 methods in
   finishing),
 - **Dynamic Client Registration** — the client registers itself at connect
   time, which is why there are no client IDs to configure,
-- bearer-token gating of every `/mcp` request once the flow completes.
+- bearer-token gating of every `/mcp` request outside the trusted-network
+  bypasses.
 
 Dynamic registration does **not** prove that the person connecting is the
 vecgrep owner. Before `/authorize` can mint a code, vecgrep therefore requires
@@ -79,6 +85,16 @@ authenticated client still cannot commit writes by itself.
   MCP and OAuth routes through the public proxy. A non-loopback vecgrep bind
   separately requires a strong `VECGREP_API_TOKEN` and fails closed without it.
 - Local stdio MCP (`vecgrep mcp`) is untouched — no network, no auth.
+- Direct HTTP from a loopback peer bypasses OAuth only when both
+  `X-Forwarded-For` and `X-Forwarded-Proto` are absent. Any proxy marker makes
+  the request untrusted unless the verified Tailscale Serve rule below applies.
+- Tailscale Serve strips client-supplied identity headers and adds the logged-in
+  tailnet user's identity. That verified header plus proxy transit permits the
+  default tailnet bypass. Funnel supplies no identity header and remains OAuth
+  protected. Tagged nodes receive no user identity header and therefore need
+  OAuth or an SSH tunnel to loopback.
+- `VECGREP_OAUTH_LOOPBACK_BYPASS=false` is the master kill switch: it restores
+  OAuth on every MCP request, including direct loopback and Tailscale Serve.
 - With `VECGREP_OAUTH_ENABLED` unset, nothing about your deployment moves.
 
 ## The three gotchas (why the wiring looks the way it does)
@@ -112,6 +128,8 @@ are the three failure modes that ate the first attempt:
 | Redirect loop on connect | Something upstream is redirecting bare `/mcp`; dial the URL exactly as configured |
 | Client re-auths after every deploy | Expected — in-memory token store; restart = clean slate |
 | 401 on `/mcp` but flow completed | Access token expired (1 h) and the client isn't using its refresh token — reconnect the client |
+| Local client gets 401 | Confirm it dials the direct loopback listener and no local proxy injects forwarding headers; check `VECGREP_OAUTH_LOOPBACK_BYPASS` |
+| Tailnet client gets 401 | Use Tailscale Serve from a user-owned node; tagged nodes have no user identity header and need OAuth or a loopback SSH tunnel |
 | Flow works locally, fails via funnel | `VECGREP_OAUTH_ISSUER_URL` must be the PUBLIC url, not localhost — issuer mismatch fails validation |
 
 ## Porting the pattern

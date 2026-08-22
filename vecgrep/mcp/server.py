@@ -36,6 +36,7 @@ a stalled connection.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 from typing import Any
 
@@ -1692,12 +1693,109 @@ def build_oauth_root_routes(oauth_issuer_url: str) -> list:
     return routes
 
 
-def build_http_app(oauth_issuer_url: str | None = None) -> Any:
+_PROXY_TRANSIT_HEADERS = {b"x-forwarded-for", b"x-forwarded-proto"}
+_TAILSCALE_IDENTITY_HEADER = b"tailscale-user-login"
+_TAILSCALE_FUNNEL_HEADER = b"tailscale-funnel-request"
+_TAILSCALE_HEADERS_INFO = b"https://tailscale.com/s/serve-headers"
+
+
+def _mcp_request_headers(scope: dict) -> dict[bytes, bytes]:
+    return {
+        bytes(name).lower(): bytes(value)
+        for name, value in scope.get("headers", ())
+    }
+
+
+def _has_loopback_peer(scope: dict) -> bool:
+    client = scope.get("client")
+    if not client:
+        return False
+    try:
+        peer = str(client[0]).split("%", 1)[0]
+        return ipaddress.ip_address(peer).is_loopback
+    except (ValueError, TypeError, IndexError):
+        return False
+
+
+def _is_direct_loopback_mcp(scope: dict) -> bool:
+    """Return true only for an unproxied MCP request from a loopback peer.
+
+    The socket peer is authoritative; request headers can only disable this
+    bypass, never enable it. Missing/malformed peer data and any forwarding
+    marker fail closed into OAuth.
+    """
+    if scope.get("type") != "http" or scope.get("path") != "/":
+        return False
+    if not _has_loopback_peer(scope):
+        return False
+    return not bool(_mcp_request_headers(scope).keys() & _PROXY_TRANSIT_HEADERS)
+
+
+def _is_verified_tailnet_mcp(scope: dict) -> bool:
+    """Recognize a Tailscale Serve request, never anonymous Funnel traffic."""
+    if scope.get("type") != "http" or scope.get("path") != "/":
+        return False
+    if not _has_loopback_peer(scope):
+        return False
+    headers = _mcp_request_headers(scope)
+    login = headers.get(_TAILSCALE_IDENTITY_HEADER, b"").strip()
+    return bool(
+        login
+        and b"x-forwarded-for" in headers
+        and headers.get(b"tailscale-headers-info", b"").strip()
+        == _TAILSCALE_HEADERS_INFO
+        and _TAILSCALE_FUNNEL_HEADER not in headers
+    )
+
+
+class _McpOAuthBoundary:
+    """Dispatch direct-loopback MCP to the shared raw handler, else OAuth.
+
+    ``router`` intentionally proxies the secured Starlette app's router so the
+    parent service enters the one shared FastMCP session-manager lifespan.
+    """
+
+    def __init__(
+        self,
+        secured_app: Any,
+        direct_app: Any,
+        *,
+        tailscale_identity_bypass: bool,
+    ) -> None:
+        self._secured_app = secured_app
+        self._direct_app = direct_app
+        self._tailscale_identity_bypass = tailscale_identity_bypass
+        self.router = secured_app.router
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        trusted = _is_direct_loopback_mcp(scope) or (
+            self._tailscale_identity_bypass and _is_verified_tailnet_mcp(scope)
+        )
+        app = self._direct_app if trusted else self._secured_app
+        await app(scope, receive, send)
+
+
+def build_http_app(
+    oauth_issuer_url: str | None = None,
+    oauth_loopback_bypass: bool = True,
+    oauth_tailscale_identity_bypass: bool = True,
+) -> Any:
     """Build a Starlette ASGI app for the MCP HTTP endpoint.
 
     oauth_issuer_url: when set, enable the embedded OAuth 2.1 auth server on this
     endpoint (FastMCP mounts the auth routes + bearer middleware). When None, no
     OAuth — the endpoint is network-trusted by the deployment.
+
+    oauth_loopback_bypass: when true, direct loopback MCP traffic that has no
+    proxy-transit headers uses the unauthenticated handler. Proxied, remote, and
+    unclassifiable requests continue through OAuth. It is also the master kill
+    switch for the Tailscale identity bypass below.
+
+    oauth_tailscale_identity_bypass: when true, authenticated Tailscale Serve
+    requests carrying both a forwarding marker and the stripped-and-replaced
+    Tailscale login header share the network-trusted handler. Funnel supplies no
+    identity header and remains OAuth-only. This affects only the MCP handler at
+    the sub-app root; OAuth and approval routes remain protected.
 
     Uses FastMCP instead of the raw StreamableHTTPSessionManager so that:
 
@@ -1714,12 +1812,15 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
        with a non-localhost Host header; the default allowlist would reject them.
 
     The returned Starlette app registers the MCP handler at '/' (via
-    streamable_http_path='/'), so the parent FastAPI app's _BearerGatedASGI
-    middleware can strip the '/mcp' prefix and delegate correctly.
+    streamable_http_path='/'), so the parent FastAPI mount and bare-path
+    delegate can strip the '/mcp' prefix and delegate correctly.
     """
     _require_mcp()
     from mcp.server.fastmcp import FastMCP
-    from mcp.server.fastmcp.server import TransportSecuritySettings
+    from mcp.server.fastmcp.server import (
+        StreamableHTTPASGIApp,
+        TransportSecuritySettings,
+    )
 
     # OAuth: when an issuer URL is configured, run the embedded auth server.
     # FastMCP, given `auth` + `auth_server_provider`, auto-mounts /authorize,
@@ -2111,6 +2212,13 @@ def build_http_app(oauth_issuer_url: str | None = None) -> Any:
     if oauth_issuer_url:
         from ..backend.auth.approval import OAuthApprovalMiddleware
         http_app.add_middleware(OAuthApprovalMiddleware)
+        if oauth_loopback_bypass:
+            direct_app = StreamableHTTPASGIApp(fmcp.session_manager)
+            return _McpOAuthBoundary(
+                http_app,
+                direct_app,
+                tailscale_identity_bypass=oauth_tailscale_identity_bypass,
+            )
     return http_app
 
 
