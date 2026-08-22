@@ -33,6 +33,8 @@ ENV_MAP = {
     "VECGREP_QDRANT_URL": "qdrant_url",
     "VECGREP_OAUTH_ENABLED": "oauth_enabled",
     "VECGREP_OAUTH_ISSUER_URL": "oauth_issuer_url",
+    "VECGREP_OAUTH_LOOPBACK_BYPASS": "oauth_loopback_bypass",
+    "VECGREP_OAUTH_TAILSCALE_IDENTITY_BYPASS": "oauth_tailscale_identity_bypass",
     OAUTH_APPROVAL_ENV: "oauth_approval_token",
     "VECGREP_THREAD_POOL_SIZE": "thread_pool_size",
 }
@@ -47,6 +49,8 @@ EDITABLE_FIELDS = {
     "default_top_k",
     "oauth_enabled",
     "oauth_issuer_url",
+    "oauth_loopback_bypass",
+    "oauth_tailscale_identity_bypass",
     "qdrant_url",
     "backup_enabled",
     "backup_frequency",
@@ -60,7 +64,10 @@ EDITABLE_FIELDS = {
 SECRET_FIELDS = {
     "openai_api_key", "api_token", "admin_token", "oauth_approval_token",
 }
-STRUCTURAL_FIELDS = {"api_host", "api_port", "qdrant_url", "oauth_enabled", "oauth_issuer_url"}
+STRUCTURAL_FIELDS = {
+    "api_host", "api_port", "qdrant_url", "oauth_enabled",
+    "oauth_issuer_url", "oauth_loopback_bypass", "oauth_tailscale_identity_bypass",
+}
 
 
 def _home() -> Path:
@@ -91,15 +98,25 @@ class Settings:
     # routes otherwise accept only requests whose peer socket AND Host header
     # are loopback.
     admin_token: str | None = None
-    # OAuth on the /mcp endpoint. When oauth_enabled, vecgrep runs an embedded
+    # OAuth on proxied /mcp requests. When oauth_enabled, vecgrep runs an embedded
     # OAuth 2.1 authorization server (the SDK mounts /authorize, /token,
     # /.well-known and gates /mcp with bearer-token middleware) — so a client
     # that speaks OAuth (claude.ai) can authenticate. oauth_issuer_url is the
     # public base URL the MCP endpoint is reachable at (deployment-specific, set
     # via env — never hardcode). Internal callers reach /api over localhost/
-    # tailnet with no token (network-trust); OAuth gates only the public /mcp.
+    # tailnet with no token (network-trust); OAuth gates proxied /mcp traffic.
     oauth_enabled: bool = False
     oauth_issuer_url: str | None = None
+    # Preserve trusted direct-to-loopback MCP clients while OAuth protects
+    # requests that traversed a proxy. The bypass is allowed only when the peer
+    # socket is loopback and neither standard forwarding header is present.
+    # Set false to require OAuth even for direct local MCP clients.
+    oauth_loopback_bypass: bool = True
+    # Tailscale Serve strips client-supplied identity headers and adds the
+    # authenticated tailnet user's identity. Funnel deliberately supplies no
+    # identity headers. Trust that distinction for user-owned remote nodes.
+    # oauth_loopback_bypass is the master kill switch for all MCP bypasses.
+    oauth_tailscale_identity_bypass: bool = True
     # Separate owner-presence credential for the public OAuth authorize page.
     # Dynamic client registration authenticates no human by itself; without
     # this gate anyone who discovers the public MCP URL could mint a token.
@@ -179,7 +196,10 @@ def load_settings() -> Settings:
             if attr in {"api_port", "default_top_k", "backup_weekday", "backup_retention",
                         "thread_pool_size"}:
                 val = int(val)
-            elif attr in {"oauth_enabled", "backup_enabled"}:
+            elif attr in {
+                "oauth_enabled", "oauth_loopback_bypass",
+                "oauth_tailscale_identity_bypass", "backup_enabled",
+            }:
                 val = val.strip().lower() in ("1", "true", "yes", "on")
             setattr(s, attr, val)
 
@@ -307,7 +327,10 @@ def update_config(
                 value = int(value)
             except (TypeError, ValueError) as exc:
                 raise ConfigError(f"{name} must be an integer") from exc
-        if name in {"oauth_enabled", "backup_enabled"} and not isinstance(value, bool):
+        if name in {
+            "oauth_enabled", "oauth_loopback_bypass",
+            "oauth_tailscale_identity_bypass", "backup_enabled",
+        } and not isinstance(value, bool):
             raise ConfigError(f"{name} must be a boolean")
         if name in {"ollama_fallback_url", "oauth_issuer_url", "qdrant_url", "backup_destination"} and value == "":
             value = None

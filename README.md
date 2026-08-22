@@ -259,9 +259,11 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 | `VECGREP_QDRANT_URL` | unset | Use Qdrant server mode, e.g. `http://localhost:6333`. Required when `serve`, `watch`, and CLI processes need the same live store concurrently. |
 | `VECGREP_TOP_K` | `5` | Default `--top` value |
 | `VECGREP_ALIASES_FILE` | `$VECGREP_HOME/aliases.json` | Entity alias map (personal data — keep it out of any repo). See `docs/aliases.example.json`. Missing = no expansion. |
-| `VECGREP_OAUTH_ENABLED` | unset | `1` enables OAuth 2.1 on `/mcp` (embedded auth server: /authorize, /token, /.well-known). |
+| `VECGREP_OAUTH_ENABLED` | unset | `1` enables OAuth 2.1 for untrusted `/mcp` traffic (embedded auth server: /authorize, /token, /.well-known). |
 | `VECGREP_OAUTH_ISSUER_URL` | unset | Public base URL the MCP endpoint is reachable at. Required when OAuth is on. |
 | `VECGREP_OAUTH_APPROVAL_TOKEN` | unset | Strong owner approval code entered in the browser before an OAuth client may receive a code. Required when OAuth is on. |
+| `VECGREP_OAUTH_LOOPBACK_BYPASS` | `true` | Preserve direct loopback MCP clients while OAuth is on. Set `false` to require OAuth for every MCP request and disable all trusted-network bypasses. |
+| `VECGREP_OAUTH_TAILSCALE_IDENTITY_BYPASS` | `true` | When the master loopback bypass is enabled, accept authenticated Tailscale Serve users. Anonymous Funnel traffic has no identity header and still requires OAuth. |
 | `VECGREP_THREAD_POOL_SIZE` | `8` | AnyIO worker-thread cap for the HTTP service. |
 | `VECGREP_BM25_WEIGHT` | `1.5` | Weight on BM25 contribution to RRF fusion. >1 boosts literal-keyword matches over semantic noise on short queries. Set to `1.0` for pure RRF, higher for keyword-leaning ranking. |
 | `VECGREP_BM25_COVERAGE_MODE` | `penalty` | How BM25 treats docs that match only some query tokens. `penalty` keeps them but demotes the score by `(matched/total)²`; `filter` drops anything below a coverage threshold (higher precision, but can zero out the BM25 half of a multi-token query). |
@@ -419,8 +421,9 @@ If `vecgrep` isn't on `PATH` (common when you installed it inside a venv), give 
 
 `vecgrep serve` exposes `/mcp` alongside `/api/*`, so many clients can use one
 index. Authentication is intentionally separate: `VECGREP_API_TOKEN` gates the
-REST API, while MCP is either network-trusted (OAuth off) or protected by its
-own OAuth 2.1 flow (OAuth on).
+REST API, while OAuth protects untrusted MCP traffic. With OAuth on, direct
+loopback clients and authenticated Tailscale Serve users retain network trust;
+anonymous Funnel traffic must complete OAuth.
 
 For a private LAN/VPN deployment, set a REST token before binding to a private
 interface. vecgrep refuses a non-loopback bind without it:
@@ -479,7 +482,9 @@ Keep vecgrep on its default loopback bind and expose only the MCP and OAuth
 routes through the TLS proxy. Then add that `/mcp` URL under Claude.ai
 → Settings → Connectors → Custom MCP server. The client dynamically
 registers and runs the authorization-code + PKCE flow; the browser asks for the
-owner approval code before granting it. OAuth scopes are `read` and `propose`;
+owner approval code before granting it. Direct loopback MCP and authenticated
+Tailscale Serve clients keep working through the trusted-network bypass;
+anonymous Funnel clients cannot use that bypass. OAuth scopes are `read` and `propose`;
 write-shaped tools require `propose`, and no OAuth grant can bypass
 human confirmation. `/api/*` and local stdio are unaffected. See
 [docs/OAUTH.md](docs/OAUTH.md) for token lifetimes, proxy gotchas, revocation,
