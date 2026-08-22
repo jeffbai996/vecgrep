@@ -320,7 +320,7 @@ footer {{ margin: 16px 4px 0; display: flex; justify-content: space-between; fon
 <button type="submit">Approve &amp; continue</button>
 </form>
 </div>
-<footer><span>OAuth 2.1 · PKCE</span><span>approval lasts 8 hours</span></footer>
+<footer><span>OAuth 2.1 · PKCE</span><span>approval lasts a year</span></footer>
 </main>
 </body></html>"""
             return HTMLResponse(
@@ -362,7 +362,7 @@ footer {{ margin: 16px 4px 0; display: flex; justify-content: space-between; fon
             response.set_cookie(
                 APPROVAL_COOKIE,
                 approval_cookie_value(expected),
-                max_age=8 * 60 * 60,
+                max_age=365 * 86400,  # a year (Jeff 2026-08-22)
                 secure=True,
                 httponly=True,
                 samesite="strict",

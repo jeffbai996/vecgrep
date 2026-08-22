@@ -227,3 +227,21 @@ def test_metadata_advertises_public_clients(oauth_client):
     meta = oauth_client.get("/.well-known/oauth-authorization-server").json()
     assert "none" in meta["token_endpoint_auth_methods_supported"]
     assert "client_secret_post" in meta["token_endpoint_auth_methods_supported"]
+
+
+def test_token_store_survives_a_restart(tmp_path):
+    from mcp.shared.auth import OAuthClientInformationFull
+    from vecgrep.backend.auth.store import TokenStore
+    path = str(tmp_path / "oauth_state.json")
+    a = TokenStore(path=path)
+    a.save_client(OAuthClientInformationFull(client_id="c1", redirect_uris=["https://claude.ai/cb"]))
+    at = a.issue_access_token("c1", ["read"])
+    rt = a.issue_refresh_token("c1", ["read"])
+    b = TokenStore(path=path)  # "restart"
+    assert b.get_client("c1") is not None
+    assert b.load_access_token(at.token) is not None
+    assert b.load_refresh_token("c1", rt.token) is not None
+    import os, stat
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    b.revoke(at.token)
+    assert TokenStore(path=path).load_access_token(at.token) is None
