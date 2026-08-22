@@ -192,15 +192,50 @@ def create_app() -> FastAPI:
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("OAuth root routes not mounted: %s", e)
 
-        def _unlock_form(next_target: str, *, error: bool = False) -> HTMLResponse:
+        async def _unlock_context(next_target: str) -> dict:
+            """Who is asking, and for what — read off the authorize target so
+            the owner approves a named client with named permissions, not a
+            blank form (Jeff 2026-08-22: "should be as lit as logging into
+            Claude Code")."""
+            from urllib.parse import parse_qs, urlsplit
+
+            q = parse_qs(urlsplit(next_target).query)
+            client_id = (q.get("client_id") or [""])[0]
+            scopes = [x for x in (q.get("scope") or [""])[0].split() if x] or ["read"]
+            name = ""
+            if client_id:
+                try:
+                    from ..mcp.server import _shared_provider
+                    info = await _shared_provider().get_client(client_id)
+                    name = (getattr(info, "client_name", None) or "") if info else ""
+                except Exception:  # pragma: no cover - a missing name is a generic heading
+                    name = ""
+            return {"client": name, "scopes": scopes}
+
+        _SCOPE_COPY = {
+            "read": ("Search and read", "your indexed corpora"),
+            "propose": ("Propose changes", "every write still waits for your confirmation"),
+        }
+
+        def _unlock_form(next_target: str, *, error: bool = False, ctx: dict | None = None) -> HTMLResponse:
             safe_next = html.escape(safe_authorize_target(next_target), quote=True)
+            ctx = ctx or {"client": "", "scopes": ["read"]}
+            client = html.escape(ctx.get("client") or "")
+            heading = f"Connect {client} to vecgrep" if client else "Connect to vecgrep"
+            from urllib.parse import urlsplit as _us
+            host = html.escape(_us(_gs().oauth_issuer_url or "").hostname or "")
+            rows = "".join(
+                f'<li><span class="dot"></span><span><b>{html.escape(_SCOPE_COPY.get(sc, (sc, ""))[0])}</b>'
+                f'<small>{html.escape(_SCOPE_COPY.get(sc, (sc, ""))[1])}</small></span></li>'
+                for sc in ctx.get("scopes", ["read"])
+            )
             error_html = (
                 """<div class="err" role="alert">
 <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
 <circle cx="7" cy="7" r="6" stroke="currentColor" stroke-width="1.3"/>
 <path d="M7 4v3.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
 <circle cx="7" cy="9.6" r="0.8" fill="currentColor"/></svg>
-<span>That code wasn't accepted. Double-check it and try again.</span></div>"""
+<span>That code wasn't accepted.</span></div>"""
                 if error else ""
             )
             # No <script> anywhere on purpose: the CSP below is default-src 'none'
@@ -209,93 +244,83 @@ def create_app() -> FastAPI:
             # write-capable MCP access. All interaction (hover/focus/press) is
             # CSS-only. No web fonts either — default-src 'none' would block the
             # fetch anyway, and the system stack renders instantly with no FOUC.
+            # Palette is the ticker-tape board: near-black, amber accent, quiet
+            # greys — this page is part of the same product, not a vendor form.
             body = f"""<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Approve vecgrep connection</title>
+<meta name="color-scheme" content="dark">
+<title>{html.escape(heading)}</title>
 <style>
 :root {{
-  --bg: #0b0d10; --bg-2: #14171c; --bg-3: #1b1f26;
-  --fg: #e6e8eb; --fg-2: #9aa2ad; --border: #262b33;
-  --accent: #7c8cff; --accent-hi: #93a1ff;
-  --accent-ring: rgba(124,140,255,0.28); --accent-wash: rgba(124,140,255,0.14);
-  --bad: #f85149; --bad-soft: rgba(248,81,73,0.12); --bad-border: rgba(248,81,73,0.35);
+  --bg: #07080a; --bg-2: #0e1013; --bg-3: #15181d;
+  --fg: #e6e8eb; --fg-2: #9aa2ad; --muted: #6b7480; --line: #1f242b;
+  --accent: #f59e0b; --accent-hi: #fbbf24; --accent-ring: rgba(245,158,11,0.28); --accent-wash: rgba(245,158,11,0.10);
+  --bad: #f85149; --bad-soft: rgba(248,81,73,0.10); --bad-border: rgba(248,81,73,0.35);
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }}
-@media (prefers-color-scheme: light) {{
-  :root {{
-    --bg: #f6f7f9; --bg-2: #ffffff; --bg-3: #eceef2;
-    --fg: #15171c; --fg-2: #5b6573; --border: #d9dde3;
-    --accent: #5b6cf0; --accent-hi: #4453d6;
-    --accent-ring: rgba(91,108,240,0.22); --accent-wash: rgba(91,108,240,0.08);
-    --bad: #d1242f; --bad-soft: rgba(209,36,47,0.08); --bad-border: rgba(209,36,47,0.3);
-  }}
-}}
 * {{ box-sizing: border-box; }}
+html, body {{ height: 100%; }}
 body {{
   margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px;
-  background: radial-gradient(circle at 50% -10%, var(--accent-wash), transparent 60%), var(--bg);
-  color: var(--fg); font-family: var(--font); -webkit-font-smoothing: antialiased;
+  background: var(--bg); color: var(--fg); font-family: var(--font); -webkit-font-smoothing: antialiased;
 }}
-main {{ width: 100%; max-width: 380px; }}
-.card {{
-  background: var(--bg-2); border: 1px solid var(--border); border-radius: 14px;
-  padding: 32px 28px 28px; box-shadow: 0 24px 60px -30px rgba(0,0,0,0.5);
+body::before {{
+  content: ""; position: fixed; inset: 0; pointer-events: none;
+  background: radial-gradient(60% 40% at 50% 0%, var(--accent-wash), transparent 70%);
 }}
-.mark {{
-  width: 40px; height: 40px; display: grid; place-items: center; margin-bottom: 20px;
-  border-radius: 10px; background: var(--bg-3); border: 1px solid var(--border); color: var(--accent);
-}}
-h1 {{ font-size: 1.05rem; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.01em; }}
-p.sub {{ margin: 0 0 24px; color: var(--fg-2); font-size: 0.875rem; line-height: 1.5; }}
-label {{
-  display: block; font-size: 0.72rem; font-weight: 600; color: var(--fg-2);
-  text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;
-}}
+main {{ position: relative; width: 100%; max-width: 400px; }}
+.brand {{ display: flex; align-items: center; gap: 10px; margin: 0 4px 14px; color: var(--fg-2); font-size: 0.78rem; letter-spacing: 0.04em; text-transform: uppercase; }}
+.brand .mark {{ width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px; background: var(--bg-3); border: 1px solid var(--line); color: var(--accent); }}
+.brand b {{ color: var(--fg); font-weight: 600; letter-spacing: 0; text-transform: none; font-size: 0.85rem; }}
+.card {{ background: var(--bg-2); border: 1px solid var(--line); border-radius: 14px; padding: 28px 26px 24px; box-shadow: 0 30px 80px -40px rgba(0,0,0,0.8); }}
+h1 {{ font-size: 1.15rem; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; }}
+p.sub {{ margin: 0 0 18px; color: var(--fg-2); font-size: 0.86rem; line-height: 1.5; }}
+ul.scopes {{ list-style: none; margin: 0 0 22px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-3); display: grid; gap: 10px; }}
+ul.scopes li {{ display: flex; gap: 10px; align-items: flex-start; font-size: 0.84rem; line-height: 1.35; }}
+ul.scopes .dot {{ flex: none; width: 7px; height: 7px; margin-top: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }}
+ul.scopes b {{ display: block; font-weight: 600; color: var(--fg); }}
+ul.scopes small {{ display: block; color: var(--muted); font-size: 0.76rem; }}
+label {{ display: block; font-size: 0.7rem; font-weight: 600; color: var(--fg-2); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }}
 input[type="password"] {{
-  width: 100%; background: var(--bg-3); border: 1px solid var(--border); border-radius: 10px;
-  padding: 12px 14px; color: var(--fg); font: inherit; font-family: var(--mono); font-size: 0.9rem;
+  width: 100%; background: var(--bg-3); border: 1px solid var(--line); border-radius: 10px;
+  padding: 13px 14px; color: var(--fg); font: inherit; font-family: var(--mono); font-size: 0.95rem; letter-spacing: 0.08em;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }}
-input[type="password"]:focus-visible {{
-  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring);
-}}
+input[type="password"]::placeholder {{ color: var(--muted); letter-spacing: 0.2em; }}
+input[type="password"]:focus-visible {{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }}
 button {{
-  width: 100%; margin-top: 16px; padding: 12px 16px; border-radius: 10px; border: none;
-  background: var(--accent); color: #fff; font: inherit; font-weight: 600; font-size: 0.9rem;
+  width: 100%; margin-top: 14px; padding: 13px 16px; border-radius: 10px; border: none;
+  background: var(--accent); color: #0b0804; font: inherit; font-weight: 650; font-size: 0.92rem; letter-spacing: 0.01em;
   cursor: pointer; transition: background-color 120ms ease, transform 60ms ease;
 }}
 button:hover {{ background: var(--accent-hi); }}
-button:active {{ transform: scale(0.98); }}
-button:focus-visible {{ outline: 2px solid var(--accent); outline-offset: 2px; }}
-.err {{
-  display: flex; gap: 8px; align-items: flex-start; margin: 0 0 18px;
-  background: var(--bad-soft); border: 1px solid var(--bad-border); color: var(--bad);
-  border-radius: 10px; padding: 10px 12px; font-size: 0.8rem; line-height: 1.4;
-}}
-.err svg {{ flex: none; margin-top: 2px; }}
-footer {{ margin-top: 18px; text-align: center; font-size: 0.72rem; color: var(--fg-2); }}
+button:active {{ transform: scale(0.985); }}
+button:focus-visible {{ outline: 2px solid var(--accent); outline-offset: 3px; }}
+.err {{ display: flex; gap: 8px; align-items: center; margin: 0 0 16px; background: var(--bad-soft); border: 1px solid var(--bad-border); color: var(--bad); border-radius: 10px; padding: 10px 12px; font-size: 0.8rem; }}
+.err svg {{ flex: none; }}
+footer {{ margin: 16px 4px 0; display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--muted); letter-spacing: 0.04em; }}
 </style>
 <body>
 <main>
-<div class="card">
-<div class="mark">
-<svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-<rect x="4" y="9" width="12" height="8" rx="2" stroke="currentColor" stroke-width="1.5"/>
-<path d="M7 9V6.5a3 3 0 0 1 6 0V9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-<circle cx="10" cy="13" r="1.15" fill="currentColor"/></svg>
+<div class="brand">
+<span class="mark"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="13" cy="13" r="5" stroke="currentColor" stroke-width="2.4"/><path d="M17 17l4 4" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><circle cx="5" cy="6" r="1.6" fill="currentColor" opacity=".6"/><circle cx="11" cy="4" r="1.6" fill="currentColor" opacity=".6"/><circle cx="6" cy="15" r="1.6" fill="currentColor" opacity=".6"/></svg></span>
+<b>vecgrep</b><span>{host}</span>
 </div>
-<h1>Approve vecgrep access</h1>
-<p class="sub">Enter the owner approval code to authorize this connection.</p>
+<div class="card">
+<h1>{html.escape(heading)}</h1>
+<p class="sub">{("<b>" + client + "</b> is asking for access. ") if client else ""}Enter the owner approval code to allow it.</p>
+<ul class="scopes">{rows}</ul>
 {error_html}<form method="post" action="/oauth/unlock">
 <input type="hidden" name="next" value="{safe_next}">
-<label for="token">Approval code</label>
-<input id="token" name="token" type="password" autocomplete="current-password" required autofocus>
-<button type="submit">Continue</button>
+<label for="token">Owner approval code</label>
+<input id="token" name="token" type="password" autocomplete="current-password" placeholder="••••••••" required autofocus>
+<button type="submit">Approve &amp; continue</button>
 </form>
 </div>
-<footer>vecgrep &middot; secured with OAuth 2.1 + PKCE</footer>
+<footer><span>OAuth 2.1 · PKCE</span><span>approval lasts 8 hours</span></footer>
 </main>
 </body></html>"""
             return HTMLResponse(
@@ -311,7 +336,8 @@ footer {{ margin-top: 18px; text-align: center; font-size: 0.72rem; color: var(-
 
         @app.get("/oauth/unlock", response_class=HTMLResponse)
         async def oauth_unlock(next: str = "/authorize") -> HTMLResponse:
-            return _unlock_form(next)
+            target = safe_authorize_target(next)
+            return _unlock_form(target, ctx=await _unlock_context(target))
 
         @app.post("/oauth/unlock")
         async def oauth_unlock_submit(request: Request):
@@ -331,7 +357,7 @@ footer {{ margin-top: 18px; text-align: center; font-size: 0.72rem; color: var(-
             next_target = safe_authorize_target((fields.get("next") or [""])[0])
             expected = _gs().oauth_approval_token or ""
             if not provided or not hmac.compare_digest(provided, expected.strip()):
-                return _unlock_form(next_target, error=True)
+                return _unlock_form(next_target, error=True, ctx=await _unlock_context(next_target))
             response = RedirectResponse(next_target, status_code=303)
             response.set_cookie(
                 APPROVAL_COOKIE,

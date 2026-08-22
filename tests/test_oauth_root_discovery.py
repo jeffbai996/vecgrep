@@ -198,3 +198,24 @@ def test_spa_still_served_for_normal_paths(oauth_client):
     # Either the SPA HTML (frontend built) or the no-frontend JSON message —
     # just not a 500 and not an OAuth route hijacking everything.
     assert r.status_code == 200
+
+
+def test_unlock_page_names_the_client_and_its_scopes(oauth_client):
+    """The owner approves a named client with named permissions — the page
+    reads client_id + scope off the authorize target it will return to."""
+    reg = oauth_client.post("/register", json={
+        "client_name": "Claude", "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+        "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    })
+    assert reg.status_code == 201
+    cid = reg.json()["client_id"]
+    r = oauth_client.get(f"/oauth/unlock?next=/authorize?client_id={cid}%26scope=read%20propose")
+    assert r.status_code == 200
+    assert "Connect Claude to vecgrep" in r.text
+    assert "Search and read" in r.text and "Propose changes" in r.text
+    assert "<script" not in r.text
+    # unknown client: generic heading, still the form
+    r = oauth_client.get("/oauth/unlock?next=/authorize?client_id=nope")
+    assert r.status_code == 200
+    assert "Connect to vecgrep" in r.text
