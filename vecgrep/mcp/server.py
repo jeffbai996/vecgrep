@@ -1717,6 +1717,20 @@ def _has_loopback_peer(scope: dict) -> bool:
         return False
 
 
+def _has_loopback_server(scope: dict) -> bool:
+    """Confirm Uvicorn accepted this request on a loopback listener."""
+    server = scope.get("server")
+    if not server:
+        return False
+    host = str(server[0]).split("%", 1)[0]
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except (ValueError, TypeError, IndexError):
+        return False
+
+
 def _is_direct_loopback_mcp(scope: dict) -> bool:
     """Return true only for an unproxied MCP request from a loopback peer.
 
@@ -1735,7 +1749,11 @@ def _is_verified_tailnet_mcp(scope: dict) -> bool:
     """Recognize a Tailscale Serve request, never anonymous Funnel traffic."""
     if scope.get("type") != "http" or scope.get("path") != "/":
         return False
-    if not _has_loopback_peer(scope):
+    # On Windows-hosted Tailscale Serve forwarding into WSL, Uvicorn preserves
+    # the tailnet source as scope.client even though the service itself accepted
+    # the connection on 127.0.0.1. Bind locality, not peer shape, is the security
+    # invariant that makes proxy-provided identity headers trustworthy.
+    if not _has_loopback_server(scope):
         return False
     headers = _mcp_request_headers(scope)
     login = headers.get(_TAILSCALE_IDENTITY_HEADER, b"").strip()
