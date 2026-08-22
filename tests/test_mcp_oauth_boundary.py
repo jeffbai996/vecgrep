@@ -12,7 +12,11 @@ from fastapi.testclient import TestClient
 from vecgrep.backend import config as cfg_mod
 from vecgrep.backend.main import create_app
 from vecgrep.mcp import server as mcp_server
-from vecgrep.mcp.server import _is_direct_loopback_mcp, _is_verified_tailnet_mcp
+from vecgrep.mcp.server import (
+    _has_loopback_server,
+    _is_direct_loopback_mcp,
+    _is_verified_tailnet_mcp,
+)
 
 
 TEST_ISSUER = "https://example.com:10000/mcp"
@@ -42,7 +46,7 @@ def loopback_client(vg_home, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     monkeypatch.setattr(cfg_mod, "_settings", None)
     with TestClient(
         create_app(),
-        base_url="https://example.com:10000",
+        base_url="http://127.0.0.1:8765",
         client=("127.0.0.1", 50000),
     ) as client:
         yield client
@@ -161,32 +165,53 @@ def test_unclassifiable_or_non_mcp_requests_fail_closed(scope: dict) -> None:
     assert _is_direct_loopback_mcp(scope) is False
 
 
-def test_tailscale_identity_requires_loopback_peer_and_forwarding_marker() -> None:
+def test_tailscale_identity_requires_loopback_listener_and_forwarding_marker() -> None:
     identity = (b"tailscale-user-login", b"owner@example.test")
     forwarded = (b"x-forwarded-for", b"100.64.0.10")
     info = (b"tailscale-headers-info", b"https://tailscale.com/s/serve-headers")
     assert _is_verified_tailnet_mcp({
-        "type": "http", "path": "/", "client": ("127.0.0.1", 1),
+        "type": "http", "path": "/", "server": ("127.0.0.1", 8765),
+        "client": ("100.64.0.10", 1),
         "headers": [identity, forwarded, info],
     }) is True
     assert _is_verified_tailnet_mcp({
-        "type": "http", "path": "/", "client": ("192.0.2.1", 1),
+        "type": "http", "path": "/", "server": ("192.0.2.2", 8765),
+        "client": ("100.64.0.10", 1),
         "headers": [identity, forwarded, info],
     }) is False
     assert _is_verified_tailnet_mcp({
-        "type": "http", "path": "/", "client": ("127.0.0.1", 1),
+        "type": "http", "path": "/", "server": ("127.0.0.1", 8765),
+        "client": ("100.64.0.10", 1),
         "headers": [identity],
     }) is False
     assert _is_verified_tailnet_mcp({
-        "type": "http", "path": "/", "client": ("127.0.0.1", 1),
+        "type": "http", "path": "/", "server": ("127.0.0.1", 8765),
+        "client": ("100.64.0.10", 1),
         "headers": [identity, forwarded],
     }) is False
     assert _is_verified_tailnet_mcp({
-        "type": "http", "path": "/", "client": ("127.0.0.1", 1),
+        "type": "http", "path": "/", "server": ("127.0.0.1", 8765),
+        "client": ("100.64.0.10", 1),
         "headers": [
             identity, forwarded, info, (b"tailscale-funnel-request", b"?1")
         ],
     }) is False
+
+
+@pytest.mark.parametrize(
+    ("server", "expected"),
+    [
+        (("127.0.0.1", 8765), True),
+        (("::1", 8765), True),
+        (("localhost", 8765), True),
+        (("0.0.0.0", 8765), False),
+        (("192.0.2.2", 8765), False),
+        (None, False),
+    ],
+)
+def test_loopback_listener_classification(server, expected: bool) -> None:
+    scope = {"server": server} if server is not None else {}
+    assert _has_loopback_server(scope) is expected
 
 
 def test_loopback_bypass_config_defaults_true_and_parses_false(
