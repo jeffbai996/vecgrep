@@ -1690,7 +1690,7 @@ def build_oauth_root_routes(oauth_issuer_url: str) -> list:
         authorization_servers=[issuer],
         scopes_supported=["read", "propose"],
     )
-    return [advertise_public_clients(r) for r in routes]
+    return [_trace_oauth(advertise_public_clients(r)) for r in routes]
 
 
 def advertise_public_clients(route):
@@ -1706,6 +1706,109 @@ def advertise_public_clients(route):
         return route
     return Route(route.path, endpoint=_PublicClientMetadata(route.endpoint),
                  methods=list(route.methods or ["GET", "OPTIONS"]))
+
+
+def _trace_oauth(route):
+    """Log what an OAuth client sends to /register, /authorize and /token and
+    what it gets back (secrets redacted). On by VECGREP_OAUTH_TRACE=1 — the
+    only way to see why a remote client's handshake dies after a 2xx from us.
+    The SDK mixes endpoint shapes: /authorize is a plain `handle(request)`
+    handler, /register and /token are CORS-wrapped raw ASGI apps; a wrapper of
+    the wrong shape 500s the route (it did, 2026-08-22)."""
+    import inspect
+    import os
+    from starlette.routing import Route
+    if os.environ.get("VECGREP_OAUTH_TRACE", "").strip() != "1":
+        return route
+    if not isinstance(route, Route) or route.path not in ("/register", "/authorize", "/token"):
+        return route
+    methods = list(route.methods or ["GET", "POST"])
+    inner = route.endpoint
+    if inspect.isfunction(inner) or inspect.ismethod(inner):
+        tracer = _OAuthTrace(inner, route.path)
+
+        async def handle(request):
+            return await tracer(request)
+
+        return Route(route.path, endpoint=handle, methods=methods)
+    return Route(route.path, endpoint=_OAuthTraceASGI(inner, route.path), methods=methods)
+
+
+def _trace_log(method, path, query, hdrs, body_in, status, loc, out):
+    import logging
+    import re
+    redact = lambda t: re.sub(r'("(?:client_secret|code|access_token|refresh_token)"\s*:\s*")[^"]+', r"\1<redacted>", t)
+    body_in = re.sub(r"(code=|code_verifier=|client_secret=)[^&]+", r"\1<redacted>", body_in)
+    query = re.sub(r"(code_challenge=)[^&]+", r"\1<c>", query)
+    loc = re.sub(r"(code=)[^&]+", r"\1<redacted>", loc)
+    logging.getLogger("vecgrep.oauth.trace").warning(
+        "oauth-trace %s %s q=%s hdrs=%s in=%s -> %s loc=%s out=%s",
+        method, path, query[:400], hdrs, redact(body_in)[:800], status, loc[:200], redact(out)[:800])
+
+
+_TRACE_HDRS = ("content-type", "accept", "user-agent", "x-forwarded-for")
+
+
+class _OAuthTrace:
+    """Wraps a `handle(request)` handler."""
+
+    def __init__(self, inner, path):
+        self._inner, self._path = inner, path
+
+    async def __call__(self, request):
+        body_in = (await request.body()).decode("utf-8", "replace")
+        hdrs = {k: v for k, v in request.headers.items() if k in _TRACE_HDRS}
+        try:
+            resp = await self._inner(request)
+        except Exception as exc:
+            _trace_log(request.method, self._path, request.url.query, hdrs, body_in, f"EXC {exc!r}", "", "")
+            raise
+        out = getattr(resp, "body", b"")
+        out = out.decode("utf-8", "replace") if isinstance(out, (bytes, bytearray)) else ""
+        _trace_log(request.method, self._path, request.url.query, hdrs, body_in, resp.status_code, resp.headers.get("location", ""), out)
+        return resp
+
+
+class _OAuthTraceASGI:
+    """Wraps a raw ASGI endpoint (the SDK's CORS-wrapped handlers)."""
+
+    def __init__(self, inner, path):
+        self._inner, self._path = inner, path
+
+    async def __call__(self, scope, receive, send):
+        body_in = []
+
+        async def recv():
+            m = await receive()
+            if m.get("type") == "http.request":
+                body_in.append(m.get("body", b""))
+            return m
+
+        start = None
+        out = []
+
+        async def cap(m):
+            nonlocal start
+            if m["type"] == "http.response.start":
+                start = m
+            elif m["type"] == "http.response.body":
+                out.append(m.get("body", b""))
+            await send(m)
+
+        hdrs = {k.decode(): v.decode() for k, v in scope.get("headers", []) if k.decode() in _TRACE_HDRS}
+        try:
+            await self._inner(scope, recv, cap)
+        except Exception as exc:
+            _trace_log(scope.get("method"), self._path, scope.get("query_string", b"").decode("latin-1"), hdrs,
+                       b"".join(body_in).decode("utf-8", "replace"), f"EXC {exc!r}", "", "")
+            raise
+        loc = ""
+        for k, v in (start or {}).get("headers", []):
+            if k.lower() == b"location":
+                loc = v.decode()
+        _trace_log(scope.get("method"), self._path, scope.get("query_string", b"").decode("latin-1"), hdrs,
+                   b"".join(body_in).decode("utf-8", "replace"), start["status"] if start else "?", loc,
+                   b"".join(out).decode("utf-8", "replace"))
 
 
 class _PublicClientMetadata:
