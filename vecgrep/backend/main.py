@@ -23,9 +23,12 @@ from .api.routes import public_router, router
 from .api.admin import router as admin_router
 from .auth.approval import (
     APPROVAL_COOKIE,
+    TAILNET_INTENT_COOKIE,
     OAuthApprovalMiddleware,
     approval_cookie_value,
     safe_authorize_target,
+    tailnet_approval_intent,
+    verified_tailnet_login,
 )
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -217,7 +220,13 @@ def create_app() -> FastAPI:
             "propose": ("Propose changes", "every write still waits for your confirmation"),
         }
 
-        def _unlock_form(next_target: str, *, error: bool = False, ctx: dict | None = None) -> HTMLResponse:
+        def _unlock_form(
+            next_target: str,
+            *,
+            error: bool = False,
+            ctx: dict | None = None,
+            tailnet_login: str | None = None,
+        ) -> HTMLResponse:
             safe_next = html.escape(safe_authorize_target(next_target), quote=True)
             ctx = ctx or {"client": "", "scopes": ["read"]}
             client = html.escape(ctx.get("client") or "")
@@ -229,15 +238,34 @@ def create_app() -> FastAPI:
                 f'<small>{html.escape(_SCOPE_COPY.get(sc, (sc, ""))[1])}</small></span></li>'
                 for sc in ctx.get("scopes", ["read"])
             )
+            error_copy = (
+                "That approval expired. Review the request and try again."
+                if tailnet_login
+                else "That code wasn't accepted."
+            )
             error_html = (
                 """<div class="err" role="alert">
 <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
 <circle cx="7" cy="7" r="6" stroke="currentColor" stroke-width="1.3"/>
 <path d="M7 4v3.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
 <circle cx="7" cy="9.6" r="0.8" fill="currentColor"/></svg>
-<span>That code wasn't accepted.</span></div>"""
+<span>""" + html.escape(error_copy) + """</span></div>"""
                 if error else ""
             )
+            if tailnet_login:
+                intent = tailnet_approval_intent(
+                    _gs().oauth_approval_token or "",
+                    tailnet_login,
+                    safe_authorize_target(next_target),
+                )
+                approval_copy = "Approve this request from your verified Tailscale session."
+                controls = f"""<input type="hidden" name="tailnet_intent" value="{intent}">
+<button type="submit">Approve &amp; continue</button>"""
+            else:
+                approval_copy = "Enter the owner approval code to allow it."
+                controls = """<label for="token">Owner approval code</label>
+<input id="token" name="token" type="password" autocomplete="current-password" placeholder="••••••••" required autofocus>
+<button type="submit">Approve &amp; continue</button>"""
             # No <script> anywhere on purpose: the CSP below is default-src 'none'
             # with only style-src 'unsafe-inline' allowed, so this stays a plain
             # POST form with zero script surface on the one page that gates real
@@ -311,19 +339,17 @@ footer {{ margin: 16px 4px 0; display: flex; justify-content: space-between; fon
 </div>
 <div class="card">
 <h1>{html.escape(heading)}</h1>
-<p class="sub">{("<b>" + client + "</b> is asking for access. ") if client else ""}Enter the owner approval code to allow it.</p>
+<p class="sub">{("<b>" + client + "</b> is asking for access. ") if client else ""}{html.escape(approval_copy)}</p>
 <ul class="scopes">{rows}</ul>
 {error_html}<form method="post" action="/oauth/unlock">
 <input type="hidden" name="next" value="{safe_next}">
-<label for="token">Owner approval code</label>
-<input id="token" name="token" type="password" autocomplete="current-password" placeholder="••••••••" required autofocus>
-<button type="submit">Approve &amp; continue</button>
+{controls}
 </form>
 </div>
 <footer><span>OAuth 2.1 · PKCE</span><span>approval lasts a year</span></footer>
 </main>
 </body></html>"""
-            return HTMLResponse(
+            response = HTMLResponse(
                 body,
                 status_code=401 if error else 200,
                 headers={
@@ -333,11 +359,26 @@ footer {{ margin: 16px 4px 0; display: flex; justify-content: space-between; fon
                     "X-Content-Type-Options": "nosniff",
                 },
             )
+            if tailnet_login:
+                response.set_cookie(
+                    TAILNET_INTENT_COOKIE,
+                    intent,
+                    max_age=10 * 60,
+                    secure=True,
+                    httponly=True,
+                    samesite="strict",
+                    path="/",
+                )
+            return response
 
         @app.get("/oauth/unlock", response_class=HTMLResponse)
-        async def oauth_unlock(next: str = "/authorize") -> HTMLResponse:
+        async def oauth_unlock(request: Request, next: str = "/authorize") -> HTMLResponse:
             target = safe_authorize_target(next)
-            return _unlock_form(target, ctx=await _unlock_context(target))
+            return _unlock_form(
+                target,
+                ctx=await _unlock_context(target),
+                tailnet_login=verified_tailnet_login(request.scope),
+            )
 
         @app.post("/oauth/unlock")
         async def oauth_unlock_submit(request: Request):
@@ -356,8 +397,31 @@ footer {{ margin: 16px 4px 0; display: flex; justify-content: space-between; fon
             provided = (fields.get("token") or [""])[0].strip()
             next_target = safe_authorize_target((fields.get("next") or [""])[0])
             expected = _gs().oauth_approval_token or ""
-            if not provided or not hmac.compare_digest(provided, expected.strip()):
-                return _unlock_form(next_target, error=True, ctx=await _unlock_context(next_target))
+            tailnet_login = verified_tailnet_login(request.scope)
+            provided_intent = (fields.get("tailnet_intent") or [""])[0]
+            cookie_intent = request.cookies.get(TAILNET_INTENT_COOKIE, "")
+            expected_intent = (
+                tailnet_approval_intent(expected, tailnet_login, next_target)
+                if tailnet_login
+                else ""
+            )
+            tailnet_approved = bool(
+                provided_intent
+                and cookie_intent
+                and expected_intent
+                and hmac.compare_digest(provided_intent, expected_intent)
+                and hmac.compare_digest(cookie_intent, expected_intent)
+            )
+            code_approved = bool(
+                provided and hmac.compare_digest(provided, expected.strip())
+            )
+            if not tailnet_approved and not code_approved:
+                return _unlock_form(
+                    next_target,
+                    error=True,
+                    ctx=await _unlock_context(next_target),
+                    tailnet_login=tailnet_login,
+                )
             response = RedirectResponse(next_target, status_code=303)
             response.set_cookie(
                 APPROVAL_COOKIE,
@@ -367,6 +431,13 @@ footer {{ margin: 16px 4px 0; display: flex; justify-content: space-between; fon
                 httponly=True,
                 samesite="strict",
                 path="/",
+            )
+            response.delete_cookie(
+                TAILNET_INTENT_COOKIE,
+                path="/",
+                secure=True,
+                httponly=True,
+                samesite="strict",
             )
             response.headers["Cache-Control"] = "no-store"
             return response

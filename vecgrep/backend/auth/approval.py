@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 from urllib.parse import urlencode
 
 from starlette.datastructures import Headers
@@ -16,7 +17,9 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 
 APPROVAL_COOKIE = "__Host-vecgrep_oauth_approved"
+TAILNET_INTENT_COOKIE = "__Host-vecgrep_oauth_intent"
 AUTHORIZE_PATHS = frozenset({"/authorize", "/mcp/authorize"})
+_TAILSCALE_HEADERS_INFO = "https://tailscale.com/s/serve-headers"
 
 
 def approval_cookie_value(secret: str) -> str:
@@ -37,6 +40,50 @@ def safe_authorize_target(raw: str | None) -> str:
     if parsed.scheme or parsed.netloc or parsed.path not in AUTHORIZE_PATHS:
         return "/authorize"
     return parsed.path + (f"?{parsed.query}" if parsed.query else "")
+
+
+def verified_tailnet_login(scope: Scope) -> str | None:
+    """Return tailscaled's verified Serve identity, never Funnel input.
+
+    The service's loopback-only listener is what makes proxy-supplied identity
+    trustworthy. Tailscale strips incoming identity headers before supplying
+    its own on Serve requests; Funnel does not receive an identity header.
+    """
+    if scope.get("type") != "http":
+        return None
+    server = scope.get("server")
+    if not server:
+        return None
+    host = str(server[0]).split("%", 1)[0]
+    try:
+        loopback = (
+            host.lower() == "localhost" or ipaddress.ip_address(host).is_loopback
+        )
+    except (ValueError, TypeError, IndexError):
+        loopback = False
+    if not loopback:
+        return None
+    headers = Headers(scope=scope)
+    login = headers.get("tailscale-user-login", "").strip()
+    if (
+        not login
+        or not headers.get("x-forwarded-for", "").strip()
+        or headers.get("tailscale-headers-info", "").strip() != _TAILSCALE_HEADERS_INFO
+        or "tailscale-funnel-request" in headers
+    ):
+        return None
+    return login
+
+
+def tailnet_approval_intent(secret: str, login: str, target: str) -> str:
+    """Bind a one-click approval to the verified identity and OAuth request."""
+    payload = (
+        b"vecgrep-oauth-tailnet-intent-v1\0"
+        + login.encode()
+        + b"\0"
+        + target.encode()
+    )
+    return hmac.new(secret.strip().encode(), payload, hashlib.sha256).hexdigest()
 
 
 class OAuthApprovalMiddleware:

@@ -1855,9 +1855,6 @@ _PROXY_TRANSIT_HEADERS = {
     b"x-forwarded-for", b"x-forwarded-proto", b"x-forwarded-host", b"forwarded",
     b"tailscale-user-login", b"tailscale-headers-info", b"tailscale-funnel-request",
 }
-_TAILSCALE_IDENTITY_HEADER = b"tailscale-user-login"
-_TAILSCALE_FUNNEL_HEADER = b"tailscale-funnel-request"
-_TAILSCALE_HEADERS_INFO = b"https://tailscale.com/s/serve-headers"
 
 
 def _mcp_request_headers(scope: dict) -> dict[bytes, bytes]:
@@ -1910,21 +1907,9 @@ def _is_verified_tailnet_mcp(scope: dict) -> bool:
     """Recognize a Tailscale Serve request, never anonymous Funnel traffic."""
     if scope.get("type") != "http" or scope.get("path") != "/":
         return False
-    # On Windows-hosted Tailscale Serve forwarding into WSL, Uvicorn preserves
-    # the tailnet source as scope.client even though the service itself accepted
-    # the connection on 127.0.0.1. Bind locality, not peer shape, is the security
-    # invariant that makes proxy-provided identity headers trustworthy.
-    if not _has_loopback_server(scope):
-        return False
-    headers = _mcp_request_headers(scope)
-    login = headers.get(_TAILSCALE_IDENTITY_HEADER, b"").strip()
-    return bool(
-        login
-        and b"x-forwarded-for" in headers
-        and headers.get(b"tailscale-headers-info", b"").strip()
-        == _TAILSCALE_HEADERS_INFO
-        and _TAILSCALE_FUNNEL_HEADER not in headers
-    )
+    from ..backend.auth.approval import verified_tailnet_login
+
+    return verified_tailnet_login(scope) is not None
 
 
 class _McpOAuthBoundary:

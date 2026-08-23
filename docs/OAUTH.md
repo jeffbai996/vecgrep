@@ -25,8 +25,9 @@ VECGREP_OAUTH_TAILSCALE_IDENTITY_BYPASS=true
 
 # 3. Point the client at https://<your-public-host>/mcp and connect.
 #    claude.ai: Settings → Connectors → Add custom connector → paste the URL.
-#    It discovers the auth server, registers itself, and opens a browser prompt
-#    for the owner approval code. There is no client ID to pre-provision.
+#    It discovers the auth server, registers itself, and opens a browser prompt.
+#    Verified Tailscale Serve sessions get one-click approval; other sessions
+#    use the owner approval code. There is no client ID to pre-provision.
 ```
 
 The TLS proxy must expose the configured MCP path plus `/authorize`, `/token`,
@@ -57,9 +58,12 @@ implements one interface (`OAuthAuthorizationServerProvider`, 9 methods in
 
 Dynamic registration does **not** prove that the person connecting is the
 vecgrep owner. Before `/authorize` can mint a code, vecgrep therefore requires
-the separate `VECGREP_OAUTH_APPROVAL_TOKEN` in a no-store browser form. The
-resulting cookie is HttpOnly, Secure, SameSite=Strict, short-lived, and contains
-only an HMAC verifier—not the approval token.
+an explicit approval in a no-store browser form. A verified Tailscale Serve
+identity gets a one-click form protected by a request-bound, ten-minute,
+SameSite=Strict intent cookie. Funnel and unverified sessions must enter the
+separate `VECGREP_OAUTH_APPROVAL_TOKEN`. The resulting year-long approval cookie
+is HttpOnly, Secure, SameSite=Strict, and contains only an HMAC verifier—not the
+approval token.
 
 Token lifecycle (the store's invariants):
 
