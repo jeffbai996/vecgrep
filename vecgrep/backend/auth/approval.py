@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import ipaddress
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from starlette.datastructures import Headers
 from starlette.responses import RedirectResponse
@@ -33,13 +33,45 @@ def approval_cookie_value(secret: str) -> str:
 
 def safe_authorize_target(raw: str | None) -> str:
     """Keep post-unlock redirects on one of the two local authorize routes."""
-    from urllib.parse import urlsplit
-
     value = raw or "/authorize"
     parsed = urlsplit(value)
     if parsed.scheme or parsed.netloc or parsed.path not in AUTHORIZE_PATHS:
         return "/authorize"
     return parsed.path + (f"?{parsed.query}" if parsed.query else "")
+
+
+def oauth_callback_origin(authorize_target: str) -> str | None:
+    """Return the registered callback origin for the unlock page's CSP.
+
+    Safari applies ``form-action`` across redirects. The unlock form posts to
+    vecgrep and then `/authorize` redirects to the OAuth client's callback, so
+    a self-only policy silently blocks an otherwise valid flow. Only a clean
+    HTTPS origin (or HTTP loopback for local development) is admitted here;
+    the provider still performs the authoritative redirect-URI registration
+    check before issuing an authorization code.
+    """
+    target = urlsplit(safe_authorize_target(authorize_target))
+    redirect_uri = (parse_qs(target.query).get("redirect_uri") or [""])[0]
+    try:
+        parsed = urlsplit(redirect_uri)
+        host = parsed.hostname or ""
+        port = parsed.port
+    except ValueError:
+        return None
+    if not host or parsed.username or parsed.password:
+        return None
+    if parsed.scheme == "https":
+        pass
+    elif parsed.scheme == "http":
+        try:
+            if host.lower() != "localhost" and not ipaddress.ip_address(host).is_loopback:
+                return None
+        except ValueError:
+            return None
+    else:
+        return None
+    rendered_host = f"[{host}]" if ":" in host else host
+    return f"{parsed.scheme}://{rendered_host}" + (f":{port}" if port else "")
 
 
 def verified_tailnet_login(scope: Scope) -> str | None:

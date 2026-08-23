@@ -63,7 +63,9 @@ identity gets a one-click form protected by a request-bound, ten-minute,
 SameSite=Strict intent cookie. Funnel and unverified sessions must enter the
 separate `VECGREP_OAUTH_APPROVAL_TOKEN`. The resulting year-long approval cookie
 is HttpOnly, Secure, SameSite=Strict, and contains only an HMAC verifier—not the
-approval token.
+approval token. The page's CSP permits form navigation only to vecgrep itself
+and the registered OAuth callback origin; this is required for Safari, which
+applies `form-action` across the authorization redirect chain.
 
 Token lifecycle (the store's invariants):
 
