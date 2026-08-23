@@ -10,6 +10,7 @@ the right keys), not just status — the miss that bit us before.
 """
 from __future__ import annotations
 
+import re
 from typing import Iterator
 
 import pytest
@@ -19,12 +20,18 @@ pytest.importorskip("mcp")
 from fastapi.testclient import TestClient
 
 from vecgrep.backend import config as cfg_mod
-from vecgrep.backend.auth.approval import APPROVAL_COOKIE
+from vecgrep.backend.auth.approval import APPROVAL_COOKIE, TAILNET_INTENT_COOKIE
 from vecgrep.backend.main import create_app
 from vecgrep.mcp.server import _oauth_resource
 
 TEST_APPROVAL = "a" * 40
 FORM_TOKEN_FIELD = "to" + "ken"
+TAILNET_HEADERS = {
+    "X-Forwarded-For": "100.64.0.10",
+    "X-Forwarded-Proto": "https",
+    "Tailscale-User-Login": "owner@example.test",
+    "Tailscale-Headers-Info": "https://tailscale.com/s/serve-headers",
+}
 
 
 @pytest.fixture
@@ -125,6 +132,66 @@ def test_owner_unlock_rejects_whitespace_only_token(oauth_client):
     )
     assert r.status_code == 401
     assert APPROVAL_COOKIE not in r.cookies
+
+
+def test_verified_tailnet_owner_gets_csrf_bound_one_click_approval(oauth_client):
+    target = "/authorize?response_type=code&client_id=x"
+    with TestClient(create_app(), base_url="https://127.0.0.1:8765") as client:
+        page = client.get(
+            "/oauth/unlock", params={"next": target}, headers=TAILNET_HEADERS
+        )
+        assert page.status_code == 200
+        assert 'name="token"' not in page.text
+        assert "verified Tailscale session" in page.text
+        match = re.search(r'name="tailnet_intent" value="([a-f0-9]+)"', page.text)
+        assert match
+        assert TAILNET_INTENT_COOKIE in page.cookies
+
+        approved = client.post(
+            "/oauth/unlock",
+            data={"next": target, "tailnet_intent": match.group(1)},
+            headers=TAILNET_HEADERS,
+            follow_redirects=False,
+        )
+        assert approved.status_code == 303
+        assert approved.headers["location"] == target
+        assert APPROVAL_COOKIE in approved.cookies
+
+
+def test_tailnet_one_click_rejects_missing_or_cross_site_intent(oauth_client):
+    target = "/authorize?response_type=code&client_id=x"
+    with TestClient(create_app(), base_url="https://127.0.0.1:8765") as client:
+        page = client.get(
+            "/oauth/unlock", params={"next": target}, headers=TAILNET_HEADERS
+        )
+        intent = re.search(
+            r'name="tailnet_intent" value="([a-f0-9]+)"', page.text
+        ).group(1)
+        client.cookies.delete(TAILNET_INTENT_COOKIE)
+        rejected = client.post(
+            "/oauth/unlock",
+            data={"next": target, "tailnet_intent": intent},
+            headers=TAILNET_HEADERS | {"Origin": "https://evil.example"},
+            follow_redirects=False,
+        )
+        assert rejected.status_code == 401
+        assert APPROVAL_COOKIE not in rejected.cookies
+
+
+def test_funnel_or_unverified_proxy_still_requires_owner_code(oauth_client):
+    target = "/authorize?response_type=code&client_id=x"
+    funnel = oauth_client.get(
+        "/oauth/unlock",
+        params={"next": target},
+        headers=TAILNET_HEADERS | {"Tailscale-Funnel-Request": "?1"},
+    )
+    non_loopback = oauth_client.get(
+        "/oauth/unlock", params={"next": target}, headers=TAILNET_HEADERS
+    )
+    for page in (funnel, non_loopback):
+        assert page.status_code == 200
+        assert 'name="token"' in page.text
+        assert 'name="tailnet_intent"' not in page.text
 
 
 def test_unlock_refuses_external_redirect(oauth_client):
