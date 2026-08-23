@@ -222,7 +222,7 @@ def test_proposal_store_roundtrips_is_delete(store, corpus_dir):
     assert got is not None and got.is_delete is True
 
 
-# --- write-through: confirm routes a mirror-corpus op upstream (Jeff 2026-06-25) ---
+# --- write-through: confirm routes a mirror-corpus operation upstream ---
 
 def test_writethrough_edit_routes_upstream_skips_mirror(corpus_dir, store, monkeypatch, tmp_path):
     # A mirror doc exists locally; with a write-through cmd set, confirm must NOT
@@ -232,8 +232,8 @@ def test_writethrough_edit_routes_upstream_skips_mirror(corpus_dir, store, monke
                    meta={"origin": "human"})
     store.put(pr)
     seen = tmp_path / "seen.json"
-    # The env key is derived from the corpus name: shared-memory -> SQUAD_STORE.
-    monkeypatch.setenv("VECGREP_WRITETHROUGH_SQUAD_STORE", f"cat > {seen}")
+    # The env key is derived from the corpus name.
+    monkeypatch.setenv("VECGREP_WRITETHROUGH_SHARED_MEMORY", f"cat > {seen}")
     svc = _FakeService()
     res = C.confirm(pr.proposal_id, store, svc, "shared-memory", corpus_dir,
                     confirmed_by="owner")
@@ -253,7 +253,7 @@ def test_writethrough_delete_routes_upstream(corpus_dir, store, monkeypatch, tmp
     pr = P.propose_delete("shared-memory", "memory-50", corpus_dir, meta={"origin": "human"})
     store.put(pr)
     seen = tmp_path / "seen.json"
-    monkeypatch.setenv("VECGREP_WRITETHROUGH_SQUAD_STORE", f"cat > {seen}")
+    monkeypatch.setenv("VECGREP_WRITETHROUGH_SHARED_MEMORY", f"cat > {seen}")
     svc = _FakeService()
     res = C.confirm(pr.proposal_id, store, svc, "shared-memory", corpus_dir,
                     confirmed_by="owner")
@@ -272,7 +272,7 @@ def test_writethrough_failure_does_not_consume_proposal(corpus_dir, store, monke
     pr = P.propose("shared-memory", "new", corpus_dir, edit_id="memory-7",
                    meta={"origin": "human"})
     store.put(pr)
-    monkeypatch.setenv("VECGREP_WRITETHROUGH_SQUAD_STORE", "exit 3")
+    monkeypatch.setenv("VECGREP_WRITETHROUGH_SHARED_MEMORY", "exit 3")
     res = C.confirm(pr.proposal_id, store, _FakeService(), "shared-memory",
                     corpus_dir, confirmed_by="owner")
     assert res.ok is False and "write-through failed" in res.message
@@ -287,7 +287,7 @@ def test_writethrough_protected_needs_ack(corpus_dir, store, monkeypatch, tmp_pa
                    meta={"origin": "human"})
     store.put(pr)
     seen = tmp_path / "seen.json"
-    monkeypatch.setenv("VECGREP_WRITETHROUGH_SQUAD_STORE", f"cat > {seen}")
+    monkeypatch.setenv("VECGREP_WRITETHROUGH_SHARED_MEMORY", f"cat > {seen}")
     with pytest.raises(C.ConfirmError):
         C.confirm(pr.proposal_id, store, _FakeService(), "shared-memory", corpus_dir,
                   confirmed_by="owner", protected_ack="wrong")
@@ -296,7 +296,7 @@ def test_writethrough_protected_needs_ack(corpus_dir, store, monkeypatch, tmp_pa
 
 def test_no_writethrough_env_uses_normal_path(corpus_dir, store, monkeypatch):
     # Without a write-through cmd for the corpus, confirm writes the mirror as usual.
-    monkeypatch.delenv("VECGREP_WRITETHROUGH_SQUAD_STORE", raising=False)
+    monkeypatch.delenv("VECGREP_WRITETHROUGH_SHARED_MEMORY", raising=False)
     pr = P.propose("shared-memory", "local body", corpus_dir, meta={"origin": "human"})
     store.put(pr)
     svc = _FakeService(); svc._last_written = pr.target_path
@@ -314,7 +314,7 @@ def test_writethrough_payload_carries_meta(corpus_dir, store, monkeypatch, tmp_p
                          "tags": ["infra", "vecgrep"]})
     store.put(pr)
     seen = tmp_path / "seen.json"
-    monkeypatch.setenv("VECGREP_WRITETHROUGH_SQUAD_STORE", f"cat > {seen}")
+    monkeypatch.setenv("VECGREP_WRITETHROUGH_SHARED_MEMORY", f"cat > {seen}")
     svc = _FakeService()
     res = C.confirm(pr.proposal_id, store, svc, "shared-memory", corpus_dir,
                     confirmed_by="owner")

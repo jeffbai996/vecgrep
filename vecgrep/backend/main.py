@@ -26,6 +26,7 @@ from .auth.approval import (
     TAILNET_INTENT_COOKIE,
     OAuthApprovalMiddleware,
     approval_cookie_value,
+    oauth_callback_origin,
     safe_authorize_target,
     tailnet_approval_intent,
     verified_tailnet_login,
@@ -266,11 +267,16 @@ def create_app() -> FastAPI:
                 controls = """<label for="token">Owner approval code</label>
 <input id="token" name="token" type="password" autocomplete="current-password" placeholder="••••••••" required autofocus>
 <button type="submit">Approve &amp; continue</button>"""
+            callback_origin = oauth_callback_origin(next_target)
+            form_action = "'self'" + (f" {callback_origin}" if callback_origin else "")
             # No <script> anywhere on purpose: the CSP below is default-src 'none'
             # with only style-src 'unsafe-inline' allowed, so this stays a plain
             # POST form with zero script surface on the one page that gates real
             # write-capable MCP access. All interaction (hover/focus/press) is
-            # CSS-only. No web fonts either — default-src 'none' would block the
+            # CSS-only. `form-action` also admits the registered callback origin:
+            # Safari applies it across the POST -> authorize -> callback redirect
+            # chain and otherwise leaves the owner staring at this page. No web
+            # fonts either — default-src 'none' would block the
             # fetch anyway, and the system stack renders instantly with no FOUC.
             # Palette is the ticker-tape board: near-black, amber accent, quiet
             # greys — this page is part of the same product, not a vendor form.
@@ -354,7 +360,11 @@ footer {{ margin: 16px 4px 0; display: flex; justify-content: space-between; fon
                 status_code=401 if error else 200,
                 headers={
                     "Cache-Control": "no-store",
-                    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+                    "Content-Security-Policy": (
+                        "default-src 'none'; style-src 'unsafe-inline'; "
+                        f"form-action {form_action}; base-uri 'none'; "
+                        "frame-ancestors 'none'"
+                    ),
                     "Referrer-Policy": "no-referrer",
                     "X-Content-Type-Options": "nosniff",
                 },

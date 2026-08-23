@@ -133,7 +133,7 @@ def test_status_empty_corpora_renders_cleanly(vg_home: Path) -> None:
 
 def test_status_renders_updated_age_column(vg_home: Path) -> None:
     """The text table should include a relative-time UPDATED column so
-    you can spot a stale corpus across machines (e.g. host-a vs Mac)."""
+    you can spot a stale corpus across machines."""
     import time
 
     runner = CliRunner()

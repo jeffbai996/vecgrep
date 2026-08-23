@@ -2824,7 +2824,7 @@ def _filter_matches(
     if f.startswith("speaker:") or f.startswith("author:"):
         # Chunk-level membership: a chunk containing ANY line by NAME passes.
         # Case-insensitive; the archiver's " [bot]" suffix is stripped on both
-        # sides so `speaker:claude_host-a` matches "claude_host-a [bot]".
+        # sides so `speaker:analysis_bot` matches "analysis_bot [bot]".
         # Chunks without enrichment (pre-reindex) fail closed — hard filter.
         want = f.split(":", 1)[1].strip().lower().removesuffix(" [bot]").strip()
         if not want:

@@ -1,6 +1,6 @@
 """Document-date extraction tests.
 
-Covers the real formats in production: shared-memory memory files (`Saved: <iso>`),
+Covers the real formats in production: shared-memory files (`Saved: <iso>`),
 transcript files (frontmatter `date:` + `YYYY-MM-DD` filename), and the graceful
 fallbacks (filename date, mtime, None).
 """
@@ -20,7 +20,7 @@ def _epoch(iso: str) -> float:
 
 
 def test_saved_line_iso_with_microseconds_and_tz() -> None:
-    """shared-memory memory format: 'Saved: 2026-05-18T06:45:21.178768+00:00'."""
+    """Shared-memory format: 'Saved: 2026-05-18T06:45:21.178768+00:00'."""
     text = "# Memory\n\nName: foo\nSaved: 2026-05-18T06:45:21.178768+00:00\n\nbody"
     ts = extract_timestamp(text)
     assert ts == _epoch("2026-05-18T06:45:21.178768+00:00")

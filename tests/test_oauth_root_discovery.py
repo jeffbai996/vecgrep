@@ -20,7 +20,11 @@ pytest.importorskip("mcp")
 from fastapi.testclient import TestClient
 
 from vecgrep.backend import config as cfg_mod
-from vecgrep.backend.auth.approval import APPROVAL_COOKIE, TAILNET_INTENT_COOKIE
+from vecgrep.backend.auth.approval import (
+    APPROVAL_COOKIE,
+    TAILNET_INTENT_COOKIE,
+    oauth_callback_origin,
+)
 from vecgrep.backend.main import create_app
 from vecgrep.mcp.server import _oauth_resource
 
@@ -132,6 +136,29 @@ def test_owner_unlock_rejects_whitespace_only_token(oauth_client):
     )
     assert r.status_code == 401
     assert APPROVAL_COOKIE not in r.cookies
+
+
+def test_unlock_csp_allows_only_registered_callback_origin(oauth_client):
+    target = (
+        "/authorize?client_id=x&redirect_uri="
+        "https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback"
+    )
+    page = oauth_client.get("/oauth/unlock", params={"next": target})
+    policy = page.headers["content-security-policy"]
+    assert "form-action 'self' https://claude.ai;" in policy
+    assert "/api/mcp/auth_callback" not in policy
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "/authorize?redirect_uri=javascript%3Aalert(1)",
+        "/authorize?redirect_uri=https%3A%2F%2Fuser%40evil.example%2Fcb",
+        "/authorize?redirect_uri=http%3A%2F%2Fevil.example%2Fcb",
+    ],
+)
+def test_callback_csp_origin_rejects_unsafe_urls(target):
+    assert oauth_callback_origin(target) is None
 
 
 def test_verified_tailnet_owner_gets_csrf_bound_one_click_approval(oauth_client):

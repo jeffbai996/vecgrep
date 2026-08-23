@@ -41,7 +41,7 @@ def _writethrough_cmd(corpus: str) -> str | None:
     lives entirely in the operator's command, never in vecgrep source.
 
     Corpus names aren't valid env-var suffixes verbatim (dashes), so we map any
-    non-alphanumeric char to '_' and uppercase: 'shared-memory' → SQUAD_STORE."""
+    non-alphanumeric char to '_' and uppercase: 'shared-memory' → SHARED_MEMORY."""
     key = "VECGREP_WRITETHROUGH_" + "".join(
         c.upper() if c.isalnum() else "_" for c in corpus)
     cmd = os.environ.get(key, "").strip()
