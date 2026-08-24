@@ -6,6 +6,7 @@ type Props = {
   response: SearchResponse | null;
   searching: boolean;
   tuning: Tuning;
+  onRevealSource: (corpus: string, sourceId: string) => void;
 };
 
 type ExpandState = {
@@ -51,7 +52,7 @@ function MatchBadge({ matchedBy }: { matchedBy: string[] | undefined }) {
   );
 }
 
-export default function ResultList({ response, searching, tuning }: Props) {
+export default function ResultList({ response, searching, tuning, onRevealSource }: Props) {
   const [expanded, setExpanded] = useState<Record<string, ExpandState>>({});
 
   useEffect(() => {
@@ -153,8 +154,8 @@ export default function ResultList({ response, searching, tuning }: Props) {
           const exp = expanded[key];
           const isOpen = Boolean(exp);
           const hit = row.kind === "hit" ? row.hit : null;
-          const pct = hit ? pctOf(hit, tuning) : row.stub.similarity_pct;
-          const snippet = hit ? hit.chunk : row.stub.snippet;
+          const pct = row.kind === "hit" ? pctOf(row.hit, tuning) : row.stub.similarity_pct;
+          const snippet = row.kind === "hit" ? row.hit.chunk : row.stub.snippet;
           const label = hit?.relevance_label || relevanceLabel(pct);
           return (
             <li data-testid="result-row" key={key} className={isOpen ? "bg-zinc-900/45" : "hover:bg-zinc-900/25"}>
@@ -186,6 +187,16 @@ export default function ResultList({ response, searching, tuning }: Props) {
                         {lineAnchor(hit)}
                       </span>
                     )}
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onRevealSource(ref.corpus, ref.source_id);
+                      }}
+                      className="ml-1 text-zinc-700 hover:text-zinc-300"
+                    >
+                      Reveal
+                    </button>
                     {ref.doc_timestamp && (
                       <time className="text-zinc-700 ml-auto shrink-0 hidden sm:inline">
                         {new Date(ref.doc_timestamp * 1000).toISOString().slice(0, 10)}

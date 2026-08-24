@@ -3,7 +3,7 @@ from __future__ import annotations
 import hmac
 from dataclasses import asdict
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from ..config import get_settings
 from ..embed import EmbedBackendError
@@ -304,6 +304,51 @@ def browse(req: BrowseRequest) -> list[dict]:
         raise HTTPException(status_code=400, detail=str(e))
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/explorer/{corpus}")
+def explore_corpus(
+    corpus: str,
+    path: list[str] = Query(default=[]),
+    q: str = Query(default="", max_length=200),
+    sort: str = Query(default="name"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict:
+    """List logical folders and source documents without touching chunks."""
+    try:
+        return _service().explore(
+            corpus,
+            path=path,
+            query=q,
+            sort=sort,
+            offset=offset,
+            limit=limit,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except CorpusError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/explorer/{corpus}/source")
+def explorer_source(
+    corpus: str,
+    source_id: str = Query(..., min_length=1, max_length=4096),
+    max_chars: int = Query(default=100_000, ge=1_000, le=200_000),
+) -> dict:
+    """Read one explorer document and include its logical catalog home."""
+    try:
+        source = _service().explorer_source(
+            corpus, source_id, max_chars=max_chars
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except CorpusError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if source is None:
+        raise HTTPException(status_code=404, detail="source not found")
+    return source
 
 
 @router.get("/oauth/status")

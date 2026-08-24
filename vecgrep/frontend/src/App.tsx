@@ -27,6 +27,11 @@ export default function App() {
   const [response, setResponse] = useState<SearchResponse | null>(null);
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [revealSource, setRevealSource] = useState<{
+    corpus: string;
+    sourceId: string;
+    nonce: number;
+  } | null>(null);
   const [tuning, setTuning] = useState<Tuning>(() => loadTuning());
   // Until the user customizes the sliders, seed them from each search's server
   // calibration so the displayed % matches the server for whatever model the
@@ -68,6 +73,12 @@ export default function App() {
     } finally {
       setSearching(false);
     }
+  };
+
+  const revealInExplorer = (corpus: string, sourceId: string) => {
+    setSelectedCorpus(corpus);
+    setRevealSource({ corpus, sourceId, nonce: Date.now() });
+    setView("browse");
   };
 
   return (
@@ -158,14 +169,25 @@ export default function App() {
                 {error}
               </div>
             )}
-            <ResultList response={response} searching={searching} tuning={tuning} />
+            <ResultList
+              response={response}
+              searching={searching}
+              tuning={tuning}
+              onRevealSource={revealInExplorer}
+            />
             <AboutFooter />
           </section>
         ) : (
           <section className="col-span-12 md:col-span-9 xl:col-span-10 space-y-4">
             {view === "timeline" && <TimelinePanel corpus={selectedCorpus} corpusCount={corpora.length} />}
             {view === "compare" && <ComparePanel corpus={selectedCorpus} />}
-            {view === "browse" && <BrowsePanel corpus={selectedCorpus} />}
+            {view === "browse" && (
+              <BrowsePanel
+                corpus={selectedCorpus}
+                revealSource={revealSource}
+                onRevealHandled={() => setRevealSource(null)}
+              />
+            )}
           </section>
         )}
       </main>

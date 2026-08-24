@@ -36,6 +36,11 @@ export type SearchHit = {
   metadata: Record<string, unknown>;
   chunk_id: string;
   matched_by: string[];
+  doc_timestamp: number | null;
+  line_start: number | null;
+  line_end: number | null;
+  anchor: string;
+  relevance_label: string;
   // Raw retriever scores — always populated by the server. Used by the
   // tuning UI to re-derive display % without re-querying.
   explain?: {
@@ -163,6 +168,26 @@ export const api = {
       method: "POST",
       body: JSON.stringify(options),
     }),
+  explore: (corpus: string, options: ExplorerOptions = {}) => {
+    const params = new URLSearchParams();
+    for (const segment of options.path || []) params.append("path", segment);
+    if (options.query) params.set("q", options.query);
+    if (options.sort) params.set("sort", options.sort);
+    params.set("offset", String(options.offset || 0));
+    params.set("limit", String(options.limit || 50));
+    return request<ExplorerListing>(
+      `/api/explorer/${encodeURIComponent(corpus)}?${params.toString()}`
+    );
+  },
+  explorerSource: (corpus: string, sourceId: string, maxChars = 100_000) => {
+    const params = new URLSearchParams({
+      source_id: sourceId,
+      max_chars: String(maxChars),
+    });
+    return request<ExplorerSource>(
+      `/api/explorer/${encodeURIComponent(corpus)}/source?${params.toString()}`
+    );
+  },
   incident: (
     query: string,
     corpus: string | null,
@@ -208,6 +233,59 @@ export type BrowseRequest = {
   since?: string;
   until?: string;
   tail?: number;
+};
+
+export type ExplorerSort = "name" | "newest" | "oldest";
+
+export type ExplorerOptions = {
+  path?: string[];
+  query?: string;
+  sort?: ExplorerSort;
+  offset?: number;
+  limit?: number;
+};
+
+export type ExplorerFolder = {
+  name: string;
+  path: string[];
+  document_count: number;
+  latest_timestamp: number | null;
+};
+
+export type ExplorerDocument = {
+  source_id: string;
+  name: string;
+  parent_path: string[];
+  display_path: string[];
+  kind: string;
+  doc_timestamp: number | null;
+  chunk_count: number;
+  tags: string[];
+};
+
+export type ExplorerListing = {
+  corpus: string;
+  scheme: string;
+  path: string[];
+  folders: ExplorerFolder[];
+  documents: ExplorerDocument[];
+  recent_documents: ExplorerDocument[];
+  total_documents: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+  facets: {
+    kinds: Record<string, number>;
+    tags: Record<string, number>;
+  };
+};
+
+export type ExplorerSource = ExplorerDocument & {
+  corpus: string;
+  metadata: Record<string, unknown>;
+  text: string;
+  source_length: number;
+  truncated: boolean;
 };
 
 export type CompareWindows = {

@@ -82,6 +82,50 @@ def test_browse_and_incident_routes_expose_service_tools(monkeypatch) -> None:
     assert seen[1][1]["filters"] == ["after:7d"]
 
 
+def test_explorer_routes_expose_paginated_catalog_and_source_preview(monkeypatch) -> None:
+    seen: list[tuple[str, dict]] = []
+
+    class FakeService:
+        def explore(self, corpus, **kwargs):
+            seen.append(("explore", {"corpus": corpus, **kwargs}))
+            return {"corpus": corpus, "folders": [], "documents": []}
+
+        def explorer_source(self, corpus, source_id, *, max_chars):
+            seen.append(
+                (
+                    "source",
+                    {"corpus": corpus, "source_id": source_id, "max_chars": max_chars},
+                )
+            )
+            return {"corpus": corpus, "source_id": source_id, "text": "hello"}
+
+    monkeypatch.setattr(routes, "_SERVICE", FakeService())
+
+    listing = routes.explore_corpus(
+        "notes", path=["Memories"], q="launch", sort="newest", offset=10, limit=25
+    )
+    preview = routes.explorer_source("notes", source_id="memory-1", max_chars=5000)
+    assert listing["documents"] == []
+    assert preview["text"] == "hello"
+    assert seen == [
+        (
+            "explore",
+            {
+                "corpus": "notes",
+                "path": ["Memories"],
+                "query": "launch",
+                "sort": "newest",
+                "offset": 10,
+                "limit": 25,
+            },
+        ),
+        (
+            "source",
+            {"corpus": "notes", "source_id": "memory-1", "max_chars": 5000},
+        ),
+    ]
+
+
 def test_browse_request_requires_a_bounded_tail() -> None:
     assert BrowseRequest(corpus="cli", channel="discord").tail == 100
 
@@ -105,6 +149,21 @@ def test_web_ui_uses_dense_budgeted_results_and_insight_views() -> None:
     assert "Incident" in (FRONTEND / "components" / "TimelinePanel.tsx").read_text(
         encoding="utf-8"
     )
+
+
+def test_web_ui_browse_is_a_three_pane_explorer_with_search_reveal() -> None:
+    app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
+    browse = (FRONTEND / "components" / "BrowsePanel.tsx").read_text(encoding="utf-8")
+    results = (FRONTEND / "components" / "ResultList.tsx").read_text(encoding="utf-8")
+    api = (FRONTEND / "api.ts").read_text(encoding="utf-8")
+
+    for pane in ("Collections", "Documents", "Preview"):
+        assert pane in browse
+    assert "api.explore" in browse and "api.explorerSource" in browse
+    assert "onRevealSource" in results
+    assert "revealSource" in app
+    assert "explore:" in api and "explorerSource:" in api
+    assert "Exact date" not in browse, "the old selector form must not survive"
 
 
 def test_search_modes_share_the_result_badge_color_language() -> None:

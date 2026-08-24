@@ -35,6 +35,7 @@ from .assembly import (
     split_full_and_stubs,
 )
 from .embed.cache import CachedBackend, EmbedCache
+from .explorer import ExplorerCatalog, build_catalog, list_catalog
 from .ingestion.enrich import chunk_enrichment
 from .ingestion.adapters import (
     AdapterError,
@@ -263,6 +264,12 @@ class VecgrepService:
             None if ephemeral else self.settings.home / "mutations"
         )
         self._backend_cache: dict[str, EmbedBackend] = {}
+        # Source-level explorer catalogs are derived from the compact BM25
+        # payloads.  Cache by corpus generation so navigation never walks all
+        # chunks and an index mutation naturally invalidates the view.
+        self._explorer_cache: dict[
+            str, tuple[tuple[float, int, int], ExplorerCatalog]
+        ] = {}
         # Embedding cache lives on disk except in ephemeral mode. Wrapping
         # is opt-in per backend in _backend_for() so tests / mocks can
         # bypass it by sticking a backend directly into _backend_cache.
@@ -1153,6 +1160,79 @@ class VecgrepService:
                 {"speaker": e.speaker, "time": e.time, "text": e.text}
                 for e in events
             ],
+        }
+
+    def _explorer_catalog_for(self, corpus_name: str) -> ExplorerCatalog:
+        corpus = self.registry.get(corpus_name)
+        generation = (corpus.updated_at, corpus.doc_count, corpus.chunk_count)
+        cached = self._explorer_cache.get(corpus.name)
+        if cached is not None and cached[0] == generation:
+            return cached[1]
+
+        idx = self.bm25._load(corpus.name)
+        records: list[dict] = []
+        for source_id, positions in idx.by_source.items():
+            if not positions:
+                continue
+            payload = idx.payloads[positions[0]]
+            records.append(
+                {
+                    "source_id": source_id,
+                    "metadata": payload.get("metadata") or {},
+                    "doc_timestamp": payload.get("doc_timestamp"),
+                    "chunk_count": len(positions),
+                }
+            )
+        catalog = build_catalog(records)
+        self._explorer_cache[corpus.name] = (generation, catalog)
+        return catalog
+
+    def explore(
+        self,
+        corpus_name: str,
+        *,
+        path: list[str] | None = None,
+        query: str = "",
+        sort: str = "name",
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict:
+        """Paginated source-level navigation for one corpus."""
+        return list_catalog(
+            self._explorer_catalog_for(corpus_name),
+            corpus=corpus_name,
+            path=path,
+            query=query,
+            sort=sort,
+            offset=offset,
+            limit=limit,
+        )
+
+    def explorer_source(
+        self,
+        corpus_name: str,
+        source_id: str,
+        *,
+        max_chars: int = 100_000,
+    ) -> dict | None:
+        """Resolve a source's explorer home and return a bounded text preview."""
+        if max_chars < 1:
+            raise ValueError("max_chars must be at least 1")
+        catalog = self._explorer_catalog_for(corpus_name)
+        entry = catalog.find(source_id)
+        if entry is None:
+            return None
+        source = self.get_source(corpus_name, source_id)
+        if source is None:
+            return None
+        text = str(source.get("text") or "")
+        return {
+            **entry.summary(),
+            "corpus": corpus_name,
+            "metadata": source.get("metadata") or {},
+            "text": text[:max_chars],
+            "source_length": len(text),
+            "truncated": len(text) > max_chars,
         }
 
     # ----- v1.2 tools: related / compare / stats / summarize ----------------
