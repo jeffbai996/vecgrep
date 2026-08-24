@@ -26,7 +26,11 @@ def client_with_token(vg_home, monkeypatch: pytest.MonkeyPatch) -> Iterator[Test
     # TestClient's context manager enters the FastAPI lifespan — which
     # is exactly when the MCP session manager spins up. Without `with`,
     # streamable HTTP requests would 500 on missing task group.
-    with TestClient(app) as client:
+    with TestClient(
+        app,
+        base_url="http://127.0.0.1:8765",
+        client=("127.0.0.1", 50000),
+    ) as client:
         yield client
 
 
@@ -82,3 +86,35 @@ def test_mcp_endpoint_responds_to_initialize(client_with_token: TestClient) -> N
     assert parsed.get("id") == 1
     assert "result" in parsed
     assert "protocolVersion" in parsed["result"]
+
+
+def test_explicit_private_proxy_host_and_browser_origin_remain_supported(
+    vg_home, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VECGREP_MCP_ALLOWED_HOSTS", "private-proxy.example:8443")
+    monkeypatch.setenv("VECGREP_MCP_ALLOWED_ORIGINS", "https://app.example")
+    monkeypatch.setattr(cfg_mod, "_settings", None)
+    with TestClient(
+        create_app(),
+        base_url="https://private-proxy.example:8443",
+        client=("127.0.0.1", 50000),
+    ) as client:
+        response = client.post(
+            "/mcp",
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+                "Origin": "https://app.example",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "pytest", "version": "0"},
+                },
+            },
+        )
+    assert response.status_code == 200

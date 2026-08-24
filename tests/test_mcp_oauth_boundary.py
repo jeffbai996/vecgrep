@@ -66,6 +66,28 @@ def test_direct_loopback_can_initialize_and_list_tools(loopback_client: TestClie
     assert "search" in {tool["name"] for tool in listed.json()["result"]["tools"]}
 
 
+def test_dns_rebinding_host_is_rejected_before_loopback_bypass(
+    loopback_client: TestClient,
+) -> None:
+    response = loopback_client.post(
+        "/mcp",
+        json=INITIALIZE,
+        headers=MCP_HEADERS | {"Host": "attacker.example"},
+    )
+    assert response.status_code == 421
+
+
+def test_foreign_browser_origin_is_rejected_on_an_allowed_host(
+    loopback_client: TestClient,
+) -> None:
+    response = loopback_client.post(
+        "/mcp",
+        json=INITIALIZE,
+        headers=MCP_HEADERS | {"Origin": "https://attacker.example"},
+    )
+    assert response.status_code == 403
+
+
 @pytest.mark.parametrize(
     "forwarded",
     [
@@ -91,6 +113,7 @@ def test_verified_tailscale_serve_identity_can_list_tools(
         "/mcp",
         json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
         headers=MCP_HEADERS | {
+            "Host": "example.com:10000",
             "X-Forwarded-For": "100.64.0.10",
             "X-Forwarded-Proto": "https",
             "Tailscale-User-Login": "owner@example.test",
@@ -111,6 +134,8 @@ def test_valid_oauth_token_still_works_through_proxy(
         "/mcp",
         json=INITIALIZE,
         headers=MCP_HEADERS | {
+            "Host": "example.com:10000",
+            "Origin": "https://example.com:10000",
             "X-Forwarded-For": "203.0.113.10",
             "X-Forwarded-Proto": "https",
             "Authorization": f"Bearer {access.token}",
@@ -127,7 +152,11 @@ def test_setting_false_gates_direct_loopback(vg_home, monkeypatch: pytest.Monkey
     monkeypatch.setenv("VECGREP_OAUTH_LOOPBACK_BYPASS", "false")
     monkeypatch.setenv("VECGREP_API_TOKEN", "r" * 40)
     monkeypatch.setattr(cfg_mod, "_settings", None)
-    with TestClient(create_app(), client=("127.0.0.1", 50000)) as client:
+    with TestClient(
+        create_app(),
+        base_url="http://127.0.0.1:8765",
+        client=("127.0.0.1", 50000),
+    ) as client:
         direct = client.post("/mcp", json=INITIALIZE, headers=MCP_HEADERS)
         tailnet = client.post(
             "/mcp",

@@ -44,6 +44,42 @@ def test_non_loopback_bind_requires_api_token():
     _require_safe_serve_bind("::1", None)
 
 
+def test_mcp_transport_allowlists_load_from_environment(vg_home, monkeypatch):
+    monkeypatch.setenv(
+        "VECGREP_MCP_ALLOWED_HOSTS",
+        "mcp.example.test, 192.0.2.10:8765",
+    )
+    monkeypatch.setenv(
+        "VECGREP_MCP_ALLOWED_ORIGINS",
+        "https://app.example.test, http://localhost:*",
+    )
+    monkeypatch.setattr(cfg_mod, "_settings", None)
+
+    settings = get_settings()
+    assert settings.mcp_allowed_hosts == ["mcp.example.test", "192.0.2.10:8765"]
+    assert settings.mcp_allowed_origins == [
+        "https://app.example.test", "http://localhost:*",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("env_name", "value"),
+    [
+        ("VECGREP_MCP_ALLOWED_HOSTS", "https://mcp.example.test/path"),
+        ("VECGREP_MCP_ALLOWED_HOSTS", "*.example.test"),
+        ("VECGREP_MCP_ALLOWED_ORIGINS", "javascript://attacker.example"),
+        ("VECGREP_MCP_ALLOWED_ORIGINS", "https://app.example.test/path"),
+    ],
+)
+def test_mcp_transport_allowlists_reject_unsafe_patterns(
+    vg_home, monkeypatch, env_name, value
+):
+    monkeypatch.setenv(env_name, value)
+    monkeypatch.setattr(cfg_mod, "_settings", None)
+    with pytest.raises(ConfigError, match="MCP allowed"):
+        get_settings()
+
+
 @pytest.mark.parametrize(
     "headers",
     [

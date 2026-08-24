@@ -20,6 +20,9 @@ VECGREP_OAUTH_APPROVAL_TOKEN=<strong random owner approval code>
 VECGREP_OAUTH_LOOPBACK_BYPASS=true
 # Optional: false also requires OAuth for authenticated Tailscale Serve users.
 VECGREP_OAUTH_TAILSCALE_IDENTITY_BYPASS=true
+# Optional only for additional private proxy names or browser origins:
+VECGREP_MCP_ALLOWED_HOSTS=private-proxy.example:8443
+VECGREP_MCP_ALLOWED_ORIGINS=https://app.example
 
 # 2. Restart `vecgrep serve`.
 
@@ -90,6 +93,9 @@ authenticated client still cannot commit writes by itself.
 - OAuth applies only to `/mcp`. Keep the service loopback-bound and expose only
   MCP and OAuth routes through the public proxy. A non-loopback vecgrep bind
   separately requires a strong `VECGREP_API_TOKEN` and fails closed without it.
+- MCP validates Host and Origin before the trusted-loopback or OAuth boundary.
+  Loopback and the configured issuer are admitted automatically; private proxy
+  aliases and separate browser origins require the explicit allowlists above.
 - Local stdio MCP (`vecgrep mcp`) is untouched — no network, no auth.
 - Direct HTTP from a loopback peer bypasses OAuth only when both
   `X-Forwarded-For` and `X-Forwarded-Proto` are absent. Any proxy marker makes
@@ -101,7 +107,8 @@ authenticated client still cannot commit writes by itself.
   OAuth or an SSH tunnel to loopback.
 - `VECGREP_OAUTH_LOOPBACK_BYPASS=false` is the master kill switch: it restores
   OAuth on every MCP request, including direct loopback and Tailscale Serve.
-- With `VECGREP_OAUTH_ENABLED` unset, nothing about your deployment moves.
+- With `VECGREP_OAUTH_ENABLED` unset, OAuth stays off; the MCP transport still
+  admits only loopback Host/Origin values plus explicit allowlist entries.
 
 ## The three gotchas (why the wiring looks the way it does)
 

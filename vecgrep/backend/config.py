@@ -35,6 +35,8 @@ ENV_MAP = {
     "VECGREP_OAUTH_ISSUER_URL": "oauth_issuer_url",
     "VECGREP_OAUTH_LOOPBACK_BYPASS": "oauth_loopback_bypass",
     "VECGREP_OAUTH_TAILSCALE_IDENTITY_BYPASS": "oauth_tailscale_identity_bypass",
+    "VECGREP_MCP_ALLOWED_HOSTS": "mcp_allowed_hosts",
+    "VECGREP_MCP_ALLOWED_ORIGINS": "mcp_allowed_origins",
     OAUTH_APPROVAL_ENV: "oauth_approval_token",
     "VECGREP_THREAD_POOL_SIZE": "thread_pool_size",
 }
@@ -51,6 +53,8 @@ EDITABLE_FIELDS = {
     "oauth_issuer_url",
     "oauth_loopback_bypass",
     "oauth_tailscale_identity_bypass",
+    "mcp_allowed_hosts",
+    "mcp_allowed_origins",
     "qdrant_url",
     "backup_enabled",
     "backup_frequency",
@@ -67,6 +71,7 @@ SECRET_FIELDS = {
 STRUCTURAL_FIELDS = {
     "api_host", "api_port", "qdrant_url", "oauth_enabled",
     "oauth_issuer_url", "oauth_loopback_bypass", "oauth_tailscale_identity_bypass",
+    "mcp_allowed_hosts", "mcp_allowed_origins",
 }
 
 
@@ -117,6 +122,11 @@ class Settings:
     # identity headers. Trust that distinction for user-owned remote nodes.
     # oauth_loopback_bypass is the master kill switch for all MCP bypasses.
     oauth_tailscale_identity_bypass: bool = True
+    # MCP's DNS-rebinding guard always permits loopback and automatically
+    # permits the configured OAuth issuer. Private reverse proxies or browser
+    # clients on other origins must be named explicitly here.
+    mcp_allowed_hosts: list[str] = field(default_factory=list)
+    mcp_allowed_origins: list[str] = field(default_factory=list)
     # Separate owner-presence credential for the public OAuth authorize page.
     # Dynamic client registration authenticates no human by itself; without
     # this gate anyone who discovers the public MCP URL could mint a token.
@@ -201,6 +211,8 @@ def load_settings() -> Settings:
                 "oauth_tailscale_identity_bypass", "backup_enabled",
             }:
                 val = val.strip().lower() in ("1", "true", "yes", "on")
+            elif attr in {"mcp_allowed_hosts", "mcp_allowed_origins"}:
+                val = [item.strip() for item in val.split(",") if item.strip()]
             setattr(s, attr, val)
 
     validate_settings(s)
@@ -237,6 +249,53 @@ def _is_loopback_host(value: str) -> bool:
         return False
 
 
+def _validate_mcp_allowed_host(value: str) -> None:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ConfigError("MCP allowed hosts must be non-empty strings")
+    if "://" in value or any(char.isspace() for char in value):
+        raise ConfigError(f"MCP allowed host is not a Host value: {value!r}")
+    if "*" in value and not value.endswith(":*"):
+        raise ConfigError("MCP allowed hosts support only a terminal :* port wildcard")
+
+    base = value[:-2] if value.endswith(":*") else value
+    if "*" in base or any(char in base for char in "/?#@"):
+        raise ConfigError(f"MCP allowed host is invalid: {value!r}")
+    parsed = urlparse(f"//{base}")
+    if not parsed.hostname or parsed.username or parsed.password or parsed.path:
+        raise ConfigError(f"MCP allowed host is invalid: {value!r}")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ConfigError(f"MCP allowed host has an invalid port: {value!r}") from exc
+
+
+def _validate_mcp_allowed_origin(value: str) -> None:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ConfigError("MCP allowed origins must be non-empty strings")
+    if "*" in value and not value.endswith(":*"):
+        raise ConfigError("MCP allowed origins support only a terminal :* port wildcard")
+
+    base = value[:-2] if value.endswith(":*") else value
+    if "*" in base:
+        raise ConfigError(f"MCP allowed origin is invalid: {value!r}")
+    parsed = urlparse(base)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ConfigError(f"MCP allowed origin must be an http(s) origin: {value!r}")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ConfigError(f"MCP allowed origin has an invalid port: {value!r}") from exc
+
+
 def validate_settings(settings: Settings) -> None:
     _validate_url("ollama_url", settings.ollama_url)
     _validate_url("ollama_fallback_url", settings.ollama_fallback_url)
@@ -251,6 +310,14 @@ def validate_settings(settings: Settings) -> None:
             raise ConfigError(f"{name} must be non-empty")
     if settings.oauth_enabled and not settings.oauth_issuer_url:
         raise ConfigError("oauth_enabled requires an OAuth issuer URL")
+    if not isinstance(settings.mcp_allowed_hosts, list):
+        raise ConfigError("MCP allowed hosts must be a list")
+    if not isinstance(settings.mcp_allowed_origins, list):
+        raise ConfigError("MCP allowed origins must be a list")
+    for allowed_host in settings.mcp_allowed_hosts:
+        _validate_mcp_allowed_host(allowed_host)
+    for allowed_origin in settings.mcp_allowed_origins:
+        _validate_mcp_allowed_origin(allowed_origin)
     approval_token = (settings.oauth_approval_token or "").strip()
     api_token = (settings.api_token or "").strip()
     if settings.oauth_enabled and len(approval_token) < 32:
