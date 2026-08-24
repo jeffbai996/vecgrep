@@ -31,6 +31,7 @@ from .auth.approval import (
     tailnet_approval_intent,
     verified_tailnet_login,
 )
+from .auth.rest import TokenlessRestHostMiddleware
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
@@ -159,6 +160,11 @@ def create_app() -> FastAPI:
     # under /mcp. The MCP sub-app also carries this middleware when constructed
     # directly, so neither integration path can accidentally omit owner approval.
     app.add_middleware(OAuthApprovalMiddleware)
+    # A loopback bind does not make a browser request local: attacker DNS can
+    # rebind its origin to 127.0.0.1 while preserving an attacker-controlled
+    # Host header. Tokenless REST therefore admits only explicit loopback Host
+    # values; authenticated proxy deployments retain their bearer boundary.
+    app.add_middleware(TokenlessRestHostMiddleware)
 
     app.include_router(public_router)
     app.include_router(router)

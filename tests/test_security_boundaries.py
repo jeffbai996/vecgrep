@@ -81,6 +81,103 @@ def test_mcp_transport_allowlists_reject_unsafe_patterns(
 
 
 @pytest.mark.parametrize(
+    ("method", "path", "json_body"),
+    [
+        ("POST", "/api/index", {}),
+        ("POST", "/api/search", {}),
+        ("GET", "/api/chunk/example/1", None),
+        ("DELETE", "/api/corpora/example", None),
+    ],
+)
+def test_tokenless_rest_routes_reject_dns_rebinding_host_before_dispatch(
+    vg_home, method, path, json_body
+):
+    with TestClient(
+        create_app(),
+        base_url="http://127.0.0.1:8765",
+        raise_server_exceptions=False,
+    ) as client:
+        response = client.request(
+            method,
+            path,
+            headers={"Host": "attacker.example:8765"},
+            json=json_body,
+        )
+
+    assert response.status_code == 421
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.0.0.1.attacker.example:8765",
+        "attacker.example@127.0.0.1:8765",
+        "localhost:9999",
+        "localhost",
+    ],
+)
+def test_tokenless_rest_routes_reject_host_aliases_and_wrong_port(vg_home, host):
+    with TestClient(
+        create_app(),
+        base_url="http://127.0.0.1:8765",
+    ) as client:
+        response = client.get("/api/health", headers={"Host": host})
+
+    assert response.status_code == 421
+
+
+def test_tokenless_rest_routes_reject_multiple_host_headers(vg_home):
+    with TestClient(
+        create_app(),
+        base_url="http://127.0.0.1:8765",
+    ) as client:
+        response = client.get(
+            "/api/health",
+            headers=[
+                ("Host", "localhost:8765"),
+                ("Host", "attacker.example:8765"),
+            ],
+        )
+
+    assert response.status_code == 421
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["localhost:8765", "127.0.0.1:8765", "[::1]:8765"],
+)
+def test_tokenless_rest_routes_allow_explicit_loopback_hosts(vg_home, host):
+    with TestClient(
+        create_app(),
+        base_url="http://127.0.0.1:8765",
+    ) as client:
+        response = client.get("/api/health", headers={"Host": host})
+
+    assert response.status_code == 200
+
+
+def test_authenticated_rest_proxy_preserves_non_loopback_host(
+    vg_home, monkeypatch
+):
+    token = "a" * 40
+    monkeypatch.setenv("VECGREP_API_TOKEN", token)
+    monkeypatch.setattr(cfg_mod, "_settings", None)
+
+    with TestClient(
+        create_app(),
+        base_url="https://private-proxy.example",
+    ) as client:
+        unauthenticated = client.get("/api/config")
+        response = client.get(
+            "/api/config",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert unauthenticated.status_code == 401
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
     "headers",
     [
         {"Origin": "https://evil.example"},
@@ -92,7 +189,7 @@ def test_mcp_transport_allowlists_reject_unsafe_patterns(
 def test_loopback_admin_mutations_reject_foreign_browser_provenance(
     vg_home, headers
 ):
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(), base_url="http://127.0.0.1:8765") as client:
         response = client.post("/api/admin/config/reload", headers=headers)
     assert response.status_code == 403
 
@@ -100,14 +197,14 @@ def test_loopback_admin_mutations_reject_foreign_browser_provenance(
 def test_loopback_admin_allows_headerless_cli_and_same_origin_browser(vg_home):
     with TestClient(
         create_app(),
-        base_url="http://127.0.0.1",
+        base_url="http://127.0.0.1:8765",
         client=("127.0.0.1", 50000),
     ) as client:
         assert client.post("/api/admin/config/reload").status_code == 200
         response = client.post(
             "/api/admin/config/reload",
             headers={
-                "Origin": "http://127.0.0.1",
+                "Origin": "http://127.0.0.1:8765",
                 "Sec-Fetch-Site": "same-origin",
             },
         )
