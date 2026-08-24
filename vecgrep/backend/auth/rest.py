@@ -60,11 +60,16 @@ class TokenlessRestHostMiddleware:
                     for name, value in scope.get("headers", [])
                     if name.lower() == b"host"
                 ]
-                if len(hosts) != 1 or not _is_allowed_loopback_host(
-                    hosts[0],
-                    api_port=settings.api_port,
-                    scheme=scope.get("scheme", "http"),
-                ):
+                allowed = len(hosts) == 1 and (
+                    _is_allowed_loopback_host(
+                        hosts[0],
+                        api_port=settings.api_port,
+                        scheme=scope.get("scheme", "http"),
+                    )
+                    or hosts[0].lower()
+                    in {host.lower() for host in settings.rest_allowed_hosts}
+                )
+                if not allowed:
                     response = PlainTextResponse(
                         "Invalid host header", status_code=421
                     )

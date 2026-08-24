@@ -29,6 +29,7 @@ ENV_MAP = {
     "VECGREP_API_PORT": "api_port",
     "VECGREP_TOP_K": "default_top_k",
     "VECGREP_API_TOKEN": "api_token",
+    "VECGREP_REST_ALLOWED_HOSTS": "rest_allowed_hosts",
     "VECGREP_ADMIN_TOKEN": "admin_token",
     "VECGREP_QDRANT_URL": "qdrant_url",
     "VECGREP_OAUTH_ENABLED": "oauth_enabled",
@@ -48,6 +49,7 @@ EDITABLE_FIELDS = {
     "openai_embed_model",
     "api_host",
     "api_port",
+    "rest_allowed_hosts",
     "default_top_k",
     "oauth_enabled",
     "oauth_issuer_url",
@@ -69,7 +71,7 @@ SECRET_FIELDS = {
     "openai_api_key", "api_token", "admin_token", "oauth_approval_token",
 }
 STRUCTURAL_FIELDS = {
-    "api_host", "api_port", "qdrant_url", "oauth_enabled",
+    "api_host", "api_port", "rest_allowed_hosts", "qdrant_url", "oauth_enabled",
     "oauth_issuer_url", "oauth_loopback_bypass", "oauth_tailscale_identity_bypass",
     "mcp_allowed_hosts", "mcp_allowed_origins",
 }
@@ -99,6 +101,9 @@ class Settings:
     # strong value. Unset (None) remains valid for the default loopback-only
     # service when a proxy exposes only the separately authenticated MCP routes.
     api_token: str | None = None
+    # Exact, port-qualified Host values for trusted reverse proxies that expose
+    # the tokenless REST API through a separate network-access boundary.
+    rest_allowed_hosts: list[str] = field(default_factory=list)
     # Separate credential for the mutation-capable /api/admin surface. Admin
     # routes otherwise accept only requests whose peer socket AND Host header
     # are loopback.
@@ -211,7 +216,9 @@ def load_settings() -> Settings:
                 "oauth_tailscale_identity_bypass", "backup_enabled",
             }:
                 val = val.strip().lower() in ("1", "true", "yes", "on")
-            elif attr in {"mcp_allowed_hosts", "mcp_allowed_origins"}:
+            elif attr in {
+                "rest_allowed_hosts", "mcp_allowed_hosts", "mcp_allowed_origins",
+            }:
                 val = [item.strip() for item in val.split(",") if item.strip()]
             setattr(s, attr, val)
 
@@ -296,6 +303,27 @@ def _validate_mcp_allowed_origin(value: str) -> None:
         raise ConfigError(f"MCP allowed origin has an invalid port: {value!r}") from exc
 
 
+def _validate_rest_allowed_host(value: str) -> None:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ConfigError("REST allowed hosts must be non-empty strings")
+    if (
+        "://" in value
+        or "*" in value
+        or any(char.isspace() for char in value)
+        or any(char in value for char in "/?#@")
+    ):
+        raise ConfigError(f"REST allowed host is invalid: {value!r}")
+    parsed = urlparse(f"//{value}")
+    if not parsed.hostname or parsed.username or parsed.password or parsed.path:
+        raise ConfigError(f"REST allowed host is invalid: {value!r}")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ConfigError(f"REST allowed host has an invalid port: {value!r}") from exc
+    if port is None:
+        raise ConfigError("REST allowed hosts must include an explicit port")
+
+
 def validate_settings(settings: Settings) -> None:
     _validate_url("ollama_url", settings.ollama_url)
     _validate_url("ollama_fallback_url", settings.ollama_fallback_url)
@@ -310,10 +338,14 @@ def validate_settings(settings: Settings) -> None:
             raise ConfigError(f"{name} must be non-empty")
     if settings.oauth_enabled and not settings.oauth_issuer_url:
         raise ConfigError("oauth_enabled requires an OAuth issuer URL")
+    if not isinstance(settings.rest_allowed_hosts, list):
+        raise ConfigError("REST allowed hosts must be a list")
     if not isinstance(settings.mcp_allowed_hosts, list):
         raise ConfigError("MCP allowed hosts must be a list")
     if not isinstance(settings.mcp_allowed_origins, list):
         raise ConfigError("MCP allowed origins must be a list")
+    for allowed_host in settings.rest_allowed_hosts:
+        _validate_rest_allowed_host(allowed_host)
     for allowed_host in settings.mcp_allowed_hosts:
         _validate_mcp_allowed_host(allowed_host)
     for allowed_origin in settings.mcp_allowed_origins:

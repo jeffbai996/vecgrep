@@ -255,6 +255,7 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 | `VECGREP_API_HOST` | `127.0.0.1` | API bind host |
 | `VECGREP_API_PORT` | `8765` | API port |
 | `VECGREP_API_TOKEN` | unset | If set, `/api/*` requires `Authorization: Bearer <token>` (health stays public). Without a token, REST accepts only explicit loopback Host values on `VECGREP_API_PORT`. A non-loopback bind requires at least 32 characters. |
+| `VECGREP_REST_ALLOWED_HOSTS` | unset | Comma-separated exact, port-qualified Host values for trusted REST reverse proxies, e.g. `private-proxy.example:8443`. Prefer a REST token unless the proxy supplies a separate access boundary. |
 | `VECGREP_ADMIN_TOKEN` | unset | Separate bearer token for `/api/admin/*`. Without it, admin access requires both a loopback peer and loopback Host header. |
 | `VECGREP_QDRANT_URL` | unset | Use Qdrant server mode, e.g. `http://localhost:6333`. Required when `serve`, `watch`, and CLI processes need the same live store concurrently. |
 | `VECGREP_TOP_K` | `5` | Default `--top` value |
@@ -436,8 +437,10 @@ vecgrep serve --host 0.0.0.0
 ```
 
 The tokenless default is strictly local: `/api/*` rejects non-loopback Host
-headers and loopback Host values carrying a different port. A reverse proxy or
-non-loopback listener therefore requires `VECGREP_API_TOKEN`.
+headers and loopback Host values carrying a different port. A reverse proxy
+should use `VECGREP_API_TOKEN`. When an access-controlled private proxy must
+preserve tokenless clients, list only its exact, port-qualified Host value in
+`VECGREP_REST_ALLOWED_HOSTS`; wildcards are rejected.
 
 For TLS, run vecgrep behind whatever reverse proxy you already use — Tailscale Serve, Caddy, nginx — and let it terminate HTTPS. vecgrep itself is HTTP-only.
 Set `VECGREP_MCP_ALLOWED_HOSTS` to any private proxy hostname that is not the

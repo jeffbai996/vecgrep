@@ -62,6 +62,20 @@ def test_mcp_transport_allowlists_load_from_environment(vg_home, monkeypatch):
     ]
 
 
+def test_rest_proxy_allowlist_loads_from_environment(vg_home, monkeypatch):
+    monkeypatch.setenv(
+        "VECGREP_REST_ALLOWED_HOSTS",
+        "private-proxy.example:8443, 192.0.2.10:8765",
+    )
+    monkeypatch.setattr(cfg_mod, "_settings", None)
+
+    settings = get_settings()
+    assert settings.rest_allowed_hosts == [
+        "private-proxy.example:8443",
+        "192.0.2.10:8765",
+    ]
+
+
 @pytest.mark.parametrize(
     ("env_name", "value"),
     [
@@ -77,6 +91,25 @@ def test_mcp_transport_allowlists_reject_unsafe_patterns(
     monkeypatch.setenv(env_name, value)
     monkeypatch.setattr(cfg_mod, "_settings", None)
     with pytest.raises(ConfigError, match="MCP allowed"):
+        get_settings()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://private-proxy.example:8443",
+        "*.example.test:8443",
+        "private-proxy.example",
+        "attacker.example@127.0.0.1:8765",
+    ],
+)
+def test_rest_proxy_allowlist_rejects_unsafe_or_ambiguous_hosts(
+    vg_home, monkeypatch, value
+):
+    monkeypatch.setenv("VECGREP_REST_ALLOWED_HOSTS", value)
+    monkeypatch.setattr(cfg_mod, "_settings", None)
+
+    with pytest.raises(ConfigError, match="REST allowed"):
         get_settings()
 
 
@@ -154,6 +187,28 @@ def test_tokenless_rest_routes_allow_explicit_loopback_hosts(vg_home, host):
         response = client.get("/api/health", headers={"Host": host})
 
     assert response.status_code == 200
+
+
+def test_tokenless_rest_routes_allow_only_exact_configured_proxy_host(
+    vg_home, monkeypatch
+):
+    monkeypatch.setenv(
+        "VECGREP_REST_ALLOWED_HOSTS", "private-proxy.example:8443"
+    )
+    monkeypatch.setattr(cfg_mod, "_settings", None)
+
+    with TestClient(
+        create_app(),
+        base_url="https://private-proxy.example:8443",
+    ) as client:
+        allowed = client.get("/api/config")
+        near_miss = client.get(
+            "/api/config",
+            headers={"Host": "private-proxy.example.attacker:8443"},
+        )
+
+    assert allowed.status_code == 200
+    assert near_miss.status_code == 421
 
 
 def test_authenticated_rest_proxy_preserves_non_loopback_host(
