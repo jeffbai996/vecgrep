@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from mcp.server.auth.provider import (
     AccessToken,
+    AuthorizeError,
     AuthorizationCode,
     AuthorizationParams,
     OAuthAuthorizationServerProvider,
@@ -18,6 +19,7 @@ from mcp.server.auth.provider import (
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
+from .scopes import VALID_SCOPES, UnsupportedScope, effective_scopes
 from .store import TokenStore, _ACCESS_TTL_S
 
 
@@ -34,7 +36,7 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
         import os
         # persisted when VECGREP_OAUTH_STATE_FILE is set (the service env does)
         self.store = TokenStore(path=os.environ.get("VECGREP_OAUTH_STATE_FILE", "").strip() or None)
-        self.valid_scopes = valid_scopes or ["read", "propose"]
+        self.valid_scopes = list(VALID_SCOPES if valid_scopes is None else valid_scopes)
 
     @property
     def _clients(self) -> dict[str, OAuthClientInformationFull]:
@@ -51,8 +53,13 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
     async def authorize(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
-        scopes = [s for s in (params.scopes or self.valid_scopes)
-                  if s in self.valid_scopes] or ["read"]
+        try:
+            scopes = effective_scopes(
+                params.scopes,
+                valid_scopes=self.valid_scopes,
+            )
+        except UnsupportedScope as exc:
+            raise AuthorizeError("invalid_scope", str(exc)) from exc
         code = self.store.issue_authorization_code(
             client_id=client.client_id,
             scopes=scopes,

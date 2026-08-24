@@ -40,11 +40,17 @@ TAILNET_HEADERS = {
 
 @pytest.fixture
 def oauth_client(vg_home, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    from vecgrep.mcp import server as mcp_server
+
     monkeypatch.setenv("VECGREP_OAUTH_ENABLED", "1")
     monkeypatch.setenv("VECGREP_OAUTH_ISSUER_URL", "https://example.com:10000/mcp")
     monkeypatch.setenv("VECGREP_OAUTH_APPROVAL_TOKEN", TEST_APPROVAL)
     monkeypatch.setenv("VECGREP_API_TOKEN", "r" * 40)
     monkeypatch.setattr(cfg_mod, "_settings", None)
+    monkeypatch.setattr(mcp_server, "_PROVIDER", None)
+    limiter = getattr(mcp_server, "_REGISTRATION_LIMITER", None)
+    if limiter is not None:
+        limiter.reset()
     with TestClient(create_app(), base_url="https://example.com:10000") as client:
         yield client
 
@@ -315,6 +321,21 @@ def test_unlock_page_names_the_client_and_its_scopes(oauth_client):
     assert "Connect to vecgrep" in r.text
 
 
+def test_unlock_and_issuance_both_default_omitted_scope_to_read(oauth_client):
+    reg = oauth_client.post("/register", json={
+        "client_name": "Example client",
+        "redirect_uris": ["https://example.test/callback"],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+        "scope": "read propose",
+    })
+    cid = reg.json()["client_id"]
+    page = oauth_client.get(f"/oauth/unlock?next=/authorize?client_id={cid}")
+    assert "Search and read" in page.text
+    assert "Propose changes" not in page.text
+
+
 def test_metadata_advertises_public_clients(oauth_client):
     """claude.ai registers with token_endpoint_auth_method=none; the advertised
     methods must include it or a careful client never attempts /token."""
@@ -362,3 +383,48 @@ def test_oauth_trace_does_not_break_the_flow(vg_home, monkeypatch):
                                         "code_challenge_method": "S256", "state": "s"},
                   cookies={APPROVAL_COOKIE: cookie}, follow_redirects=False)
         assert r.status_code == 302, r.text
+
+
+def test_oauth_trace_never_logs_form_or_opaque_secrets(caplog):
+    from vecgrep.mcp.server import _trace_log
+
+    canary = "trace-sensitive-canary"
+    caplog.set_level("WARNING", logger="vecgrep.oauth.trace")
+    _trace_log(
+        "POST", "/token", "", {"content-type": "application/x-www-form-urlencoded"},
+        f"grant_type=refresh_token&refresh_token={canary}&client_secret={canary}",
+        400, "", "",
+    )
+    _trace_log(
+        "POST", "/token", "", {"content-type": "text/plain"},
+        f"malformed-body-{canary}", 400, "", "",
+    )
+    _trace_log(
+        "POST", "/register", "", {"content-type": "application/json"},
+        '{"client_name":{"refresh_token":"' + canary + '"}}', 400, "", "",
+    )
+    assert canary not in caplog.text
+    assert "grant_type=refresh_token" in caplog.text
+
+
+@pytest.mark.parametrize("path", ["/register", "/mcp/register"])
+def test_register_rejects_oversized_request_before_json_parsing(oauth_client, path):
+    r = oauth_client.post(
+        path,
+        content=b"x" * 65_537,
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 413
+
+
+def test_register_rate_limits_bursts(oauth_client):
+    registration = {
+        "redirect_uris": ["https://example.test/callback"],
+        "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+    }
+    responses = [oauth_client.post("/register", json=registration) for _ in range(31)]
+    assert all(r.status_code == 201 for r in responses[:30])
+    assert responses[-1].status_code == 429
+    assert responses[-1].headers["retry-after"]

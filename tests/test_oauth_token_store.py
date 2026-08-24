@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 
 import pytest
+from mcp.shared.auth import OAuthClientInformationFull
 
 from vecgrep.backend.auth.store import TokenStore
 
@@ -18,6 +19,14 @@ from vecgrep.backend.auth.store import TokenStore
 @pytest.fixture
 def store():
     return TokenStore()
+
+
+def _client(client_id: str, issued_at: int) -> OAuthClientInformationFull:
+    return OAuthClientInformationFull(
+        client_id=client_id,
+        client_id_issued_at=issued_at,
+        redirect_uris=["https://example.test/callback"],
+    )
 
 
 # --- access tokens ---
@@ -101,6 +110,35 @@ def test_token_has_scope(store):
     at = store.issue_access_token(client_id="c1", scopes=["read"], ttl_s=3600)
     assert store.token_has_scope(at.token, "read") is True
     assert store.token_has_scope(at.token, "propose") is False
+
+
+# --- dynamic-client retention bounds ---
+
+def test_unapproved_client_count_is_bounded_without_evicting_authorized_clients(monkeypatch):
+    monkeypatch.setattr("vecgrep.backend.auth.store._now", lambda: 100.0)
+    store = TokenStore(max_unapproved_clients=2, unapproved_client_ttl_s=10_000)
+    store.save_client(_client("authorized", 1))
+    store.issue_access_token("authorized", ["read"])
+
+    store.save_client(_client("unapproved-old", 2))
+    store.save_client(_client("unapproved-new", 3))
+    store.save_client(_client("unapproved-newest", 4))
+
+    assert store.get_client("authorized") is not None
+    assert store.get_client("unapproved-old") is None
+    assert set(store.clients()) == {
+        "authorized", "unapproved-new", "unapproved-newest",
+    }
+
+
+def test_expired_unapproved_clients_are_pruned(monkeypatch):
+    monkeypatch.setattr("vecgrep.backend.auth.store._now", lambda: 1_000.0)
+    store = TokenStore(max_unapproved_clients=5, unapproved_client_ttl_s=60)
+    store.save_client(_client("stale", 900))
+    store.save_client(_client("fresh", 1_000))
+
+    assert store.get_client("stale") is None
+    assert store.get_client("fresh") is not None
 
 
 # ----- admin surface (inventory panel) -----

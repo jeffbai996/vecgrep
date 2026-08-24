@@ -12,6 +12,8 @@ Security invariants enforced here:
   - authorization codes are single-use (consume removes them) — a replayed
     code can't mint a second token
   - refresh tokens are bound to their client_id
+  - anonymous dynamic registrations have a TTL and count cap, while clients
+    with issued tokens are never evicted automatically
 """
 from __future__ import annotations
 
@@ -31,6 +33,8 @@ from mcp.shared.auth import OAuthClientInformationFull
 _ACCESS_TTL_S = 365 * 86400
 _REFRESH_TTL_S = 365 * 86400
 _CODE_TTL_S = 300           # 5 minutes
+_MAX_UNAPPROVED_CLIENTS = 32
+_UNAPPROVED_CLIENT_TTL_S = 24 * 3600
 
 
 def _now() -> float:
@@ -46,12 +50,24 @@ class TokenStore:
     file so a service restart no longer revokes every connected client
     (2026-08-22). Codes are never persisted — they live seconds."""
 
-    def __init__(self, path: str | None = None) -> None:
+    def __init__(
+        self,
+        path: str | None = None,
+        *,
+        max_unapproved_clients: int = _MAX_UNAPPROVED_CLIENTS,
+        unapproved_client_ttl_s: int = _UNAPPROVED_CLIENT_TTL_S,
+    ) -> None:
+        if max_unapproved_clients < 1:
+            raise ValueError("max_unapproved_clients must be positive")
+        if unapproved_client_ttl_s < 1:
+            raise ValueError("unapproved_client_ttl_s must be positive")
         self._access: dict[str, AccessToken] = {}
         self._refresh: dict[str, RefreshToken] = {}
         self._codes: dict[str, AuthorizationCode] = {}
         self._clients: dict[str, OAuthClientInformationFull] = {}
         self._path = path
+        self._max_unapproved_clients = max_unapproved_clients
+        self._unapproved_client_ttl_s = unapproved_client_ttl_s
         self._load()
 
     # ----- persistence -----
@@ -90,7 +106,37 @@ class TokenStore:
     # ----- clients -----
     def save_client(self, info: OAuthClientInformationFull) -> None:
         self._clients[info.client_id] = info
+        self._prune_unapproved_clients()
         self._save()
+
+    def _prune_unapproved_clients(self) -> None:
+        """Bound anonymous DCR state without disrupting approved clients.
+
+        Possessing any access or refresh token marks a client authorized. Such
+        clients are never evicted here, even if a token has expired; explicit
+        client revocation remains the operation that makes one pruneable.
+        """
+        authorized = {
+            token.client_id
+            for token in (*self._access.values(), *self._refresh.values())
+        }
+        now = _now()
+        unapproved: list[tuple[float, str]] = []
+        for client_id, client in list(self._clients.items()):
+            if client_id in authorized:
+                continue
+            issued_at = client.client_id_issued_at
+            if (
+                issued_at is not None
+                and float(issued_at) <= now - self._unapproved_client_ttl_s
+            ):
+                self._clients.pop(client_id, None)
+                continue
+            unapproved.append((float(issued_at or now), client_id))
+
+        overflow = len(unapproved) - self._max_unapproved_clients
+        for _, client_id in sorted(unapproved)[:max(0, overflow)]:
+            self._clients.pop(client_id, None)
 
     def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         return self._clients.get(client_id)
