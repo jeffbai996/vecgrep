@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 from mcp.shared.auth import OAuthClientInformationFull
-from mcp.server.auth.provider import AuthorizationParams
+from mcp.server.auth.provider import AuthorizeError, AuthorizationParams
 
 from vecgrep.backend.auth.provider import VecgrepOAuthProvider
 
@@ -79,6 +79,39 @@ async def test_full_auth_code_exchange(provider):
     # the access token verifies + carries the scopes
     at = await provider.load_access_token(tok.access_token)
     assert at is not None and set(at.scopes) == {"read", "propose"}
+
+
+@pytest.mark.anyio
+async def test_omitted_scope_defaults_to_read_through_code_and_tokens(provider):
+    """A client may register both scopes but omit scope on /authorize. The
+    consent page calls that read-only, so every issued artifact must agree."""
+    c = _client(); await provider.register_client(c)
+    params = AuthorizationParams(
+        state="s", scopes=None, code_challenge="chal",
+        redirect_uri="https://claude.ai/api/mcp/auth_callback",
+        redirect_uri_provided_explicitly=True, resource=None,
+    )
+    await provider.authorize(c, params)
+    code_obj = next(iter(provider.store._codes.values()))
+    assert code_obj.scopes == ["read"]
+
+    tok = await provider.exchange_authorization_code(c, code_obj)
+    assert tok.scope == "read"
+    assert (await provider.load_access_token(tok.access_token)).scopes == ["read"]
+    assert (await provider.load_refresh_token(c, tok.refresh_token)).scopes == ["read"]
+
+
+@pytest.mark.anyio
+async def test_authorize_rejects_unsupported_scope_instead_of_downgrading(provider):
+    c = _client(); await provider.register_client(c)
+    params = AuthorizationParams(
+        state="s", scopes=["admin"], code_challenge="chal",
+        redirect_uri="https://claude.ai/api/mcp/auth_callback",
+        redirect_uri_provided_explicitly=True, resource=None,
+    )
+    with pytest.raises(AuthorizeError) as exc:
+        await provider.authorize(c, params)
+    assert exc.value.error == "invalid_scope"
 
 
 @pytest.mark.anyio

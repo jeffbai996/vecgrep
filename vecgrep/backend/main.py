@@ -205,7 +205,18 @@ def create_app() -> FastAPI:
 
             q = parse_qs(urlsplit(next_target).query)
             client_id = (q.get("client_id") or [""])[0]
-            scopes = [x for x in (q.get("scope") or [""])[0].split() if x] or ["read"]
+            from .auth.scopes import UnsupportedScope, effective_scopes
+
+            requested = (
+                [x for x in q["scope"][0].split() if x]
+                if "scope" in q else None
+            )
+            try:
+                scopes = effective_scopes(requested)
+            except UnsupportedScope:
+                # The SDK will reject the authorize request. Do not present an
+                # unsupported permission as something the owner can grant.
+                scopes = []
             name = ""
             if client_id:
                 try:

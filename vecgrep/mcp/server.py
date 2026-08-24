@@ -1634,6 +1634,10 @@ def build_mcp_server() -> Any:
 
 _PROVIDER = None  # singleton — same token store for the gate + the root routes
 
+_REGISTRATION_MAX_BODY_BYTES = 64 * 1024
+_REGISTRATION_RATE_LIMIT = 30
+_REGISTRATION_RATE_WINDOW_S = 60
+
 
 def _shared_provider():
     global _PROVIDER
@@ -1664,8 +1668,11 @@ def _oauth_client_reg():
     """Dynamic Client Registration (RFC 7591): claude.ai self-registers instead
     of needing a pre-shared client_id."""
     from mcp.server.auth.settings import ClientRegistrationOptions
+    from ..backend.auth.scopes import DEFAULT_SCOPES, VALID_SCOPES
     return ClientRegistrationOptions(
-        enabled=True, valid_scopes=["read", "propose"], default_scopes=["read"],
+        enabled=True,
+        valid_scopes=list(VALID_SCOPES),
+        default_scopes=list(DEFAULT_SCOPES),
     )
 
 
@@ -1678,6 +1685,7 @@ def build_oauth_root_routes(oauth_issuer_url: str) -> list:
     from mcp.server.auth.routes import (
         create_auth_routes, create_protected_resource_routes,
     )
+    from ..backend.auth.scopes import VALID_SCOPES
     issuer = _oauth_issuer(oauth_issuer_url)
     resource = _oauth_resource(oauth_issuer_url)
     routes = create_auth_routes(
@@ -1688,9 +1696,12 @@ def build_oauth_root_routes(oauth_issuer_url: str) -> list:
     routes += create_protected_resource_routes(
         resource_url=resource,
         authorization_servers=[issuer],
-        scopes_supported=["read", "propose"],
+        scopes_supported=list(VALID_SCOPES),
     )
-    return [_trace_oauth(advertise_public_clients(r)) for r in routes]
+    return [
+        _guard_oauth_registration(_trace_oauth(advertise_public_clients(r)))
+        for r in routes
+    ]
 
 
 def advertise_public_clients(route):
@@ -1734,16 +1745,110 @@ def _trace_oauth(route):
     return Route(route.path, endpoint=_OAuthTraceASGI(inner, route.path), methods=methods)
 
 
+_TRACE_SAFE_REQUEST_FIELDS = {
+    "client_id", "client_name", "redirect_uri", "redirect_uris",
+    "response_type", "response_types", "grant_type", "grant_types",
+    "scope", "token_endpoint_auth_method", "code_challenge_method",
+}
+_TRACE_SAFE_RESPONSE_FIELDS = {
+    "client_id", "client_id_issued_at", "client_name", "redirect_uris",
+    "response_types", "grant_types", "scope", "token_endpoint_auth_method",
+    "client_secret_expires_at", "token_type", "expires_in", "error",
+    "error_description",
+}
+
+
+def _safe_trace_value(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [
+            item if item is None or isinstance(item, (str, int, float, bool))
+            else "<redacted>"
+            for item in value
+        ]
+    return "<redacted>"
+
+
+def _redact_mapping(value, safe_fields: set[str]):
+    if not isinstance(value, dict):
+        return "<redacted>"
+    return {
+        str(key): _safe_trace_value(item)
+        if str(key) in safe_fields else "<redacted>"
+        for key, item in value.items()
+    }
+
+
+def _sanitize_trace_pairs(raw: str, safe_fields: set[str]) -> str:
+    from urllib.parse import parse_qsl, urlencode
+
+    try:
+        pairs = parse_qsl(raw, keep_blank_values=True, max_num_fields=100)
+    except ValueError:
+        return f"<{len(raw.encode('utf-8', 'replace'))} bytes redacted>"
+    return urlencode([
+        (key, value if key in safe_fields else "<redacted>")
+        for key, value in pairs
+    ])
+
+
+def _sanitize_trace_body(body: str, content_type: str) -> str:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if not body:
+        return ""
+    if media_type == "application/x-www-form-urlencoded":
+        return _sanitize_trace_pairs(body, _TRACE_SAFE_REQUEST_FIELDS)
+    if media_type == "application/json" or media_type.endswith("+json"):
+        try:
+            parsed = json.loads(body)
+        except (TypeError, ValueError):
+            return f"<{len(body.encode('utf-8', 'replace'))} bytes redacted>"
+        return json.dumps(_redact_mapping(parsed, _TRACE_SAFE_REQUEST_FIELDS))
+    return f"<{len(body.encode('utf-8', 'replace'))} bytes redacted>"
+
+
+def _sanitize_trace_output(body: str) -> str:
+    if not body:
+        return ""
+    try:
+        parsed = json.loads(body)
+    except (TypeError, ValueError):
+        return f"<{len(body.encode('utf-8', 'replace'))} bytes redacted>"
+    return json.dumps(_redact_mapping(parsed, _TRACE_SAFE_RESPONSE_FIELDS))
+
+
+def _sanitize_trace_location(location: str) -> str:
+    from urllib.parse import urlsplit, urlunsplit
+
+    if not location:
+        return ""
+    try:
+        parsed = urlsplit(location)
+        query = _sanitize_trace_pairs(
+            parsed.query,
+            {"error", "error_description"},
+        )
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, ""))
+    except ValueError:
+        return "<redacted>"
+
+
 def _trace_log(method, path, query, hdrs, body_in, status, loc, out):
     import logging
-    import re
-    redact = lambda t: re.sub(r'("(?:client_secret|code|access_token|refresh_token)"\s*:\s*")[^"]+', r"\1<redacted>", t)
-    body_in = re.sub(r"(code=|code_verifier=|client_secret=)[^&]+", r"\1<redacted>", body_in)
-    query = re.sub(r"(code_challenge=)[^&]+", r"\1<c>", query)
-    loc = re.sub(r"(code=)[^&]+", r"\1<redacted>", loc)
+
+    content_type = hdrs.get("content-type", "")
     logging.getLogger("vecgrep.oauth.trace").warning(
         "oauth-trace %s %s q=%s hdrs=%s in=%s -> %s loc=%s out=%s",
-        method, path, query[:400], hdrs, redact(body_in)[:800], status, loc[:200], redact(out)[:800])
+        method,
+        path,
+        _sanitize_trace_pairs(query, _TRACE_SAFE_REQUEST_FIELDS)[:400],
+        hdrs,
+        _sanitize_trace_body(body_in, content_type)[:800],
+        status,
+        _sanitize_trace_location(loc)[:200],
+        _sanitize_trace_output(out)[:800],
+    )
 
 
 _TRACE_HDRS = ("content-type", "accept", "user-agent", "x-forwarded-for")
@@ -1843,6 +1948,120 @@ class _PublicClientMetadata:
         headers.append((b"content-length", str(len(body)).encode()))
         await send({"type": "http.response.start", "status": start["status"], "headers": headers})
         await send({"type": "http.response.body", "body": body})
+
+
+class _RegistrationRateLimiter:
+    """One process-wide DCR budget shared by both advertised route copies."""
+
+    def __init__(
+        self,
+        limit: int = _REGISTRATION_RATE_LIMIT,
+        window_s: int = _REGISTRATION_RATE_WINDOW_S,
+    ) -> None:
+        from collections import deque
+
+        self._limit = limit
+        self._window_s = window_s
+        self._attempts = deque()
+
+    def reset(self) -> None:
+        self._attempts.clear()
+
+    def allow(self) -> tuple[bool, int]:
+        import math
+        import time
+
+        now = time.monotonic()
+        cutoff = now - self._window_s
+        while self._attempts and self._attempts[0] <= cutoff:
+            self._attempts.popleft()
+        if len(self._attempts) >= self._limit:
+            retry_after = max(
+                1,
+                math.ceil(self._window_s - (now - self._attempts[0])),
+            )
+            return False, retry_after
+        self._attempts.append(now)
+        return True, 0
+
+
+_REGISTRATION_LIMITER = _RegistrationRateLimiter()
+
+
+async def _registration_error(send, status: int, error: str, retry_after: int = 0) -> None:
+    body = json.dumps({"error": error}).encode()
+    headers = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode()),
+        (b"cache-control", b"no-store"),
+        (b"access-control-allow-origin", b"*"),
+    ]
+    if retry_after:
+        headers.append((b"retry-after", str(retry_after).encode()))
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": body})
+
+
+class _RegistrationIngress:
+    """Reject abusive DCR requests before the SDK parses or persists them."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("method") == "OPTIONS":
+            await self._inner(scope, receive, send)
+            return
+
+        allowed, retry_after = _REGISTRATION_LIMITER.allow()
+        if not allowed:
+            await _registration_error(send, 429, "registration_rate_limited", retry_after)
+            return
+
+        headers = {bytes(k).lower(): bytes(v) for k, v in scope.get("headers", [])}
+        try:
+            content_length = int(headers.get(b"content-length", b"0"))
+        except ValueError:
+            content_length = 0
+        if content_length > _REGISTRATION_MAX_BODY_BYTES:
+            await _registration_error(send, 413, "registration_request_too_large")
+            return
+
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message.get("type") != "http.request":
+                await _registration_error(send, 400, "invalid_registration_request")
+                return
+            body.extend(message.get("body", b""))
+            if len(body) > _REGISTRATION_MAX_BODY_BYTES:
+                await _registration_error(send, 413, "registration_request_too_large")
+                return
+            if not message.get("more_body", False):
+                break
+
+        replayed = False
+
+        async def replay():
+            nonlocal replayed
+            if replayed:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            replayed = True
+            return {"type": "http.request", "body": bytes(body), "more_body": False}
+
+        await self._inner(scope, replay, send)
+
+
+def _guard_oauth_registration(route):
+    from starlette.routing import Route
+
+    if not isinstance(route, Route) or route.path != "/register":
+        return route
+    return Route(
+        route.path,
+        endpoint=_RegistrationIngress(route.endpoint),
+        methods=list(route.methods or ["POST", "OPTIONS"]),
+    )
 
 
 # Any proxy-transit or Tailscale-stamped header disables the loopback bypass.
@@ -2374,6 +2593,13 @@ def build_http_app(
 
     http_app = fmcp.streamable_http_app()
     if oauth_issuer_url:
+        # FastMCP carries a second copy of the OAuth routes under the mounted
+        # /mcp prefix. Apply the same DCR and trace policy there so callers
+        # cannot bypass the root-route guard via /mcp/register.
+        http_app.router.routes[:] = [
+            _guard_oauth_registration(_trace_oauth(advertise_public_clients(route)))
+            for route in http_app.router.routes
+        ]
         from ..backend.auth.approval import OAuthApprovalMiddleware
         http_app.add_middleware(OAuthApprovalMiddleware)
         if oauth_loopback_bypass:
