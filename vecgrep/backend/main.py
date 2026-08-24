@@ -56,6 +56,8 @@ def _try_build_mcp_http_app() -> Any | None:
             oauth_issuer_url=issuer,
             oauth_loopback_bypass=s.oauth_loopback_bypass,
             oauth_tailscale_identity_bypass=s.oauth_tailscale_identity_bypass,
+            mcp_allowed_hosts=s.mcp_allowed_hosts,
+            mcp_allowed_origins=s.mcp_allowed_origins,
         )
     except RuntimeError as e:
         # build_http_app raises RuntimeError when the mcp extra is missing

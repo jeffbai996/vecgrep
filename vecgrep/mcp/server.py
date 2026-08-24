@@ -1664,6 +1664,37 @@ def _oauth_resource(issuer_url: str):
     return AnyHttpUrl(f"{p.scheme}://{p.netloc}{path}")
 
 
+def _mcp_transport_security(
+    oauth_issuer_url: str | None,
+    additional_hosts: list[str] | None,
+    additional_origins: list[str] | None,
+):
+    from mcp.server.fastmcp.server import TransportSecuritySettings
+    from urllib.parse import urlsplit
+
+    local_hosts = [
+        "localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*",
+        "[::1]", "[::1]:*",
+    ]
+    local_origins = [
+        f"{scheme}://{host}{port}"
+        for scheme in ("http", "https")
+        for host in ("localhost", "127.0.0.1", "[::1]")
+        for port in ("", ":*")
+    ]
+    allowed_hosts = [*local_hosts, *(additional_hosts or [])]
+    allowed_origins = [*local_origins, *(additional_origins or [])]
+    if oauth_issuer_url:
+        issuer = urlsplit(oauth_issuer_url)
+        allowed_hosts.append(issuer.netloc)
+        allowed_origins.append(f"{issuer.scheme}://{issuer.netloc}")
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=list(dict.fromkeys(value.lower() for value in allowed_hosts)),
+        allowed_origins=list(dict.fromkeys(value.lower() for value in allowed_origins)),
+    )
+
+
 def _oauth_client_reg():
     """Dynamic Client Registration (RFC 7591): claude.ai self-registers instead
     of needing a pre-shared client_id."""
@@ -2162,6 +2193,8 @@ def build_http_app(
     oauth_issuer_url: str | None = None,
     oauth_loopback_bypass: bool = True,
     oauth_tailscale_identity_bypass: bool = True,
+    mcp_allowed_hosts: list[str] | None = None,
+    mcp_allowed_origins: list[str] | None = None,
 ) -> Any:
     """Build a Starlette ASGI app for the MCP HTTP endpoint.
 
@@ -2180,6 +2213,10 @@ def build_http_app(
     identity header and remains OAuth-only. This affects only the MCP handler at
     the sub-app root; OAuth and approval routes remain protected.
 
+    mcp_allowed_hosts / mcp_allowed_origins: additional exact values admitted
+    by the SDK's DNS-rebinding guard. Loopback values and the OAuth issuer are
+    included automatically.
+
     Uses FastMCP instead of the raw StreamableHTTPSessionManager so that:
 
     1. json_response=True  — respond with application/json, not text/event-stream.
@@ -2191,8 +2228,8 @@ def build_http_app(
        fully self-contained. Prevents stale session ID bugs where a client caches
        a dead session ID after a server restart and never re-initialises.
 
-    3. DNS rebinding protection disabled — requests arrive through Tailscale Funnel
-       with a non-localhost Host header; the default allowlist would reject them.
+    3. DNS rebinding protection uses an explicit allowlist containing loopback,
+       the configured OAuth issuer, and any operator-supplied proxy values.
 
     The returned Starlette app registers the MCP handler at '/' (via
     streamable_http_path='/'), so the parent FastAPI mount and bare-path
@@ -2202,7 +2239,6 @@ def build_http_app(
     from mcp.server.fastmcp import FastMCP
     from mcp.server.fastmcp.server import (
         StreamableHTTPASGIApp,
-        TransportSecuritySettings,
     )
 
     # OAuth: when an issuer URL is configured, run the embedded auth server.
@@ -2228,9 +2264,10 @@ def build_http_app(
     # Register at '/' so the parent app's prefix-stripping (_BearerGatedASGI
     # rewrites scope['path'] = '/') routes correctly.
     fmcp.settings.streamable_http_path = "/"
-    # Tailscale Funnel forwards requests with a non-localhost Host header.
-    fmcp.settings.transport_security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=False,
+    fmcp.settings.transport_security = _mcp_transport_security(
+        oauth_issuer_url,
+        mcp_allowed_hosts,
+        mcp_allowed_origins,
     )
 
     @fmcp.tool(

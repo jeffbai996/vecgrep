@@ -264,6 +264,8 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 | `VECGREP_OAUTH_APPROVAL_TOKEN` | unset | Strong owner approval code entered in the browser before an OAuth client may receive a code. Required when OAuth is on. |
 | `VECGREP_OAUTH_LOOPBACK_BYPASS` | `true` | Preserve direct loopback MCP clients while OAuth is on. Set `false` to require OAuth for every MCP request and disable all trusted-network bypasses. |
 | `VECGREP_OAUTH_TAILSCALE_IDENTITY_BYPASS` | `true` | When the master loopback bypass is enabled, accept authenticated Tailscale Serve users. Anonymous Funnel traffic has no identity header and still requires OAuth. |
+| `VECGREP_MCP_ALLOWED_HOSTS` | unset | Comma-separated additional Host values for private MCP proxies. Loopback and the configured OAuth issuer are allowed automatically; `:*` permits any port on one exact host. |
+| `VECGREP_MCP_ALLOWED_ORIGINS` | unset | Comma-separated additional browser origins allowed to call MCP. Loopback and the configured OAuth issuer origin are allowed automatically. |
 | `VECGREP_THREAD_POOL_SIZE` | `8` | AnyIO worker-thread cap for the HTTP service. |
 | `VECGREP_BM25_WEIGHT` | `1.5` | Weight on BM25 contribution to RRF fusion. >1 boosts literal-keyword matches over semantic noise on short queries. Set to `1.0` for pure RRF, higher for keyword-leaning ranking. |
 | `VECGREP_BM25_COVERAGE_MODE` | `penalty` | How BM25 treats docs that match only some query tokens. `penalty` keeps them but demotes the score by `(matched/total)²`; `filter` drops anything below a coverage threshold (higher precision, but can zero out the BM25 half of a multi-token query). |
@@ -434,6 +436,10 @@ vecgrep serve --host 0.0.0.0
 ```
 
 For TLS, run vecgrep behind whatever reverse proxy you already use — Tailscale Serve, Caddy, nginx — and let it terminate HTTPS. vecgrep itself is HTTP-only.
+Set `VECGREP_MCP_ALLOWED_HOSTS` to any private proxy hostname that is not the
+configured OAuth issuer; otherwise the MCP transport rejects that Host before
+dispatch. Browser clients on a separate origin also need
+`VECGREP_MCP_ALLOWED_ORIGINS`.
 
 Point an HTTP-capable client at the endpoint:
 
