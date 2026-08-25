@@ -49,10 +49,24 @@ class ExplorerStore:
                 corpus TEXT PRIMARY KEY,
                 updated_at REAL NOT NULL,
                 doc_count INTEGER NOT NULL,
-                chunk_count INTEGER NOT NULL
+                chunk_count INTEGER NOT NULL,
+                catalog_count INTEGER NOT NULL DEFAULT -1
             );
             """
         )
+        generation_columns = {
+            str(row[1])
+            for row in self._connection.execute(
+                "PRAGMA table_info(generations)"
+            ).fetchall()
+        }
+        if "catalog_count" not in generation_columns:
+            # -1 deliberately invalidates catalogs written by the short-lived
+            # pre-count schema; they are rebuilt once from canonical BM25.
+            self._connection.execute(
+                "ALTER TABLE generations ADD COLUMN "
+                "catalog_count INTEGER NOT NULL DEFAULT -1"
+            )
         self._connection.commit()
 
     def close(self) -> None:
@@ -63,7 +77,7 @@ class ExplorerStore:
         with self._lock:
             row = self._connection.execute(
                 "SELECT g.updated_at, g.doc_count, g.chunk_count, "
-                "COUNT(d.source_id) "
+                "g.catalog_count, COUNT(d.source_id) "
                 "FROM generations AS g "
                 "LEFT JOIN documents AS d ON d.corpus = g.corpus "
                 "WHERE g.corpus = ? "
@@ -72,7 +86,7 @@ class ExplorerStore:
             ).fetchone()
         if row is None:
             return None
-        if int(row[3]) != int(row[1]):
+        if int(row[4]) != int(row[3]):
             return None
         return float(row[0]), int(row[1]), int(row[2])
 
@@ -114,7 +128,7 @@ class ExplorerStore:
                     "VALUES (?, ?, ?, ?, ?)",
                     rows,
                 )
-            self._write_generation(corpus, generation)
+            self._write_generation(corpus, generation, catalog_count=len(rows))
 
     def upsert(self, corpus: str, record: dict) -> None:
         """Write one source row and invalidate the completeness marker."""
@@ -160,17 +174,28 @@ class ExplorerStore:
             )
 
     def _write_generation(
-        self, corpus: str, generation: CatalogGeneration
+        self,
+        corpus: str,
+        generation: CatalogGeneration,
+        *,
+        catalog_count: int | None = None,
     ) -> None:
         updated_at, doc_count, chunk_count = generation
+        if catalog_count is None:
+            row = self._connection.execute(
+                "SELECT COUNT(*) FROM documents WHERE corpus = ?", (corpus,)
+            ).fetchone()
+            catalog_count = int(row[0]) if row is not None else 0
         self._connection.execute(
-            "INSERT INTO generations (corpus, updated_at, doc_count, chunk_count) "
-            "VALUES (?, ?, ?, ?) "
+            "INSERT INTO generations "
+            "(corpus, updated_at, doc_count, chunk_count, catalog_count) "
+            "VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(corpus) DO UPDATE SET "
             "updated_at = excluded.updated_at, "
             "doc_count = excluded.doc_count, "
-            "chunk_count = excluded.chunk_count",
-            (corpus, updated_at, doc_count, chunk_count),
+            "chunk_count = excluded.chunk_count, "
+            "catalog_count = excluded.catalog_count",
+            (corpus, updated_at, doc_count, chunk_count, catalog_count),
         )
 
     @staticmethod

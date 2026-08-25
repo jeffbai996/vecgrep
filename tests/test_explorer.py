@@ -35,6 +35,29 @@ def test_source_catalog_store_survives_a_process_restart(tmp_path) -> None:
     reopened.close()
 
 
+def test_source_catalog_completeness_tracks_its_own_committed_rows(
+    tmp_path
+) -> None:
+    store = ExplorerStore(tmp_path / "explorer.db")
+    # Registry counts can drift from the chunk index on older corpora. The
+    # explorer mirrors searchable sources, not stale registry bookkeeping.
+    generation = (123.5, 5, 2)
+    store.replace(
+        "library",
+        [
+            {
+                "source_id": "/library/visible.md",
+                "metadata": {},
+                "doc_timestamp": None,
+                "chunk_count": 2,
+            }
+        ],
+        generation,
+    )
+    assert store.generation("library") == generation
+    store.close()
+
+
 def test_normal_index_populates_explorer_without_reloading_bm25(
     svc, tmp_path, monkeypatch
 ) -> None:
