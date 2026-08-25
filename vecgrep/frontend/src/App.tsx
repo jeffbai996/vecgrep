@@ -25,6 +25,8 @@ import {
 export default function App() {
   const [view, setView] = useState<"search" | "timeline" | "compare" | "browse">("search");
   const [corpora, setCorpora] = useState<Corpus[]>([]);
+  const [corporaLoading, setCorporaLoading] = useState(true);
+  const [corporaError, setCorporaError] = useState<string | null>(null);
   const [selectedCorpus, setSelectedCorpus] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [response, setResponse] = useState<SearchResponse | null>(null);
@@ -56,20 +58,16 @@ export default function App() {
     setTuning({ ...automaticTuning });
   };
 
-  const primeSearch = (nextQuery: string) => {
-    setQuery(nextQuery);
-    requestAnimationFrame(() => {
-      const input = document.getElementById("global-search-input") as HTMLInputElement | null;
-      input?.focus();
-      input?.setSelectionRange(nextQuery.length, nextQuery.length);
-    });
-  };
-
   const refresh = async () => {
+    setCorporaLoading(true);
+    setCorporaError(null);
     try {
       setCorpora(await api.listCorpora());
     } catch (e) {
-      setError(String((e as Error).message ?? e));
+      const message = String((e as Error).message ?? e);
+      setCorporaError(message);
+    } finally {
+      setCorporaLoading(false);
     }
   };
 
@@ -206,8 +204,9 @@ export default function App() {
               searching={searching}
               tuning={tuning}
               corpus={selectedCorpus}
-              corpusCount={corpora.length}
-              onPrimeQuery={primeSearch}
+              corpora={corpora}
+              corporaLoading={corporaLoading}
+              corporaError={corporaError}
               onRevealSource={revealInExplorer}
             />
             <AboutFooter />

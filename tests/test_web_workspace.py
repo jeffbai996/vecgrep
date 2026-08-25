@@ -219,17 +219,50 @@ def test_search_modes_share_the_result_badge_color_language() -> None:
         assert colour in results, f"ResultList lost the {colour} badge tone"
 
 
-def test_search_idle_state_is_a_guided_launchpad() -> None:
+def test_search_idle_state_is_an_operations_dashboard() -> None:
     app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
     search = (FRONTEND / "components" / "SearchBar.tsx").read_text(encoding="utf-8")
     results = (FRONTEND / "components" / "ResultList.tsx").read_text(encoding="utf-8")
+    dashboard = (FRONTEND / "components" / "SearchDashboard.tsx").read_text(
+        encoding="utf-8"
+    )
 
-    assert "onPrimeQuery" in app and "onPrimeQuery" in results
+    assert "onPrimeQuery" not in app and "onPrimeQuery" not in results
+    assert "SearchDashboard" in results
+    for signal in (
+        "Index overview",
+        "API reachable",
+        "Latest index activity",
+        "Embedding inventory",
+        "Corpus distribution",
+    ):
+        assert signal in dashboard
     for prompt in ("Find a decision", "Trace a change", "Recover context"):
-        assert prompt in results
+        assert prompt not in results and prompt not in dashboard
     assert "Search results will appear here" not in results
     assert "h-[22px] w-[22px]" in search
     assert "⌕" not in search, "the tiny text glyph must not return"
+
+
+def test_search_explainers_do_not_advertise_retired_models() -> None:
+    sidebar = (FRONTEND / "components" / "HowSearchWorks.tsx").read_text(
+        encoding="utf-8"
+    )
+    footer = (FRONTEND / "components" / "AboutFooter.tsx").read_text(
+        encoding="utf-8"
+    )
+    copy = sidebar + footer
+
+    for stale_literal in (
+        "nomic-embed-text",
+        "mxbai-embed-large",
+        "text-embedding-3-small",
+        "bge-reranker-base",
+        "~127ms",
+    ):
+        assert stale_literal not in copy
+    assert "active model inventory" in footer
+    assert "configured cross-encoder" in sidebar
 
 
 def test_score_tuning_explains_effect_and_automatic_mode() -> None:

@@ -27,15 +27,11 @@ export default function AboutFooter() {
             </div>
             <p className="text-zinc-300">
               embeds your query and every chunk into a dense vector, then ranks
-              by cosine similarity. default model is Ollama{" "}
-              <span className="text-zinc-100">bge-m3</span> (1024-dim); a corpus
-              can instead be pinned to{" "}
-              <span className="text-zinc-100">nomic-embed-text</span> (768-dim,
-              lighter), <span className="text-zinc-100">mxbai-embed-large</span>{" "}
-              (1024-dim), or OpenAI&apos;s{" "}
-              <span className="text-zinc-100">text-embedding-3-small</span>{" "}
-              (1536-dim) as a fallback. each corpus remembers its own model, so
-              one server can query corpora built with different embedders.
+              by cosine similarity. each corpus pins the backend and model it
+              was built with, so queries always use compatible vectors. the
+              search dashboard&apos;s <span className="text-zinc-100">active model inventory</span>{" "}
+              shows what this server is actually using instead of advertising
+              historical alternatives.
             </p>
             <p className="text-zinc-400 text-xs mt-2">
               good at: paraphrase, concept-match, &ldquo;the idea is similar even
@@ -157,12 +153,12 @@ export default function AboutFooter() {
         <section className="pt-2 border-t border-zinc-800/50">
           <p className="text-xs text-zinc-500">
             optional: <span className="text-zinc-300">rerank</span> in the
-            search bar runs a cross-encoder (BAAI/bge-reranker-base) over the
-            fused candidate pool. it reads query and chunk <em>together</em>
-            instead of comparing pre-computed vectors &mdash; more precise on
-            hard, paraphrase-heavy queries, but it adds latency (~127ms on a
-            small pool) and can be a wash on easy literal queries, so it&apos;s
-            off by default. when it&apos;s on, every hit also picks up a{" "}
+            search bar runs the configured cross-encoder over the fused
+            candidate pool. it reads query and chunk <em>together</em> instead
+            of comparing pre-computed vectors &mdash; more precise on hard,
+            paraphrase-heavy queries, but latency varies materially with the
+            model and candidate pool and it can be a wash on easy literal
+            queries, so it&apos;s off by default. when it&apos;s on, every hit also picks up a{" "}
             <span className="text-zinc-400">rerank</span> tag and the displayed
             % comes straight from the cross-encoder&apos;s own score (the
             cleanest P(relevant) proxy), not the cosine/BM25 mix.

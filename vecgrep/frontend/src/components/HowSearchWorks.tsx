@@ -36,16 +36,16 @@ export default function HowSearchWorks() {
 
           <Section title="rerank (opt-in)">
             With rerank on, the fused candidates are re-scored by a{" "}
-            <Hl>cross-encoder</Hl> (BAAI/bge-reranker-base) — a slower model that
+            <Hl>configured cross-encoder</Hl> — a slower model that
             reads the query and each chunk <em>together</em> instead of comparing
             pre-computed vectors. It&apos;s more accurate on hard, meaning-heavy
             queries where plain vector search whiffs.
             <br />
-            <span className="text-amber-400/90">Tradeoff:</span> it adds roughly{" "}
-            <Hl>~127ms</Hl> per search and doesn&apos;t help — can even hurt — on
-            easy literal queries. So it&apos;s <Hl>off by default</Hl>; flip it on
-            when a hybrid search returns near-misses for something you know is in
-            there. Reranked hits also gain a <Hl>rerank</Hl> tag.
+            <span className="text-amber-400/90">Tradeoff:</span> latency depends
+            heavily on the active model and candidate pool, and it can be a wash
+            on easy literal queries. So it&apos;s <Hl>off by default</Hl>; flip it
+            on when a hybrid search returns near-misses for something you know
+            is in there. Reranked hits also gain a <Hl>rerank</Hl> tag.
           </Section>
 
           <Section title="reading the score">
