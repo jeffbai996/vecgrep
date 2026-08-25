@@ -9,6 +9,8 @@ type Props = {
 };
 
 export default function CorpusList({ corpora, selected, onSelect, onDeleted }: Props) {
+  const corpusNames = corpora.map((corpus) => corpus.name);
+
   const onDelete = async (name: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (!confirm(`delete corpus '${name}'? this is irreversible.`)) return;
@@ -38,7 +40,7 @@ export default function CorpusList({ corpora, selected, onSelect, onDeleted }: P
           all
         </button>
         {corpora.map((c) => {
-          const tone = corpusTone(c.name);
+          const tone = corpusTone(c.name, corpusNames);
           return (
             <div
               key={c.name}
@@ -51,7 +53,7 @@ export default function CorpusList({ corpora, selected, onSelect, onDeleted }: P
             >
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5 min-w-0">
-                  <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${tone.dot}`} />
+                  <span className={`h-2 w-2 shrink-0 rounded-full ring-1 ring-white/20 ${tone.dot}`} />
                   <div className={`text-xs font-mono truncate ${selected === c.name ? tone.text : ""}`}>
                     {c.name}
                   </div>

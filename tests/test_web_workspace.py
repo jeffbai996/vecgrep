@@ -182,6 +182,19 @@ def test_web_ui_browse_uses_the_shared_color_pill_language() -> None:
     assert "Retry" in browse
 
 
+def test_corpus_dots_use_collision_free_high_contrast_tones() -> None:
+    corpus_list = (FRONTEND / "components" / "CorpusList.tsx").read_text(
+        encoding="utf-8"
+    )
+    tones = (FRONTEND / "browseTones.ts").read_text(encoding="utf-8")
+
+    assert "corpusTone(c.name, corpusNames)" in corpus_list
+    assert "h-2 w-2" in corpus_list
+    assert "ring-white/20" in corpus_list
+    assert "usedToneIndexes" in tones
+    assert "CORPUS_PROBE_STEP" in tones
+
+
 def test_search_modes_share_the_result_badge_color_language() -> None:
     """Each mode button carries the retriever colour its result badge uses.
 

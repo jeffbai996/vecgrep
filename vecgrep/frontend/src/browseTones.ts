@@ -65,6 +65,36 @@ const tones: BrowseTone[] = [
   },
 ];
 
+// Corpus identities use a broader wheel than the metadata pills: blue replaces
+// the near-duplicate sky slot and orange replaces fuchsia beside violet.
+const corpusTones: BrowseTone[] = [
+  tones[0],
+  {
+    border: "border-blue-800/70",
+    bg: "bg-blue-950/35",
+    text: "text-blue-300",
+    dot: "bg-blue-400",
+    selected: "border-blue-400 bg-blue-950/35",
+  },
+  tones[2],
+  tones[3],
+  tones[4],
+  tones[5],
+  {
+    border: "border-orange-800/70",
+    bg: "bg-orange-950/35",
+    text: "text-orange-300",
+    dot: "bg-orange-400",
+    selected: "border-orange-400 bg-orange-950/35",
+  },
+  tones[7],
+];
+
+// Five is coprime with the eight-tone palette and jumps across the colour
+// wheel. Collisions therefore land on a visibly different tone instead of the
+// next-door cyan/sky or violet/fuchsia slot.
+const CORPUS_PROBE_STEP = 5;
+
 export const neutralTone: BrowseTone = {
   border: "border-zinc-700",
   bg: "bg-zinc-900/70",
@@ -100,8 +130,31 @@ const schemeTones: Record<string, number> = {
   files: 2,
 };
 
-export function corpusTone(corpus: string): BrowseTone {
-  return tones[stableIndex(`corpus:${corpus}`)];
+export function corpusTone(corpus: string, corpora: readonly string[] = []): BrowseTone {
+  if (!corpora.includes(corpus)) {
+    return corpusTones[stableIndex(`corpus:${corpus}`, corpusTones.length)];
+  }
+
+  const usedToneIndexes = new Set<number>();
+  const orderedCorpora = [...new Set(corpora)].sort((left, right) => {
+    const hashDelta = stableHash(`corpus-order:${left}`) - stableHash(`corpus-order:${right}`);
+    return hashDelta || left.localeCompare(right);
+  });
+
+  for (const name of orderedCorpora) {
+    const preferredIndex = stableIndex(`corpus:${name}`, corpusTones.length);
+    let toneIndex = preferredIndex;
+    let attempts = 0;
+    while (usedToneIndexes.has(toneIndex) && attempts < corpusTones.length) {
+      toneIndex = (toneIndex + CORPUS_PROBE_STEP) % corpusTones.length;
+      attempts += 1;
+    }
+    if (attempts === corpusTones.length) toneIndex = preferredIndex;
+    usedToneIndexes.add(toneIndex);
+    if (name === corpus) return corpusTones[toneIndex];
+  }
+
+  return corpusTones[stableIndex(`corpus:${corpus}`, corpusTones.length)];
 }
 
 export function folderTone(path: string[]): BrowseTone {
@@ -121,11 +174,15 @@ export function schemeTone(scheme: string): BrowseTone {
   return tones[schemeTones[scheme] ?? stableIndex(`scheme:${scheme}`)];
 }
 
-function stableIndex(value: string): number {
+function stableIndex(value: string, paletteSize = tones.length): number {
+  return stableHash(value) % paletteSize;
+}
+
+function stableHash(value: string): number {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {
     hash ^= value.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
   }
-  return (hash >>> 0) % tones.length;
+  return hash >>> 0;
 }

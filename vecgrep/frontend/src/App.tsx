@@ -184,6 +184,7 @@ export default function App() {
             {view === "browse" && (
               <BrowsePanel
                 corpus={selectedCorpus}
+                corpusNames={corpora.map((item) => item.name)}
                 revealSource={revealSource}
                 onRevealHandled={() => setRevealSource(null)}
               />

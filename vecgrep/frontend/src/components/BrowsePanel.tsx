@@ -19,13 +19,14 @@ import {
 type RevealTarget = { corpus: string; sourceId: string; nonce: number };
 type Props = {
   corpus: string | null;
+  corpusNames: string[];
   revealSource: RevealTarget | null;
   onRevealHandled: () => void;
 };
 
 const PAGE_SIZE = 50;
 
-export default function BrowsePanel({ corpus, revealSource, onRevealHandled }: Props) {
+export default function BrowsePanel({ corpus, corpusNames, revealSource, onRevealHandled }: Props) {
   const [path, setPath] = useState<string[]>([]);
   const [queryInput, setQueryInput] = useState("");
   const [query, setQuery] = useState("");
@@ -133,7 +134,7 @@ export default function BrowsePanel({ corpus, revealSource, onRevealHandled }: P
       ? listing.recent_documents
       : listing.documents
     : [];
-  const activeCorpusTone = corpusTone(corpus);
+  const activeCorpusTone = corpusTone(corpus, corpusNames);
   const catalogCount = listing
     ? Object.values(listing.facets.kinds).reduce((total, count) => total + count, 0)
     : 0;
