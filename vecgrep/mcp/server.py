@@ -571,6 +571,7 @@ def _run_propose(corpus: str, content: str | None, edit_id: str | None = None,
     through this exact same path (same corpus gate, size cap, proposal, confirm
     step). Body-only; frontmatter is preserved. A non-unique old_str is a hard
     error, never a silent mis-edit."""
+    from ..backend.ingestion.adapters.base import AdapterError
     from ..backend.write import proposal as _P
 
     denied = _require_remote_scope("propose")
@@ -604,7 +605,10 @@ def _run_propose(corpus: str, content: str | None, edit_id: str | None = None,
         if old_str is None or new_str is None:
             return json.dumps({"error": "patch mode needs both old_str and "
                                         "new_str."})
-        body = _doc_body(corpus, edit_id)
+        try:
+            body = _doc_body(corpus, edit_id)
+        except AdapterError as exc:
+            return json.dumps({"error": f"invalid frontmatter: {exc}"})
         if body is None:
             return json.dumps({"error": (
                 f"doc {edit_id!r} not found in corpus {corpus!r} — can't patch "
@@ -624,7 +628,10 @@ def _run_propose(corpus: str, content: str | None, edit_id: str | None = None,
             return json.dumps({"error": "a meta-only edit (tags/source_kind "
                                         "without content) requires an edit "
                                         "target (doc_id)."})
-        body = _doc_body(corpus, edit_id)
+        try:
+            body = _doc_body(corpus, edit_id)
+        except AdapterError as exc:
+            return json.dumps({"error": f"invalid frontmatter: {exc}"})
         if body is None:
             return json.dumps({"error": (
                 f"doc {edit_id!r} not found in corpus {corpus!r} — can't retag "
@@ -891,10 +898,9 @@ def _commit_direct_write(corpus: str, content: str, title: str | None,
             meta["tags"] = list(tags)
         try:
             _P._validate_meta(meta)
+            rendered = _P.render_doc(doc_id, content, meta)
         except _P.ProposalError as e:
             return json.dumps({"error": str(e)})
-
-        rendered = _P.render_doc(doc_id, content, meta)
         target = corpus_dir / f"{doc_id}.md"
         _atomic_write_private(target, rendered)
 
@@ -988,7 +994,13 @@ def _commit_direct_edit(corpus: str, doc_id: str, content: str | None,
             return json.dumps({"error": (
                 f"doc {doc_id!r} is not an editable file in corpus {corpus!r}: "
                 f"{reason}. (Nothing was changed.)")})
-        if "tier: protected" in on_disk:
+        from ..backend.ingestion.adapters.base import AdapterError
+        from ..backend.ingestion.adapters.markdown import parse_frontmatter
+        try:
+            meta = dict(parse_frontmatter(on_disk) or {})
+        except AdapterError as exc:
+            return json.dumps({"error": f"invalid frontmatter: {exc}"})
+        if meta.get("tier") == "protected":
             return json.dumps({"error": (
                 f"{doc_id} is tier: protected — human-only. Use propose_edit so a "
                 f"human confirms it with the exact-id ack.")})
@@ -1011,21 +1023,23 @@ def _commit_direct_edit(corpus: str, doc_id: str, content: str | None,
                 f"result is {n_bytes} bytes, over the {_direct_write_max_bytes()}-byte "
                 f"direct-write cap.")})
 
-    # Back up BEFORE mutating: this write had no human review, so the previous
-    # body must stay recoverable. Timestamped so repeated edits don't clobber
-    # each other's history.
-        import time as _t
-        bak = target.with_suffix(f".md.bak-{_t.time_ns()}")
-        _atomic_write_private(bak, on_disk)
-
-    # Preserve the existing frontmatter, swap only the body, and record that an
-    # unreviewed edit touched it (and when) for audit.
-        from ..backend.ingestion.adapters.markdown import parse_frontmatter
-        meta = dict(parse_frontmatter(on_disk) or {})
+        # Preserve the existing frontmatter, swap only the body, and record that
+        # an unreviewed edit touched it (and when) for audit. Render before the
+        # backup so invalid legacy metadata leaves no mutation or backup debris.
         meta.update({"corpus": corpus, "origin": "agent-direct"})
         from datetime import datetime as _datetime, timezone as _timezone
         meta["edited_at"] = _datetime.now(_timezone.utc).isoformat(timespec="seconds")
-        rendered = _P.render_doc(doc_id, new_body, meta)
+        try:
+            rendered = _P.render_doc(doc_id, new_body, meta)
+        except _P.ProposalError as exc:
+            return json.dumps({"error": str(exc)})
+
+        # Back up BEFORE mutating: this write had no human review, so the
+        # previous body must stay recoverable. Timestamped so repeated edits
+        # don't clobber each other's history.
+        import time as _t
+        bak = target.with_suffix(f".md.bak-{_t.time_ns()}")
+        _atomic_write_private(bak, on_disk)
         _atomic_write_private(target, rendered)
 
         index_note = ""

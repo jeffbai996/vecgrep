@@ -16,18 +16,21 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
-from .proposal import Proposal, render_doc
+from .proposal import Proposal, ProposalError, render_doc
 
 
 def _body_of(rendered: str) -> str:
     """Extract the body below the YAML frontmatter of a rendered doc."""
-    parts = rendered.split("---", 2)
-    return parts[2].strip() if len(parts) >= 3 else rendered.strip()
+    fences = list(re.finditer(r"^---\r?$", rendered, flags=re.MULTILINE))
+    if len(fences) >= 2 and fences[0].start() == 0:
+        return rendered[fences[1].end():].strip()
+    return rendered.strip()
 
 
 def _writethrough_cmd(corpus: str) -> str | None:
@@ -84,6 +87,16 @@ def _run_writethrough(cmd: str, *, op: str, corpus: str, doc_id: str,
 
 class ConfirmError(RuntimeError):
     """A confirm that can't proceed: unknown proposal, overwrite attempt, etc."""
+
+
+def _is_protected_frontmatter(text: str) -> bool:
+    from ..ingestion.adapters.base import AdapterError
+    from ..ingestion.adapters.markdown import parse_frontmatter
+
+    try:
+        return parse_frontmatter(text).get("tier") == "protected"
+    except AdapterError as exc:
+        raise ConfirmError(f"invalid protected-document frontmatter: {exc}") from exc
 
 
 @dataclass
@@ -227,12 +240,19 @@ def _confirm_locked(
         op = ("merge" if absorbs else
               "delete" if getattr(proposal, "is_delete", False) else
               "edit" if proposal.is_edit else "write")
-        if op in ("edit", "delete") and target.exists():
-            if "tier: protected" in target.read_text() \
-                    and (protected_ack or "").strip() != proposal.doc_id:
-                raise ConfirmError(
-                    f"{proposal.doc_id} is protected — re-state its exact id as "
-                    f"protected_ack to {op} it (got {protected_ack!r}).")
+        is_protected = proposal.meta.get("tier") == "protected"
+        if op in ("edit", "delete", "merge") and target.exists():
+            is_protected = is_protected or _is_protected_frontmatter(
+                target.read_text()
+            )
+        for absorbed_id in absorbs:
+            absorbed = target.parent / f"{absorbed_id}.md"
+            if absorbed.exists() and _is_protected_frontmatter(absorbed.read_text()):
+                is_protected = True
+        if is_protected and (protected_ack or "").strip() != proposal.doc_id:
+            raise ConfirmError(
+                f"{proposal.doc_id} is protected — re-state its exact id as "
+                f"protected_ack to {op} it (got {protected_ack!r}).")
         body = "" if op == "delete" else _body_of(proposal.rendered)
         res = _run_writethrough(wt_cmd, op=op, corpus=corpus,
                                 doc_id=proposal.doc_id, body=body,
@@ -255,7 +275,8 @@ def _confirm_locked(
                 message=f"{proposal.doc_id} was already absent — nothing to delete.",
             )
         on_disk = target.read_text()
-        if "tier: protected" in on_disk and (protected_ack or "").strip() != proposal.doc_id:
+        if _is_protected_frontmatter(on_disk) and \
+                (protected_ack or "").strip() != proposal.doc_id:
             raise ConfirmError(
                 f"{proposal.doc_id} is protected — re-state its exact id as "
                 f"protected_ack to confirm the DELETE (got {protected_ack!r})."
@@ -297,14 +318,14 @@ def _confirm_locked(
     # doc id — deliberate intent, not a fat-finger or a slipped bot suggestion.
     is_protected = proposal.meta.get("tier") == "protected" or (
         proposal.is_edit and target.exists()
-        and "tier: protected" in target.read_text()
+        and _is_protected_frontmatter(target.read_text())
     )
     # Absorbed docs are DELETED by this merge, so a protected one must
     # escalate too — otherwise protection is bypassable by merging it away.
     absorbs = list(getattr(proposal, "merge_absorbs", []) or [])
     for _did in absorbs:
-        _p = Path(corpus_dir) / f"{_did}.md"
-        if _p.exists() and "tier: protected" in _p.read_text():
+        _p = target.parent / f"{_did}.md"
+        if _p.exists() and _is_protected_frontmatter(_p.read_text()):
             is_protected = True
     if is_protected and (protected_ack or "").strip() != proposal.doc_id:
         raise ConfirmError(
@@ -317,7 +338,12 @@ def _confirm_locked(
     # Stamp the confirmer into the doc at WRITE time (it isn't known at propose
     # time) so the on-disk record carries who authorized it — audit provenance.
     final_meta = {**proposal.meta, "confirmed_by": confirmer}
-    rendered = render_doc(proposal.doc_id, _body_of(proposal.rendered), final_meta)
+    try:
+        rendered = render_doc(
+            proposal.doc_id, _body_of(proposal.rendered), final_meta
+        )
+    except ProposalError as exc:
+        raise ConfirmError(f"unsafe proposal frontmatter: {exc}") from exc
     target.write_text(rendered)
 
     # Re-embed just this file (incremental), then verify retrievability.

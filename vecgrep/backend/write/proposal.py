@@ -10,8 +10,10 @@ No versioning / supersede / archive — an edit overwrites in place.
 """
 from __future__ import annotations
 
+import json
 import re
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +35,12 @@ SOURCE_KINDS = ("insight", "fact", "correction", "journal", "decision",
 # path-safe token — no dots or separators — so the corpus-boundary guard
 # (no traversal via edit_id/delete_id) holds unchanged.
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]*-([a-z0-9]+)$")
+
+FRONTMATTER_FIELDS = (
+    "id", "title", "status", "created_at", "origin", "confirmed_by",
+    "confirmed_at", "edited_at", "tier", "corpus", "source_kind", "tags",
+    "merged_from",
+)
 
 
 class ProposalError(ValueError):
@@ -86,22 +94,50 @@ def next_doc_id(corpus_dir: Path, corpus: str) -> str:
     return f"{prefix}-{ts}"
 
 
+def _is_single_line_scalar(value: str) -> bool:
+    return not any(
+        (
+            unicodedata.category(char) == "Cc" and char != "\t"
+        ) or unicodedata.category(char) in {"Zl", "Zp"}
+        for char in value
+    )
+
+
+def _render_list(values: list | tuple) -> str:
+    items = [str(value) for value in values]
+    legacy_safe = all(
+        item
+        and item == item.strip()
+        and not any(char in item for char in ",[]")
+        and _is_single_line_scalar(item)
+        for item in items
+    )
+    if legacy_safe:
+        return "[" + ", ".join(items) + "]"
+    # JSON is still valid inside the deliberately tiny YAML-ish format, and
+    # ensure_ascii escapes every Unicode line separator as well as CR/LF.
+    return json.dumps(items, ensure_ascii=True)
+
+
 def render_doc(doc_id: str, content: str, meta: dict) -> str:
     """Render a doc as YAML-frontmatter + body, deterministic key order."""
     # WHITELIST, not a passthrough: a key absent here is silently dropped from
     # the rendered doc. Add new frontmatter keys to this list or they vanish.
-    order = [
-        "id", "title", "status", "created_at", "origin", "confirmed_by",
-        "confirmed_at", "edited_at", "tier", "corpus", "source_kind", "tags", "merged_from",
-    ]
     fm = {**meta, "id": doc_id}
     lines = ["---"]
-    for k in order:
+    for k in FRONTMATTER_FIELDS:
         if k not in fm or fm[k] is None:
             continue
         v = fm[k]
-        rendered = ("[" + ", ".join(str(x) for x in v) + "]"
-                    if isinstance(v, (list, tuple)) else str(v))
+        if isinstance(v, (list, tuple)):
+            rendered = _render_list(v)
+        else:
+            rendered = str(v)
+            if not _is_single_line_scalar(rendered):
+                raise ProposalError(
+                    f"frontmatter field {k!r} must be a single line without "
+                    "line-breaking control characters"
+                )
         lines.append(f"{k}: {rendered}")
     lines.append("---")
     lines.append("")

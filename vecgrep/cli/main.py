@@ -1732,7 +1732,7 @@ def confirm(proposal_id: str, ack: str | None) -> None:
     try:
         res = _C.confirm(proposal_id, store, VecgrepService(ephemeral=False),
                          corpus, corpus_dir, confirmed_by=getpass.getuser(),
-                         protected_ack=ack or pr.doc_id)
+                         protected_ack=ack)
     except _C.ConfirmError as e:
         raise click.ClickException(str(e))
     status = "✓" if res.ok else "⚠"

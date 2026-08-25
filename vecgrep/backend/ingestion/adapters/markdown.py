@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Iterator
 
 from ..dates import extract_timestamp
+from ...write.proposal import FRONTMATTER_FIELDS
 from .base import Adapter, AdapterError, Document
 from .registry import register_adapter
 
 _MD_EXTS = {".md", ".markdown", ".mdx"}
 
 _FM_LINE = re.compile(r"^([A-Za-z][A-Za-z0-9_]*):\s*(.*)$")
+_RESERVED_FRONTMATTER_FIELDS = frozenset(FRONTMATTER_FIELDS)
 
 
 def parse_frontmatter(text: str) -> dict:
@@ -44,9 +47,25 @@ def parse_frontmatter(text: str) -> dict:
         if not m:
             continue
         key, raw = m.group(1), m.group(2).strip()
+        if key in meta and key in _RESERVED_FRONTMATTER_FIELDS:
+            raise AdapterError(f"duplicate reserved frontmatter field: {key}")
         if raw.startswith("[") and raw.endswith("]"):
             inner = raw[1:-1].strip()
-            meta[key] = [x.strip() for x in inner.split(",") if x.strip()] if inner else []
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError:
+                decoded = None
+            if isinstance(decoded, list) and all(
+                isinstance(item, str) for item in decoded
+            ):
+                meta[key] = decoded
+            else:
+                # Backward compatibility for vecgrep's original unquoted
+                # `[alpha, beta]` representation.
+                meta[key] = (
+                    [x.strip() for x in inner.split(",") if x.strip()]
+                    if inner else []
+                )
         else:
             meta[key] = raw
     return meta
