@@ -166,6 +166,20 @@ def test_web_ui_browse_is_a_three_pane_explorer_with_search_reveal() -> None:
     assert "Exact date" not in browse, "the old selector form must not survive"
 
 
+def test_web_ui_browse_uses_the_shared_color_pill_language() -> None:
+    browse = (FRONTEND / "components" / "BrowsePanel.tsx").read_text(encoding="utf-8")
+    tones = (FRONTEND / "browseTones.ts").read_text(encoding="utf-8")
+
+    for helper in ("corpusTone", "folderTone", "kindTone", "tagTone"):
+        assert helper in browse
+        assert helper in tones
+    for color in ("violet", "sky", "emerald", "amber", "rose", "cyan"):
+        assert color in tones
+    assert "ColorPill" in browse
+    assert "Cataloging" in browse
+    assert "Retry" in browse
+
+
 def test_search_modes_share_the_result_badge_color_language() -> None:
     """Each mode button carries the retriever colour its result badge uses.
 

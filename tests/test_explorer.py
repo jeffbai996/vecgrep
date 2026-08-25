@@ -8,9 +8,105 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from vecgrep.backend.explorer_store import ExplorerStore
+
 
 def _index(svc, path: Path, corpus: str = "library") -> None:
     svc.index(str(path), corpus)
+
+
+def test_source_catalog_store_survives_a_process_restart(tmp_path) -> None:
+    path = tmp_path / "explorer.db"
+    generation = (123.5, 1, 2)
+    record = {
+        "source_id": "/library/launch.md",
+        "metadata": {"source_kind": "memory", "tags": ["ops"]},
+        "doc_timestamp": 123.0,
+        "chunk_count": 2,
+    }
+
+    first = ExplorerStore(path)
+    first.replace("library", [record], generation)
+    first.close()
+
+    reopened = ExplorerStore(path)
+    assert reopened.generation("library") == generation
+    assert reopened.records("library") == [record]
+    reopened.close()
+
+
+def test_normal_index_populates_explorer_without_reloading_bm25(
+    svc, tmp_path, monkeypatch
+) -> None:
+    source = tmp_path / "guide.md"
+    source.write_text("# Guide\n\nUseful text.", encoding="utf-8")
+    _index(svc, source)
+    svc._explorer_cache.clear()
+
+    def fail_load(_corpus: str):
+        raise AssertionError("explorer reloaded the chunk-level BM25 sidecar")
+
+    monkeypatch.setattr(svc.bm25, "_load", fail_load)
+    listing = svc.explore("library")
+    assert listing["documents"][0]["name"] == "guide.md"
+
+
+def test_legacy_catalog_backfills_once_then_uses_the_compact_store(
+    svc, tmp_path, monkeypatch
+) -> None:
+    source = tmp_path / "legacy.md"
+    source.write_text("# Legacy\n\nExisting indexed content.", encoding="utf-8")
+    _index(svc, source)
+    svc.explorer_store.drop("library")
+    svc._explorer_cache.clear()
+
+    original_load = svc.bm25._load
+    calls = 0
+
+    def counted_load(corpus: str):
+        nonlocal calls
+        calls += 1
+        return original_load(corpus)
+
+    monkeypatch.setattr(svc.bm25, "_load", counted_load)
+    assert svc.explore("library")["documents"][0]["name"] == "legacy.md"
+    assert calls == 1
+
+    svc._explorer_cache.clear()
+
+    def fail_load(_corpus: str):
+        raise AssertionError("a completed legacy backfill ran twice")
+
+    monkeypatch.setattr(svc.bm25, "_load", fail_load)
+    assert svc.explore("library")["documents"][0]["name"] == "legacy.md"
+
+
+def test_source_catalog_tracks_reindex_and_delete(svc, tmp_path) -> None:
+    source = tmp_path / "record.md"
+    source.write_text(
+        "---\nsource_kind: memory\ntitle: First title\ntags: [ops]\n---\n\nShort.",
+        encoding="utf-8",
+    )
+    svc.index(str(source), "library", chunker_name="fixed_token")
+    before = svc.explore("library", path=["Memories"])["documents"][0]
+    assert before["name"] == "First title"
+    assert before["tags"] == ["ops"]
+
+    source.write_text(
+        "---\nsource_kind: memory\ntitle: Second title\ntags: [design]\n---\n\n"
+        + "expanded content " * 2_000,
+        encoding="utf-8",
+    )
+    svc.index(str(source), "library", chunker_name="fixed_token", force=True)
+    svc._explorer_cache.clear()
+    after = svc.explore("library", path=["Memories"])["documents"][0]
+    assert after["name"] == "Second title"
+    assert after["tags"] == ["design"]
+    assert after["chunk_count"] > before["chunk_count"]
+
+    svc.delete_source("library", str(source))
+    svc._explorer_cache.clear()
+    assert svc.explore("library")["recent_documents"] == []
 
 
 def test_explorer_organizes_channel_corpora_by_channel_and_month(svc, tmp_path) -> None:

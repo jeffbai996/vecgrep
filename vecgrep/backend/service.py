@@ -36,6 +36,7 @@ from .assembly import (
 )
 from .embed.cache import CachedBackend, EmbedCache
 from .explorer import ExplorerCatalog, build_catalog, list_catalog
+from .explorer_store import CatalogGeneration, ExplorerStore
 from .ingestion.enrich import chunk_enrichment
 from .ingestion.adapters import (
     AdapterError,
@@ -260,13 +261,16 @@ class VecgrepService:
             url=None if ephemeral else self.settings.qdrant_url,
         )
         self.bm25 = BM25Store(None if ephemeral else self.settings.home / "bm25")
+        self.explorer_store = ExplorerStore(
+            None if ephemeral else self.settings.home / "explorer.db"
+        )
         self.mutations = MutationJournal(
             None if ephemeral else self.settings.home / "mutations"
         )
         self._backend_cache: dict[str, EmbedBackend] = {}
-        # Source-level explorer catalogs are derived from the compact BM25
-        # payloads.  Cache by corpus generation so navigation never walks all
-        # chunks and an index mutation naturally invalidates the view.
+        # Source-level explorer catalogs live in a compact, disposable SQLite
+        # sidecar. Cache their rendered tree by corpus generation; canonical
+        # search data remains Qdrant + BM25.
         self._explorer_cache: dict[
             str, tuple[tuple[float, int, int], ExplorerCatalog]
         ] = {}
@@ -366,6 +370,7 @@ class VecgrepService:
         if operation == "delete_corpus":
             self.store.drop_collection(collection)
             self.bm25.drop(corpus_name)
+            self._drop_explorer_catalog(corpus_name)
             if self.registry.has(corpus_name):
                 self.registry.delete(corpus_name)
             self.mutations.finish(corpus_name)
@@ -406,6 +411,7 @@ class VecgrepService:
         if metadata is None and live_count == 0:
             self.store.drop_collection(collection)
             self.bm25.drop(corpus_name)
+            self._drop_explorer_catalog(corpus_name)
             if self.registry.has(corpus_name):
                 self.registry.delete(corpus_name)
             self.mutations.finish(corpus_name)
@@ -445,6 +451,9 @@ class VecgrepService:
                     ).hexdigest()
 
         self.bm25.replace(corpus_name, bm25_records)
+        # The catalog is derived. Invalidate it here and let the next Browse
+        # request backfill from the freshly recovered BM25 sidecar.
+        self._drop_explorer_catalog(corpus_name)
         corpus.sources = sources
         corpus.source_hashes = source_hashes
         corpus.doc_count = len(sources)
@@ -618,6 +627,7 @@ class VecgrepService:
         total_docs = 0
         total_chunks = 0
         skipped = 0
+        catalog_sync_ok = True
         docs = _expand(source, adapter, include=include)
         # A multi-source index (a directory) defers the BM25 sidecar write to
         # the end of the batch: persisting per source re-pickled the whole
@@ -724,6 +734,25 @@ class VecgrepService:
                     self.mutations.write(record)
                 if update_bm25:
                     self.bm25.upsert(corpus_name, ids, [c.text for c in chunks], payloads)
+                    try:
+                        self.explorer_store.upsert(
+                            corpus_name,
+                            {
+                                "source_id": doc.source_id,
+                                "metadata": payloads[0].get("metadata") or {},
+                                "doc_timestamp": doc.timestamp,
+                                "chunk_count": len(chunks),
+                            },
+                        )
+                    except Exception as exc:
+                        # Browse metadata is disposable. Never fail canonical
+                        # indexing because its derived cache needs a rebuild.
+                        catalog_sync_ok = False
+                        logger.warning(
+                            "explorer catalog update failed for %s: %s",
+                            corpus_name,
+                            exc,
+                        )
                     if journaled:
                         record = self.mutations.read(corpus_name) or {}
                         record["phase"] = "bm25_done"
@@ -743,6 +772,18 @@ class VecgrepService:
                         self.registry._corpora[corpus.name] = corpus
                     else:
                         self.registry.upsert(corpus)
+                    if catalog_sync_ok:
+                        try:
+                            self.explorer_store.set_generation(
+                                corpus.name, self._explorer_generation(corpus)
+                            )
+                        except Exception as exc:
+                            catalog_sync_ok = False
+                            logger.warning(
+                                "explorer catalog commit failed for %s: %s",
+                                corpus_name,
+                                exc,
+                            )
                     if journaled:
                         record = self.mutations.read(corpus_name) or {}
                         record["phase"] = "registry_done"
@@ -1164,28 +1205,66 @@ class VecgrepService:
 
     def _explorer_catalog_for(self, corpus_name: str) -> ExplorerCatalog:
         corpus = self.registry.get(corpus_name)
-        generation = (corpus.updated_at, corpus.doc_count, corpus.chunk_count)
+        generation = self._explorer_generation(corpus)
         cached = self._explorer_cache.get(corpus.name)
         if cached is not None and cached[0] == generation:
             return cached[1]
 
-        idx = self.bm25._load(corpus.name)
-        records: list[dict] = []
-        for source_id, positions in idx.by_source.items():
-            if not positions:
-                continue
-            payload = idx.payloads[positions[0]]
-            records.append(
-                {
-                    "source_id": source_id,
-                    "metadata": payload.get("metadata") or {},
-                    "doc_timestamp": payload.get("doc_timestamp"),
-                    "chunk_count": len(positions),
-                }
+        try:
+            catalog_is_current = (
+                self.explorer_store.generation(corpus.name) == generation
             )
+            records = (
+                self.explorer_store.records(corpus.name)
+                if catalog_is_current
+                else None
+            )
+        except Exception as exc:
+            logger.warning(
+                "explorer catalog read failed for %s: %s", corpus.name, exc
+            )
+            records = None
+        if records is None:
+            # One-time path for existing installations (and self-healing after
+            # catalog loss): collapse the canonical chunk sidecar, then persist
+            # the compact source rows so future process starts stay cheap.
+            idx = self.bm25._load(corpus.name)
+            records = []
+            for source_id, positions in idx.by_source.items():
+                if not positions:
+                    continue
+                payload = idx.payloads[positions[0]]
+                records.append(
+                    {
+                        "source_id": source_id,
+                        "metadata": payload.get("metadata") or {},
+                        "doc_timestamp": payload.get("doc_timestamp"),
+                        "chunk_count": len(positions),
+                    }
+                )
+            try:
+                self.explorer_store.replace(corpus.name, records, generation)
+            except Exception as exc:
+                logger.warning(
+                    "explorer catalog backfill persist failed for %s: %s",
+                    corpus.name,
+                    exc,
+                )
         catalog = build_catalog(records)
         self._explorer_cache[corpus.name] = (generation, catalog)
         return catalog
+
+    @staticmethod
+    def _explorer_generation(corpus: Corpus) -> CatalogGeneration:
+        return corpus.updated_at, corpus.doc_count, corpus.chunk_count
+
+    def _drop_explorer_catalog(self, corpus_name: str) -> None:
+        try:
+            self.explorer_store.drop(corpus_name)
+        except Exception as exc:
+            logger.warning(
+                "explorer catalog drop failed for %s: %s", corpus_name, exc
+            )
 
     def explore(
         self,
@@ -1198,15 +1277,16 @@ class VecgrepService:
         limit: int = 50,
     ) -> dict:
         """Paginated source-level navigation for one corpus."""
-        return list_catalog(
-            self._explorer_catalog_for(corpus_name),
-            corpus=corpus_name,
-            path=path,
-            query=query,
-            sort=sort,
-            offset=offset,
-            limit=limit,
-        )
+        with self.locks.read(corpus_name):
+            return list_catalog(
+                self._explorer_catalog_for(corpus_name),
+                corpus=corpus_name,
+                path=path,
+                query=query,
+                sort=sort,
+                offset=offset,
+                limit=limit,
+            )
 
     def explorer_source(
         self,
@@ -1218,22 +1298,23 @@ class VecgrepService:
         """Resolve a source's explorer home and return a bounded text preview."""
         if max_chars < 1:
             raise ValueError("max_chars must be at least 1")
-        catalog = self._explorer_catalog_for(corpus_name)
-        entry = catalog.find(source_id)
-        if entry is None:
-            return None
-        source = self.get_source(corpus_name, source_id)
-        if source is None:
-            return None
-        text = str(source.get("text") or "")
-        return {
-            **entry.summary(),
-            "corpus": corpus_name,
-            "metadata": source.get("metadata") or {},
-            "text": text[:max_chars],
-            "source_length": len(text),
-            "truncated": len(text) > max_chars,
-        }
+        with self.locks.read(corpus_name):
+            catalog = self._explorer_catalog_for(corpus_name)
+            entry = catalog.find(source_id)
+            if entry is None:
+                return None
+            source = self.get_source(corpus_name, source_id)
+            if source is None:
+                return None
+            text = str(source.get("text") or "")
+            return {
+                **entry.summary(),
+                "corpus": corpus_name,
+                "metadata": source.get("metadata") or {},
+                "text": text[:max_chars],
+                "source_length": len(text),
+                "truncated": len(text) > max_chars,
+            }
 
     # ----- v1.2 tools: related / compare / stats / summarize ----------------
 
@@ -1876,6 +1957,7 @@ class VecgrepService:
             record["phase"] = "qdrant_done"
             self.mutations.write(record)
             self.bm25.drop(corpus.name)
+            self._drop_explorer_catalog(corpus.name)
             record["phase"] = "bm25_done"
             self.mutations.write(record)
             self.registry.delete(name)
@@ -1991,6 +2073,16 @@ class VecgrepService:
             record["phase"] = "qdrant_done"
             self.mutations.write(record)
             self.bm25.delete_by_source(corpus.name, source_id)
+            catalog_sync_ok = True
+            try:
+                self.explorer_store.delete_source(corpus.name, source_id)
+            except Exception as exc:
+                catalog_sync_ok = False
+                logger.warning(
+                    "explorer catalog delete failed for %s: %s",
+                    corpus_name,
+                    exc,
+                )
             record["phase"] = "bm25_done"
             self.mutations.write(record)
             target.doc_count = len(target.sources)
@@ -2000,6 +2092,17 @@ class VecgrepService:
                 self.registry._corpora[target.name] = target
             else:
                 self.registry.upsert(target)
+            if catalog_sync_ok:
+                try:
+                    self.explorer_store.set_generation(
+                        target.name, self._explorer_generation(target)
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "explorer catalog commit failed for %s: %s",
+                        corpus_name,
+                        exc,
+                    )
             record["phase"] = "registry_done"
             self.mutations.write(record)
             self.mutations.finish(corpus_name)
