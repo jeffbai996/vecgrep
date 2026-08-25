@@ -38,6 +38,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import json
+from dataclasses import asdict
 from typing import Any
 
 
@@ -240,6 +241,7 @@ def _run_search(args: dict) -> str:
     svc = _svc()
     common = dict(
         corpus_name=args.get("corpus"),
+        corpus_names=args.get("corpora"),
         mode=args.get("mode", "hybrid"),
         rerank=_should_rerank(svc, args),
         filters=args.get("filters") or None,
@@ -247,7 +249,7 @@ def _run_search(args: dict) -> str:
     if _should_budget(svc, args):
         # Breadth mode: full head + one-line stub tail under a token ceiling.
         # Stubs carry chunk_id — expand any of them with the get_chunk tool.
-        full, stubs = svc.search_budgeted(
+        full, stubs, warnings = svc.search_budgeted_with_diagnostics(
             args["query"],
             full_k=int(args.get("full_k") or 8),
             token_ceiling=int(args.get("token_ceiling") or 4000),
@@ -266,10 +268,19 @@ def _run_search(args: dict) -> str:
                 }
                 for s in stubs
             ],
+            "warnings": [asdict(w) for w in warnings],
         }
         return json.dumps(payload, indent=2)
-    results = svc.search(args["query"], top_k=args.get("top_k"), **common)
-    return json.dumps([_result_payload(r) for r in results], indent=2)
+    outcome = svc.search_with_diagnostics(
+        args["query"], top_k=args.get("top_k"), **common
+    )
+    hits = [_result_payload(r) for r in outcome.results]
+    if outcome.warnings:
+        return json.dumps({
+            "hits": hits,
+            "warnings": [asdict(w) for w in outcome.warnings],
+        }, indent=2)
+    return json.dumps(hits, indent=2)
 
 
 def _run_get_chunk(corpus: str, chunk_id: str, window: int = 400) -> str:
@@ -417,6 +428,9 @@ def _run_list_corpora(include_hidden: bool = False) -> str:
             "doc_count": c.doc_count,
             "chunk_count": c.chunk_count,
             "chunker": c.chunker,
+            "description": getattr(c, "description", ""),
+            "use_for": getattr(c, "use_for", []),
+            "avoid_for": getattr(c, "avoid_for", []),
         }
         for c in svc.list_corpora()
         if include_hidden or not svc.is_hidden_corpus(c.name)
@@ -441,6 +455,9 @@ def _run_get_corpus(name: str) -> str:
                 "updated_at": c.updated_at,
                 "decay_half_life_days": c.decay_half_life_days,
                 "rank_weight": getattr(c, "rank_weight", 1.0),
+                "description": getattr(c, "description", ""),
+                "use_for": getattr(c, "use_for", []),
+                "avoid_for": getattr(c, "avoid_for", []),
                 # What `filters` the caller can pass to search — surfaced so
                 # filtering by actor/channel/date isn't a guessing game.
                 "filterable": svc.filterable_fields(c.name)["filters"],
@@ -1169,7 +1186,9 @@ def build_mcp_server() -> Any:
                 description=(
                     "Semantic search across vecgrep corpora. Returns ranked chunks with "
                     "surrounding context. Use this instead of dumping documents into "
-                    "context — index once, search per question."
+                    "context — index once, search per question. Do not guess corpus "
+                    "names: call list_corpora when scope is uncertain, then search the "
+                    "smallest relevant set."
                 ),
                 inputSchema={
                     "type": "object",
@@ -1181,6 +1200,15 @@ def build_mcp_server() -> Any:
                         "corpus": {
                             "type": "string",
                             "description": "Limit to one corpus. Omit to search all corpora.",
+                        },
+                        "corpora": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "description": (
+                                "Exact corpus subset. Mutually exclusive with corpus; "
+                                "use names returned by list_corpora."
+                            ),
                         },
                         "top_k": {
                             "type": "integer",
@@ -1541,7 +1569,11 @@ def build_mcp_server() -> Any:
             ),
             Tool(
                 name="list_corpora",
-                description="List every vecgrep corpus and its stats (doc count, chunk count, embedding model).",
+                description=(
+                    "List vecgrep corpora with routing descriptions, use_for, "
+                    "avoid_for, counts, and embedding models. Call this before "
+                    "search when the right corpus scope is unclear."
+                ),
                 inputSchema={"type": "object", "properties": {}},
             ),
             Tool(
@@ -2293,11 +2325,14 @@ def build_http_app(
             "one-line previews. The stubs are real results, not filler — scan "
             "them and call get_chunk on any that look right before concluding "
             "something isn't there."
+            " Do not guess corpus names: call list_corpora when scope is "
+            "uncertain, then search the smallest relevant set."
         )
     )
     def search(
         query: str,
         corpus: str | None = None,
+        corpora: list[str] | None = None,
         top_k: int = 5,
         mode: str = "hybrid",
         rerank: bool | None = None,
@@ -2326,6 +2361,7 @@ def build_http_app(
         return _run_search({
             "query": query,
             "corpus": corpus,
+            "corpora": corpora,
             "top_k": top_k,
             "mode": mode,
             "rerank": rerank,

@@ -39,6 +39,9 @@ def test_build_mcp_server_registers_tools() -> None:
         # inert unless VECGREP_DIRECT_WRITE_CORPUS is set
         "write", "edit",
     }
+    search = next(t for t in result.root.tools if t.name == "search")
+    assert search.inputSchema["properties"]["corpora"]["minItems"] == 1
+    assert "list_corpora" in search.description
 
 
 def test_build_http_app_returns_asgi_app() -> None:

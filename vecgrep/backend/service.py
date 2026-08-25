@@ -87,6 +87,19 @@ CHUNKERS: dict[str, type[Chunker]] = {
 SearchMode = Literal["hybrid", "vector", "bm25"]
 DEFAULT_MODE: SearchMode = "hybrid"
 
+
+@dataclass(frozen=True)
+class SearchWarning:
+    corpus: str
+    code: str
+    message: str
+
+
+@dataclass
+class SearchOutcome:
+    results: list["SearchResult"]
+    warnings: list[SearchWarning]
+
 # Reciprocal Rank Fusion constant. 60 is the canonical value from the
 # original RRF paper; we expose it here as a single knob.
 RRF_K = 60
@@ -855,7 +868,7 @@ class VecgrepService:
         patterns = list(getattr(self.settings, "cross_corpus_exclude", None) or [])
         return any(fnmatch.fnmatch(name, pat) for pat in patterns)
 
-    def search(
+    def search_with_diagnostics(
         self,
         query: str,
         corpus_name: str | None = None,
@@ -867,7 +880,9 @@ class VecgrepService:
         explain: bool = False,
         include_superseded: bool = False,
         expand_aliases: bool = True,
-    ) -> list[SearchResult]:
+        corpus_names: list[str] | None = None,
+    ) -> SearchOutcome:
+        started = time.monotonic()
         top_k = top_k or self.settings.default_top_k
         if expand_aliases:
             # Entity alias expansion (user-supplied map, outside the repo;
@@ -877,14 +892,30 @@ class VecgrepService:
             alias_map = load_alias_map_cached(aliases_path())
             if alias_map:
                 query, _matched = expand_query(query, alias_map)
-        if corpus_name:
+        if corpus_name is not None and corpus_names is not None:
+            raise CorpusError("corpus and corpora are mutually exclusive")
+        plural_scope = corpus_names is not None
+        if corpus_names is not None:
+            if not corpus_names:
+                raise CorpusError("corpora cannot be empty")
+            names = list(dict.fromkeys(corpus_names))
+            # Resolve every requested name before beginning any search. This
+            # avoids a typo returning a misleading partial result.
+            corpora = [self.registry.get(name) for name in names]
+        elif corpus_name:
             # An explicitly named corpus is always searched, exclusions or not
             # -- otherwise the eval harness could not query its own build.
             corpora = [self.registry.get(corpus_name)]
         else:
             corpora = self._searchable_corpora()
         if not corpora:
-            return []
+            if corpus_name is None:
+                logger.info(
+                    "cross-corpus search requested=[] successful=[] failed=[] "
+                    "result_counts={} elapsed_ms=%d",
+                    round((time.monotonic() - started) * 1000),
+                )
+            return SearchOutcome([], [])
 
         # Pull a wider pool than top_k whenever post-retrieval steps can shrink
         # the set — filtering, reranking, OR dedup — so we don't return fewer
@@ -894,6 +925,9 @@ class VecgrepService:
         per_corpus_k = max(CANDIDATE_POOL, top_k)
 
         results: list[SearchResult] = []
+        warnings: list[SearchWarning] = []
+        successful: list[str] = []
+        failures: list[tuple[Corpus, Exception]] = []
         workers = min(
             len(corpora), max(1, int(getattr(self.settings, "search_fanout_workers", 8) or 1))
         )
@@ -903,14 +937,50 @@ class VecgrepService:
             # BM25 lookup), so they overlap cleanly. Results are concatenated in
             # corpus order, not completion order, to keep output deterministic.
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                for chunk in pool.map(
-                    lambda c: self._search_one(c, query, per_corpus_k, mode, explain=explain),
-                    corpora,
-                ):
-                    results.extend(chunk)
+                pending = [
+                    (c, pool.submit(
+                        self._search_one, c, query, per_corpus_k, mode,
+                        explain=explain,
+                    ))
+                    for c in corpora
+                ]
+                # Consume in request/registry order, not completion order, so
+                # both results and warnings remain deterministic.
+                for c, future in pending:
+                    try:
+                        results.extend(future.result())
+                        successful.append(c.name)
+                    except Exception as exc:
+                        failures.append((c, exc))
         else:
             for c in corpora:
-                results.extend(self._search_one(c, query, per_corpus_k, mode, explain=explain))
+                try:
+                    results.extend(self._search_one(c, query, per_corpus_k, mode, explain=explain))
+                    successful.append(c.name)
+                except Exception as exc:
+                    failures.append((c, exc))
+
+        partial_allowed = corpus_name is None
+        if failures and (not partial_allowed or not successful):
+            if corpus_name is None or plural_scope:
+                logger.info(
+                    "cross-corpus search requested=%s successful=%s failed=%s "
+                    "result_counts=%s elapsed_ms=%d",
+                    [c.name for c in corpora],
+                    successful,
+                    [c.name for c, _ in failures],
+                    {name: 0 for name in successful},
+                    round((time.monotonic() - started) * 1000),
+                )
+            raise failures[0][1]
+        warnings = [
+            SearchWarning(
+                corpus=c.name,
+                code="search_failed",
+                message=f"{type(exc).__name__}: corpus search failed",
+            )
+            for c, exc in failures
+        ]
 
         # Default to active-only retrieval (write-tool status schema): a
         # superseded version never surfaces as current truth. Caller opts out
@@ -963,7 +1033,50 @@ class VecgrepService:
             weights = {c.name: (getattr(c, "rank_weight", 1.0) or 1.0) for c in corpora}
             results.sort(key=lambda r: r.similarity_pct * weights.get(r.corpus, 1.0),
                          reverse=True)
-        return results
+        if corpus_name is None or plural_scope:
+            counts = {name: 0 for name in successful}
+            for result in results:
+                if result.corpus in counts:
+                    counts[result.corpus] += 1
+            logger.info(
+                "cross-corpus search requested=%s successful=%s failed=%s "
+                "result_counts=%s elapsed_ms=%d",
+                [c.name for c in corpora],
+                successful,
+                [c.name for c, _ in failures],
+                counts,
+                round((time.monotonic() - started) * 1000),
+            )
+        return SearchOutcome(results, warnings)
+
+    def search(
+        self,
+        query: str,
+        corpus_name: str | None = None,
+        top_k: int | None = None,
+        mode: SearchMode = DEFAULT_MODE,
+        rerank: bool = False,
+        rerank_model: str | None = None,
+        filters: list[str] | None = None,
+        explain: bool = False,
+        include_superseded: bool = False,
+        expand_aliases: bool = True,
+        corpus_names: list[str] | None = None,
+    ) -> list[SearchResult]:
+        """Backward-compatible search result list without diagnostics."""
+        return self.search_with_diagnostics(
+            query,
+            corpus_name,
+            top_k,
+            mode=mode,
+            rerank=rerank,
+            rerank_model=rerank_model,
+            filters=filters,
+            explain=explain,
+            include_superseded=include_superseded,
+            expand_aliases=expand_aliases,
+            corpus_names=corpus_names,
+        ).results
 
     def search_budgeted(
         self,
@@ -988,6 +1101,26 @@ class VecgrepService:
         return split_full_and_stubs(
             results, full_k=full_k, max_total=max_total, token_ceiling=token_ceiling
         )
+
+    def search_budgeted_with_diagnostics(
+        self,
+        query: str,
+        corpus_name: str | None = None,
+        full_k: int = DEFAULT_FULL_K,
+        max_total: int = DEFAULT_MAX_TOTAL,
+        token_ceiling: int = DEFAULT_STUB_TOKEN_CEILING,
+        **kwargs,
+    ) -> tuple[list[SearchResult], list[ResultStub], list[SearchWarning]]:
+        outcome = self.search_with_diagnostics(
+            query, corpus_name, top_k=max_total, **kwargs
+        )
+        full, stubs = split_full_and_stubs(
+            outcome.results,
+            full_k=full_k,
+            max_total=max_total,
+            token_ceiling=token_ceiling,
+        )
+        return full, stubs, outcome.warnings
 
     def timeline(
         self,
@@ -1804,9 +1937,15 @@ class VecgrepService:
         if mode == "bm25":
             out = []
             max_score = max((s for _, s, _ in bm25_hits), default=0.0)
-            for rank, (cid, score, payload) in enumerate(bm25_hits[:top_k]):
+            selected = bm25_hits[:top_k]
+            missing = [
+                cid for cid, _, payload in selected
+                if "context_before" not in payload
+            ]
+            hydrated = self.store.get_many_by_id(collection, missing)
+            for rank, (cid, score, payload) in enumerate(selected):
                 if "context_before" not in payload:
-                    payload = self.store.get_by_id(collection, cid) or payload
+                    payload = hydrated.get(cid) or payload
                 r = _bm25_to_result(corpus.name, cid, score, payload, ["bm25"], max_score=max_score)
                 r.explain = {
                     "bm25_score": float(score),
@@ -1864,6 +2003,11 @@ class VecgrepService:
             decayed[cid] = raw * factor * weight
 
         fused = sorted(decayed.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
+        missing = [
+            cid for cid, _ in fused
+            if "context_before" not in payloads_by_id[cid]
+        ]
+        hydrated = self.store.get_many_by_id(collection, missing)
         # For BM25-only display: rescale per-query so the top BM25 hit reads
         # at BM25_DISPLAY_TOP (~90%) and weaker BM25 hits taper toward
         # BM25_DISPLAY_FLOOR. The raw fused RRF score is unchanged for ranking.
@@ -1875,7 +2019,7 @@ class VecgrepService:
             # A recovery-built BM25 sidecar omits the derived context fields;
             # Qdrant is canonical, so refetch when they are absent.
             if "context_before" not in payload:
-                payload = self.store.get_by_id(collection, cid) or payload
+                payload = hydrated.get(cid) or payload
             matched_by = sources.get(cid, [])
             # similarity_pct: pick the most informative signal for display.
             # When vector saw it, the calibrated cosine pct (after sigmoid)
@@ -2020,6 +2164,35 @@ class VecgrepService:
             if weight is not None and weight <= 0:
                 raise CorpusError("rank weight must be positive (or omit to reset to 1.0)")
             corpus.rank_weight = 1.0 if weight is None else weight
+            self.registry.upsert(corpus)
+            return corpus
+
+    def set_corpus_context(
+        self,
+        name: str,
+        description: str = "",
+        use_for: list[str] | None = None,
+        avoid_for: list[str] | None = None,
+    ) -> Corpus:
+        """Replace operator-authored routing metadata without re-indexing."""
+        description = description.strip()
+        use_for = [hint.strip() for hint in (use_for or [])]
+        avoid_for = [hint.strip() for hint in (avoid_for or [])]
+        if len(description) > 500:
+            raise CorpusError("description must be at most 500 characters")
+        for label, hints in (("use_for", use_for), ("avoid_for", avoid_for)):
+            if len(hints) > 8:
+                raise CorpusError(f"{label} accepts at most 8 hints")
+            if any(not hint for hint in hints):
+                raise CorpusError(f"{label} hints cannot be empty")
+            if any(len(hint) > 240 for hint in hints):
+                raise CorpusError(f"each {label} hint must be at most 240 characters")
+        with self.locks.write(name):
+            self._recover_corpus_locked(name)
+            corpus = self.registry.get(name)
+            corpus.description = description
+            corpus.use_for = use_for
+            corpus.avoid_for = avoid_for
             self.registry.upsert(corpus)
             return corpus
 
@@ -2812,19 +2985,12 @@ class VecgrepService:
             # the untrusted pickle is safe and closes the RCE vector.
             pass
 
-            corpus = Corpus(
-                name=target_name,
-                embed_backend=meta["embed_backend"],
-                embed_model=meta["embed_model"],
-                dim=meta["dim"],
-                chunker=meta.get("chunker", "sentence_window"),
-                doc_count=meta.get("doc_count", 0),
-                chunk_count=meta.get("chunk_count", 0),
-                created_at=meta.get("created_at", time.time()),
-                updated_at=time.time(),
-                sources=list(meta.get("sources", [])),
-                source_hashes=dict(meta.get("source_hashes", {})),
-            )
+            # Corpus dataclass defaults make old archives compatible; using
+            # the complete metadata mapping means new routing/weight/storage
+            # fields survive export/import without one-off copy code.
+            meta["name"] = target_name
+            meta["updated_at"] = time.time()
+            corpus = Corpus(**meta)
             self.registry.upsert(corpus)
 
         # Re-open store so the new collection is visible.
@@ -2927,19 +3093,7 @@ def _hit_payload(hit: StoredHit) -> dict:
 
 
 def _corpus_to_dict(c: Corpus) -> dict:
-    return {
-        "name": c.name,
-        "embed_backend": c.embed_backend,
-        "embed_model": c.embed_model,
-        "dim": c.dim,
-        "chunker": c.chunker,
-        "doc_count": c.doc_count,
-        "chunk_count": c.chunk_count,
-        "created_at": c.created_at,
-        "updated_at": c.updated_at,
-        "sources": list(c.sources),
-        "source_hashes": dict(c.source_hashes),
-    }
+    return asdict(c)
 
 
 def _copytree(src: Path, dst: Path) -> None:

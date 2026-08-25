@@ -69,6 +69,12 @@ class Corpus:
     # restore -- has to read it back, or the collection silently reverts to
     # float32 and the corpus quietly gets slower and bigger again.
     datatype: str = "float32"
+    # Operator-authored routing context for agents choosing the smallest
+    # relevant search scope. These fields are metadata only: changing them
+    # never requires a corpus rebuild.
+    description: str = ""
+    use_for: list[str] = field(default_factory=list)
+    avoid_for: list[str] = field(default_factory=list)
 
 
 class CorpusRegistry:

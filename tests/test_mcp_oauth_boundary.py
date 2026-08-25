@@ -1,6 +1,7 @@
 """OAuth protects proxied MCP while trusted direct-loopback clients still work."""
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 
 import pytest
@@ -63,7 +64,13 @@ def test_direct_loopback_can_initialize_and_list_tools(loopback_client: TestClie
         headers=MCP_HEADERS,
     )
     assert listed.status_code == 200
-    assert "search" in {tool["name"] for tool in listed.json()["result"]["tools"]}
+    tools = listed.json()["result"]["tools"]
+    assert "search" in {tool["name"] for tool in tools}
+    search = next(tool for tool in tools if tool["name"] == "search")
+    corpora_schema = search["inputSchema"]["properties"]["corpora"]
+    assert "array" in json.dumps(corpora_schema)
+    assert "string" in json.dumps(corpora_schema)
+    assert "list_corpora" in search["description"]
 
 
 def test_dns_rebinding_host_is_rejected_before_loopback_bypass(

@@ -20,6 +20,7 @@ class IndexResponse(BaseModel):
 class SearchRequest(BaseModel):
     query: str
     corpus: str | None = None
+    corpora: list[str] | None = None
     top_k: int | None = None
     mode: str = "hybrid"
     rerank: bool = False  # opt-in: benchmark showed +127ms tax + quality wash on default-on
@@ -39,6 +40,10 @@ class SearchRequest(BaseModel):
     def validate_budget_shape(self) -> "SearchRequest":
         if self.full_k > self.max_total:
             raise ValueError("full_k cannot exceed max_total")
+        if self.corpus is not None and self.corpora is not None:
+            raise ValueError("corpus and corpora are mutually exclusive")
+        if self.corpora is not None and not self.corpora:
+            raise ValueError("corpora cannot be empty")
         return self
 
 
@@ -151,11 +156,18 @@ class TimelineGroup(BaseModel):
     slice_text: str = ""
 
 
+class SearchWarningOut(BaseModel):
+    corpus: str
+    code: str
+    message: str
+
+
 class SearchResponse(BaseModel):
     hits: list[SearchHit]
     # Budget mode only: the stub tail below the full-context hits.
-    stubs: list[SearchStub] = []
+    stubs: list[SearchStub] = Field(default_factory=list)
     calibration: Calibration | None = None
+    warnings: list[SearchWarningOut] = Field(default_factory=list)
 
 
 class CorpusOut(BaseModel):
@@ -172,6 +184,27 @@ class CorpusOut(BaseModel):
     decay_half_life_days: float | None = None
     rank_weight: float = 1.0
     bm25_weight: float | None = None
+    description: str = ""
+    use_for: list[str] = Field(default_factory=list)
+    avoid_for: list[str] = Field(default_factory=list)
+
+
+class CorpusContextRequest(BaseModel):
+    description: str = Field(default="", max_length=500)
+    use_for: list[str] = Field(default_factory=list, max_length=8)
+    avoid_for: list[str] = Field(default_factory=list, max_length=8)
+
+    @model_validator(mode="after")
+    def validate_hints(self) -> "CorpusContextRequest":
+        self.description = self.description.strip()
+        self.use_for = [hint.strip() for hint in self.use_for]
+        self.avoid_for = [hint.strip() for hint in self.avoid_for]
+        for label, hints in (("use_for", self.use_for), ("avoid_for", self.avoid_for)):
+            if any(not hint for hint in hints):
+                raise ValueError(f"{label} hints cannot be empty")
+            if any(len(hint) > 240 for hint in hints):
+                raise ValueError(f"each {label} hint must be at most 240 characters")
+        return self
 
 
 class WeightRequest(BaseModel):

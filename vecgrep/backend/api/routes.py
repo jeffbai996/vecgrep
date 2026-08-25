@@ -16,6 +16,7 @@ from .schemas import (
     BrowseRequest,
     ChunkWindow,
     ConfigOut,
+    CorpusContextRequest,
     CorpusOut,
     DecayRequest,
     IndexRequest,
@@ -25,6 +26,7 @@ from .schemas import (
     SearchRequest,
     SearchResponse,
     SearchStub,
+    SearchWarningOut,
     TimelineGroup,
     TimelineRequest,
     WeightRequest,
@@ -146,6 +148,18 @@ def set_bm25_weight(name: str, req: WeightRequest) -> CorpusOut:
     return CorpusOut(**asdict(corpus))
 
 
+@router.post("/corpora/{name}/context", response_model=CorpusOut)
+def set_corpus_context(name: str, req: CorpusContextRequest) -> CorpusOut:
+    svc = _service()
+    try:
+        corpus = svc.set_corpus_context(
+            name, req.description, req.use_for, req.avoid_for
+        )
+    except CorpusError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return CorpusOut(**asdict(corpus))
+
+
 @router.delete("/corpora/{name}/source/{id:path}")
 def delete_source(name: str, id: str) -> dict:
     svc = _service()
@@ -209,14 +223,29 @@ def search(req: SearchRequest) -> SearchResponse:
         if req.budget:
             # Breadth mode: full head + one-line stub tail. Expand a stub via
             # GET /api/chunk/{corpus}/{chunk_id}.
-            full, stubs = svc.search_budgeted(
-                req.query,
-                req.corpus,
-                full_k=req.full_k,
-                max_total=req.max_total,
-                token_ceiling=req.token_ceiling,
-                **common,
-            )
+            if hasattr(svc, "search_budgeted_with_diagnostics"):
+                full, stubs, warnings = svc.search_budgeted_with_diagnostics(
+                    req.query,
+                    req.corpus,
+                    corpus_names=req.corpora,
+                    full_k=req.full_k,
+                    max_total=req.max_total,
+                    token_ceiling=req.token_ceiling,
+                    **common,
+                )
+            else:
+                # Compatibility for in-process service adapters that implement
+                # the pre-diagnostics interface. The real service always takes
+                # the branch above.
+                full, stubs = svc.search_budgeted(
+                    req.query,
+                    req.corpus,
+                    full_k=req.full_k,
+                    max_total=req.max_total,
+                    token_ceiling=req.token_ceiling,
+                    **common,
+                )
+                warnings = []
             return SearchResponse(
                 hits=[_hit_out(r) for r in full],
                 stubs=[
@@ -231,8 +260,15 @@ def search(req: SearchRequest) -> SearchResponse:
                     for s in stubs
                 ],
                 calibration=Calibration(**svc.calibration(req.corpus)),
+                warnings=[SearchWarningOut(**asdict(w)) for w in warnings],
             )
-        results = svc.search(req.query, req.corpus, req.top_k, **common)
+        outcome = svc.search_with_diagnostics(
+            req.query,
+            req.corpus,
+            req.top_k,
+            corpus_names=req.corpora,
+            **common,
+        )
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except EmbedBackendError as e:
@@ -240,8 +276,9 @@ def search(req: SearchRequest) -> SearchResponse:
     except RerankerError as e:
         raise HTTPException(status_code=503, detail=str(e))
     return SearchResponse(
-        hits=[_hit_out(r) for r in results],
+        hits=[_hit_out(r) for r in outcome.results],
         calibration=Calibration(**svc.calibration(req.corpus)),
+        warnings=[SearchWarningOut(**asdict(w)) for w in outcome.warnings],
     )
 
 

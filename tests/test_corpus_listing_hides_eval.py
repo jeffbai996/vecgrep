@@ -59,7 +59,15 @@ class TestTheServiceItselfStaysHonest:
 def _corpus(name):
     """A real Corpus, not a stand-in — the HTTP edge runs asdict() over it."""
     from vecgrep.backend.store.corpora import Corpus
-    return Corpus(name=name, embed_backend="ollama", embed_model="bge-m3", dim=8)
+    return Corpus(
+        name=name,
+        embed_backend="ollama",
+        embed_model="bge-m3",
+        dim=8,
+        description=f"context for {name}",
+        use_for=["routing"],
+        avoid_for=["guessing"],
+    )
 
 
 class _FakeSvc:
@@ -73,6 +81,9 @@ class _FakeSvc:
     def is_hidden_corpus(self, name):
         import fnmatch
         return any(fnmatch.fnmatch(name, p) for p in self._patterns)
+
+    def filterable_fields(self, name):
+        return {"filters": []}
 
 
 NAMES = ["docs", "eval-docs-base", "code", "eval-code-base"]
@@ -91,6 +102,18 @@ class TestTheMcpTool:
         got = [c["name"] for c in
                json.loads(mcp_server._run_list_corpora(include_hidden=True))]
         assert got == NAMES, "the eval harness has to be able to see its own builds"
+
+    def test_routing_context_is_exposed(self, monkeypatch):
+        from vecgrep.mcp import server as mcp_server
+        monkeypatch.setattr(mcp_server, "_svc", lambda: _FakeSvc(["docs"]))
+        item = json.loads(mcp_server._run_list_corpora())[0]
+        assert item["description"] == "context for docs"
+        assert item["use_for"] == ["routing"]
+        assert item["avoid_for"] == ["guessing"]
+        detail = json.loads(mcp_server._run_get_corpus("docs"))
+        assert detail["description"] == "context for docs"
+        assert detail["use_for"] == ["routing"]
+        assert detail["avoid_for"] == ["guessing"]
 
 
 class TestTheHttpRoute:

@@ -413,9 +413,6 @@ class QdrantStore:
         """
         if not point_ids:
             return {}
-        existing = {c.name for c in self.client.get_collections().collections}
-        if collection not in existing:
-            return {}
         try:
             points = self.client.retrieve(
                 collection_name=collection,

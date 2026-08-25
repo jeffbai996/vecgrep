@@ -428,7 +428,7 @@ def summarize(corpus: str, after: str | None, before: str | None,
 
 def _run_budget_search(
     query: str,
-    corpus: str | None,
+    corpora: tuple[str, ...],
     mode: str,
     rerank: bool,
     rerank_model: str | None,
@@ -439,12 +439,15 @@ def _run_budget_search(
     token_ceiling: int,
 ) -> None:
     """--budget flow: full head + stub tail, via API when up, else local."""
+    corpus = corpora[0] if len(corpora) == 1 else None
+    corpus_names = list(corpora) if len(corpora) > 1 else None
     if _api_alive():
         out = _post(
             "/api/search",
             {
                 "query": query,
                 "corpus": corpus,
+                "corpora": corpus_names,
                 "mode": mode,
                 "rerank": rerank,
                 "rerank_model": rerank_model,
@@ -456,11 +459,13 @@ def _run_budget_search(
             },
         )
         hits, stubs = out["hits"], out.get("stubs", [])
+        warnings = out.get("warnings", [])
     else:
         svc = VecgrepService(ephemeral=False)
         try:
-            full, stub_objs = svc.search_budgeted(
+            full, stub_objs, warning_objs = svc.search_budgeted_with_diagnostics(
                 query, corpus, full_k=full_k, token_ceiling=token_ceiling,
+                corpus_names=corpus_names,
                 mode=mode, rerank=rerank, rerank_model=rerank_model,
                 filters=filter_list or None, explain=explain,
             )
@@ -493,8 +498,10 @@ def _run_budget_search(
             }
             for s in stub_objs
         ]
+        warnings = [asdict(w) for w in warning_objs]
     if json_out:
         click.echo(json.dumps({"hits": hits, "stubs": stubs}, indent=2))
+        _print_search_warnings(warnings)
         return
     _print_results(hits, False)
     if stubs:
@@ -511,6 +518,14 @@ def _run_budget_search(
                 f"{s['similarity_pct']:5.1f}%  {s['source_id']}{ts}  "
                 f"{s['snippet'][:100]}  [{s['chunk_id']}]"
             )
+    _print_search_warnings(warnings)
+
+
+def _print_search_warnings(warnings: list[dict]) -> None:
+    for warning in warnings:
+        click.echo(
+            f"warning: {warning['corpus']}: {warning['message']}", err=True
+        )
 
 
 @cli.command()
@@ -595,7 +610,10 @@ def chunk(corpus: str, chunk_id: str, window: int, json_out: bool) -> None:
 
 @cli.command()
 @click.argument("query")
-@click.option("--corpus", default=None, help="Search one corpus (default: all).")
+@click.option(
+    "--corpus", "corpora", multiple=True,
+    help="Search this corpus. Repeat for a selected set (default: all).",
+)
 @click.option("--top", "top_k", default=None, type=int, help="Max results.")
 @click.option(
     "--mode",
@@ -664,7 +682,7 @@ def chunk(corpus: str, chunk_id: str, window: int, json_out: bool) -> None:
 )
 def search(
     query: str,
-    corpus: str | None,
+    corpora: tuple[str, ...],
     top_k: int | None,
     mode: str,
     rerank: bool,
@@ -685,18 +703,21 @@ def search(
         if watch:
             raise click.ClickException("--budget and --watch are mutually exclusive.")
         _run_budget_search(
-            query, corpus, mode, rerank, rerank_model, filter_list,
+            query, corpora, mode, rerank, rerank_model, filter_list,
             explain, json_out, full_k, token_ceiling,
         )
         return
 
     def run_once() -> list[dict[str, Any]]:
+        corpus = corpora[0] if len(corpora) == 1 else None
+        corpus_names = list(corpora) if len(corpora) > 1 else None
         if _api_alive():
             out = _post(
                 "/api/search",
                 {
                     "query": query,
                     "corpus": corpus,
+                    "corpora": corpus_names,
                     "top_k": top_k,
                     "mode": mode,
                     "rerank": rerank,
@@ -705,11 +726,13 @@ def search(
                     "explain": explain,
                 },
             )
+            _print_search_warnings(out.get("warnings", []))
             return out["hits"]
         svc = VecgrepService(ephemeral=False)
         try:
-            results = svc.search(
+            outcome = svc.search_with_diagnostics(
                 query, corpus, top_k,
+                corpus_names=corpus_names,
                 mode=mode, rerank=rerank, rerank_model=rerank_model,
                 filters=filter_list or None, explain=explain,
             )
@@ -719,6 +742,7 @@ def search(
             if rerank:
                 raise click.ClickException(str(e))
             raise
+        _print_search_warnings([asdict(w) for w in outcome.warnings])
         return [
             {
                 "similarity_pct": r.similarity_pct,
@@ -733,7 +757,7 @@ def search(
                 "relevance_label": r.relevance_label,
                 "explain": r.explain or {},
             }
-            for r in results
+            for r in outcome.results
         ]
 
     if not watch:
@@ -807,6 +831,47 @@ def corpora_list(json_out: bool) -> None:
             f"{c['embed_model']:<28} "
             f"{c['doc_count']:>5} "
             f"{c['chunk_count']:>7}"
+        )
+
+
+@corpora.command("context")
+@click.argument("name")
+@click.option("--description", default=None, help="What this corpus contains.")
+@click.option("--use-for", "use_for", multiple=True, help="Positive routing hint; repeatable.")
+@click.option("--avoid-for", "avoid_for", multiple=True, help="Negative routing hint; repeatable.")
+@click.option("--clear", is_flag=True, help="Clear all routing context.")
+def corpora_context(
+    name: str,
+    description: str | None,
+    use_for: tuple[str, ...],
+    avoid_for: tuple[str, ...],
+    clear: bool,
+) -> None:
+    """Set or clear operator-authored bot routing context."""
+    supplied = description is not None or bool(use_for) or bool(avoid_for)
+    if clear and supplied:
+        raise click.ClickException("--clear cannot be combined with context fields")
+    if not clear and not supplied:
+        raise click.ClickException("provide context fields or --clear")
+    payload = {
+        "description": "" if clear else (description or ""),
+        "use_for": [] if clear else list(use_for),
+        "avoid_for": [] if clear else list(avoid_for),
+    }
+    if _api_alive():
+        corpus = _post(f"/api/corpora/{name}/context", payload)
+    else:
+        svc = VecgrepService()
+        try:
+            corpus = asdict(svc.set_corpus_context(name, **payload))
+        except CorpusError as e:
+            raise click.ClickException(str(e))
+    if clear:
+        click.echo(f"{name}: routing context cleared")
+    else:
+        click.echo(
+            f"{name}: routing context set "
+            f"({len(corpus['use_for'])} use, {len(corpus['avoid_for'])} avoid)"
         )
 
 

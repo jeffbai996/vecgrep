@@ -98,6 +98,9 @@ def test_scheduler_disabled_and_deduplicates_same_slot(vg_home: Path) -> None:
 def test_embedded_backup_restore_rebuilds_searchable_state(svc, make_doc, vg_home: Path) -> None:
     source = make_doc("notes.txt", "alpha recovery marker")
     svc.index(str(source), "notes")
+    svc.set_corpus_context(
+        "notes", "Durable notes", ["facts"], ["live state"]
+    )
     svc.store.client.close()
 
     manager = BackupManager(Settings(home=vg_home))
@@ -112,6 +115,10 @@ def test_embedded_backup_restore_rebuilds_searchable_state(svc, make_doc, vg_hom
     restored = manager.service_factory()
     assert restored.store.count("vecgrep__notes") > 0
     assert restored.bm25.search("notes", "alpha", top_k=5)
+    metadata = restored.registry.get("notes")
+    assert metadata.description == "Durable notes"
+    assert metadata.use_for == ["facts"]
+    assert metadata.avoid_for == ["live state"]
     assert result["issues"] == []
     restored.store.client.close()
 
