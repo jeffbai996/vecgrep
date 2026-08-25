@@ -6,6 +6,9 @@ type Props = {
   response: SearchResponse | null;
   searching: boolean;
   tuning: Tuning;
+  corpus: string | null;
+  corpusCount: number;
+  onPrimeQuery: (query: string) => void;
   onRevealSource: (corpus: string, sourceId: string) => void;
 };
 
@@ -52,7 +55,15 @@ function MatchBadge({ matchedBy }: { matchedBy: string[] | undefined }) {
   );
 }
 
-export default function ResultList({ response, searching, tuning, onRevealSource }: Props) {
+export default function ResultList({
+  response,
+  searching,
+  tuning,
+  corpus,
+  corpusCount,
+  onPrimeQuery,
+  onRevealSource,
+}: Props) {
   const [expanded, setExpanded] = useState<Record<string, ExpandState>>({});
 
   useEffect(() => {
@@ -121,7 +132,13 @@ export default function ResultList({ response, searching, tuning, onRevealSource
     );
   }
   if (response === null) {
-    return <div className="text-zinc-600 text-sm py-8 text-center">Search results will appear here.</div>;
+    return (
+      <SearchLaunchpad
+        corpus={corpus}
+        corpusCount={corpusCount}
+        onPrimeQuery={onPrimeQuery}
+      />
+    );
   }
 
   const orderedHits = rerankByTuning(response.hits, tuning);
@@ -225,6 +242,76 @@ export default function ResultList({ response, searching, tuning, onRevealSource
           );
         })}
       </ol>
+    </section>
+  );
+}
+
+const STARTERS = [
+  {
+    label: "Find a decision",
+    query: "why did we decide to ",
+    detail: "Recover the choice and its reasoning.",
+    tone: "border-violet-900/60 bg-violet-950/20 hover:border-violet-700/70",
+    labelTone: "text-violet-400",
+  },
+  {
+    label: "Trace a change",
+    query: "what changed after ",
+    detail: "Follow an idea, incident, or implementation over time.",
+    tone: "border-sky-900/60 bg-sky-950/20 hover:border-sky-700/70",
+    labelTone: "text-sky-400",
+  },
+  {
+    label: "Recover context",
+    query: "what fixed ",
+    detail: "Find the useful bit without remembering its wording.",
+    tone: "border-emerald-900/60 bg-emerald-950/20 hover:border-emerald-700/70",
+    labelTone: "text-emerald-400",
+  },
+];
+
+function SearchLaunchpad({
+  corpus,
+  corpusCount,
+  onPrimeQuery,
+}: {
+  corpus: string | null;
+  corpusCount: number;
+  onPrimeQuery: (query: string) => void;
+}) {
+  const scope = corpus || `${corpusCount} corpora`;
+  return (
+    <section className="min-h-[330px] border border-zinc-800/80 bg-zinc-950/20 rounded-xl px-5 py-8 flex flex-col items-center justify-center">
+      <div className="w-full max-w-3xl">
+        <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.16em] text-zinc-600">
+          <span className="h-1.5 w-1.5 rounded-full bg-violet-500" />
+          Search {scope}
+        </div>
+        <h2 className="mt-3 text-xl text-zinc-200">Find the thread, not just the phrase.</h2>
+        <p className="mt-1 text-sm text-zinc-600">
+          Start with an intent, then finish the thought in the search bar.
+        </p>
+        <div className="mt-6 grid gap-2 sm:grid-cols-3">
+          {STARTERS.map((starter) => (
+            <button
+              key={starter.label}
+              type="button"
+              onClick={() => onPrimeQuery(starter.query)}
+              className={`min-h-[112px] rounded-xl border p-3 text-left transition-colors ${starter.tone}`}
+            >
+              <span className={`text-[10px] font-mono uppercase tracking-wider ${starter.labelTone}`}>
+                {starter.label}
+              </span>
+              <span className="mt-2 block text-xs leading-relaxed text-zinc-500">
+                {starter.detail}
+              </span>
+              <span className="mt-3 block truncate font-mono text-[10px] text-zinc-700">
+                {starter.query.trim()}...
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
     </section>
   );
 }

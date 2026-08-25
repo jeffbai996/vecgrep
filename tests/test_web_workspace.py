@@ -219,6 +219,35 @@ def test_search_modes_share_the_result_badge_color_language() -> None:
         assert colour in results, f"ResultList lost the {colour} badge tone"
 
 
+def test_search_idle_state_is_a_guided_launchpad() -> None:
+    app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
+    search = (FRONTEND / "components" / "SearchBar.tsx").read_text(encoding="utf-8")
+    results = (FRONTEND / "components" / "ResultList.tsx").read_text(encoding="utf-8")
+
+    assert "onPrimeQuery" in app and "onPrimeQuery" in results
+    for prompt in ("Find a decision", "Trace a change", "Recover context"):
+        assert prompt in results
+    assert "Search results will appear here" not in results
+    assert "h-[22px] w-[22px]" in search
+    assert "⌕" not in search, "the tiny text glyph must not return"
+
+
+def test_score_tuning_explains_effect_and_automatic_mode() -> None:
+    app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
+    panel = (FRONTEND / "components" / "TuningPanel.tsx").read_text(
+        encoding="utf-8"
+    )
+    tuning = (FRONTEND / "tuning.ts").read_text(encoding="utf-8")
+
+    assert "Score interpretation" in panel
+    assert "displayed percentages and result order" in panel
+    for section in ("Semantic scoring", "Keyword scoring", "Hybrid balance"):
+        assert section in panel
+    assert "Automatic" in panel and "Custom" in panel
+    assert "onReset" in panel and "clearTuning" in app
+    assert "localStorage.removeItem" in tuning
+
+
 def test_committed_web_bundle_has_no_private_companion_url() -> None:
     dist = FRONTEND.parent / "dist"
     built = "\n".join(

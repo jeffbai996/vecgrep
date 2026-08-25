@@ -76,6 +76,14 @@ export function saveTuning(t: Tuning) {
   }
 }
 
+export function clearTuning() {
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // localStorage disabled — in-memory automatic mode still works.
+  }
+}
+
 function cosineToPct(cos: number, t: Tuning): number {
   const x = t.cosineSlope * (cos - t.cosineCenter);
   // Guard against overflow for extreme x.

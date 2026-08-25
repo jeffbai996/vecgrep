@@ -15,8 +15,10 @@ import BrowsePanel from "./components/BrowsePanel";
 import {
   loadTuning,
   saveTuning,
+  clearTuning,
   hasSavedTuning,
   tuningFromCalibration,
+  DEFAULT_TUNING,
   Tuning,
 } from "./tuning";
 
@@ -24,6 +26,7 @@ export default function App() {
   const [view, setView] = useState<"search" | "timeline" | "compare" | "browse">("search");
   const [corpora, setCorpora] = useState<Corpus[]>([]);
   const [selectedCorpus, setSelectedCorpus] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
   const [response, setResponse] = useState<SearchResponse | null>(null);
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -33,6 +36,9 @@ export default function App() {
     nonce: number;
   } | null>(null);
   const [tuning, setTuning] = useState<Tuning>(() => loadTuning());
+  const [automaticTuning, setAutomaticTuning] = useState<Tuning>(() => ({
+    ...DEFAULT_TUNING,
+  }));
   // Until the user customizes the sliders, seed them from each search's server
   // calibration so the displayed % matches the server for whatever model the
   // corpus uses. Once they drag a slider, their values win.
@@ -42,6 +48,21 @@ export default function App() {
     setTuning(t);
     saveTuning(t);
     setTuningCustom(true);
+  };
+
+  const resetTuning = () => {
+    clearTuning();
+    setTuningCustom(false);
+    setTuning({ ...automaticTuning });
+  };
+
+  const primeSearch = (nextQuery: string) => {
+    setQuery(nextQuery);
+    requestAnimationFrame(() => {
+      const input = document.getElementById("global-search-input") as HTMLInputElement | null;
+      input?.focus();
+      input?.setSelectionRange(nextQuery.length, nextQuery.length);
+    });
   };
 
   const refresh = async () => {
@@ -65,7 +86,11 @@ export default function App() {
       // Seed the tuning sliders from the server's actual calibration for this
       // corpus's model — but only while the user hasn't customized them.
       if (!tuningCustom && r.calibration) {
-        setTuning((prev) => tuningFromCalibration(r.calibration!, prev));
+        const calibrated = tuningFromCalibration(r.calibration, DEFAULT_TUNING);
+        setAutomaticTuning(calibrated);
+        setTuning(calibrated);
+      } else if (r.calibration) {
+        setAutomaticTuning(tuningFromCalibration(r.calibration, DEFAULT_TUNING));
       }
     } catch (e) {
       setError(String((e as Error).message ?? e));
@@ -158,12 +183,19 @@ export default function App() {
         {view === "search" ? (
           <section className="col-span-12 md:col-span-9 xl:col-span-10 space-y-3">
             <SearchBar
+              query={query}
+              onQueryChange={setQuery}
               onSearch={onSearch}
               disabled={searching}
               corpus={selectedCorpus}
               corpusCount={corpora.length}
             />
-            <TuningPanel tuning={tuning} onChange={updateTuning} />
+            <TuningPanel
+              tuning={tuning}
+              customized={tuningCustom}
+              onChange={updateTuning}
+              onReset={resetTuning}
+            />
             {error && (
               <div className="text-sm text-red-400 font-mono whitespace-pre-wrap border border-red-800 bg-red-950/40 rounded p-3">
                 {error}
@@ -173,6 +205,9 @@ export default function App() {
               response={response}
               searching={searching}
               tuning={tuning}
+              corpus={selectedCorpus}
+              corpusCount={corpora.length}
+              onPrimeQuery={primeSearch}
               onRevealSource={revealInExplorer}
             />
             <AboutFooter />

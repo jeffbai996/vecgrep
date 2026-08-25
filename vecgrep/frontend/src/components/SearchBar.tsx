@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { SearchMode, SearchOptions } from "../api";
 
 type Props = {
+  query: string;
+  onQueryChange: (query: string) => void;
   onSearch: (query: string, options: SearchOptions) => void;
   disabled: boolean;
   corpus: string | null;
@@ -48,8 +50,15 @@ const QUICK_FILTERS = [
   { token: "has:table", label: "Tables" },
 ];
 
-export default function SearchBar({ onSearch, disabled, corpus, corpusCount }: Props) {
-  const [query, setQuery] = useState("");
+export default function SearchBar({
+  query,
+  onQueryChange,
+  onSearch,
+  disabled,
+  corpus,
+  corpusCount,
+}: Props) {
+  const inputRef = useRef<HTMLInputElement>(null);
   const [topK, setTopK] = useState(40);
   const [mode, setMode] = useState<SearchMode>("hybrid");
   const [rerank, setRerank] = useState(false);
@@ -86,11 +95,31 @@ export default function SearchBar({ onSearch, disabled, corpus, corpusCount }: P
   return (
     <form onSubmit={onSubmit} className="border border-zinc-800 bg-zinc-950/40 rounded-xl overflow-hidden">
       <div className="flex items-center gap-2 p-2">
-        <span className="text-zinc-600 pl-2" aria-hidden="true">⌕</span>
+        <button
+          type="button"
+          onClick={() => inputRef.current?.focus()}
+          className="h-10 w-10 shrink-0 rounded-lg text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200 flex items-center justify-center transition-colors"
+          aria-label="Focus search"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.25"
+            strokeLinecap="round"
+            aria-hidden="true"
+            className="h-[22px] w-[22px]"
+          >
+            <circle cx="11" cy="11" r="6.5" />
+            <path d="m16 16 4.25 4.25" />
+          </svg>
+        </button>
         <input
+          ref={inputRef}
+          id="global-search-input"
           type="text"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => onQueryChange(e.target.value)}
           placeholder={placeholder}
           disabled={disabled || corpusCount === 0}
           autoFocus
