@@ -612,6 +612,28 @@ class VecgrepService:
                 datatype=corpus.datatype,
             )
 
+        # Incremental updates may only advance a catalog that was complete for
+        # the prior corpus generation. On an upgrade, explorer.db starts empty
+        # while BM25 already has years of sources; stamping the first changed
+        # document complete would hide every untouched source.
+        catalog_sync_ok = (
+            corpus.doc_count == 0
+            and corpus.chunk_count == 0
+            and not corpus.sources
+        )
+        if not catalog_sync_ok:
+            try:
+                catalog_sync_ok = (
+                    self.explorer_store.generation(corpus.name)
+                    == self._explorer_generation(corpus)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "explorer catalog state read failed for %s: %s",
+                    corpus_name,
+                    exc,
+                )
+
         backend = self._backend_for(corpus)
         chunker = self.chunker(chunker_name)
         collection = _collection_for(corpus_name)
@@ -627,7 +649,6 @@ class VecgrepService:
         total_docs = 0
         total_chunks = 0
         skipped = 0
-        catalog_sync_ok = True
         docs = _expand(source, adapter, include=include)
         # A multi-source index (a directory) defers the BM25 sidecar write to
         # the end of the batch: persisting per source re-pickled the whole

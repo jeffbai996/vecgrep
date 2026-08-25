@@ -62,11 +62,17 @@ class ExplorerStore:
     def generation(self, corpus: str) -> CatalogGeneration | None:
         with self._lock:
             row = self._connection.execute(
-                "SELECT updated_at, doc_count, chunk_count "
-                "FROM generations WHERE corpus = ?",
+                "SELECT g.updated_at, g.doc_count, g.chunk_count, "
+                "COUNT(d.source_id) "
+                "FROM generations AS g "
+                "LEFT JOIN documents AS d ON d.corpus = g.corpus "
+                "WHERE g.corpus = ? "
+                "GROUP BY g.corpus",
                 (corpus,),
             ).fetchone()
         if row is None:
+            return None
+        if int(row[3]) != int(row[1]):
             return None
         return float(row[0]), int(row[1]), int(row[2])
 

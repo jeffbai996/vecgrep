@@ -81,6 +81,28 @@ def test_legacy_catalog_backfills_once_then_uses_the_compact_store(
     assert svc.explore("library")["documents"][0]["name"] == "legacy.md"
 
 
+def test_incremental_index_cannot_mark_a_partial_legacy_catalog_complete(
+    svc, tmp_path
+) -> None:
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_text("# First\n\nExisting content.", encoding="utf-8")
+    second.write_text("# Second\n\nNew content.", encoding="utf-8")
+    _index(svc, first)
+
+    # Simulate an upgrade where canonical search data predates explorer.db.
+    svc.explorer_store.drop("library")
+    _index(svc, second)
+    assert svc.explorer_store.generation("library") is None
+
+    svc._explorer_cache.clear()
+    listing = svc.explore("library")
+    assert [document["name"] for document in listing["documents"]] == [
+        "first.md",
+        "second.md",
+    ]
+
+
 def test_source_catalog_tracks_reindex_and_delete(svc, tmp_path) -> None:
     source = tmp_path / "record.md"
     source.write_text(
