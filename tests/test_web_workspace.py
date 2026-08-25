@@ -168,6 +168,7 @@ def test_web_ui_browse_is_a_three_pane_explorer_with_search_reveal() -> None:
 
 def test_web_ui_browse_uses_the_shared_color_pill_language() -> None:
     browse = (FRONTEND / "components" / "BrowsePanel.tsx").read_text(encoding="utf-8")
+    corpus_list = (FRONTEND / "components" / "CorpusList.tsx").read_text(encoding="utf-8")
     tones = (FRONTEND / "browseTones.ts").read_text(encoding="utf-8")
 
     for helper in ("corpusTone", "folderTone", "kindTone", "tagTone"):
@@ -176,6 +177,7 @@ def test_web_ui_browse_uses_the_shared_color_pill_language() -> None:
     for color in ("violet", "sky", "emerald", "amber", "rose", "cyan"):
         assert color in tones
     assert "ColorPill" in browse
+    assert "corpusTone" in corpus_list
     assert "Cataloging" in browse
     assert "Retry" in browse
 
