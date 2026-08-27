@@ -289,3 +289,51 @@ class BM25SqliteStore:
         # order, which changes when a corpus is rebuilt.
         ranked.sort(key=lambda r: (-r[0], r[1]))
         return [(cid, s, payload) for s, cid, payload in ranked[:top_k]]
+
+
+def migrate_from_pickle(root: Path, corpus: str, *, force: bool = False) -> int:
+    """Build `<corpus>.db` from an existing `<corpus>.pkl`. Returns rows written.
+
+    Switching backends without this is a silent downgrade: the SQLite store
+    would start empty, every lexical query would return nothing, and hybrid
+    search would quietly become vector-only — with no error anywhere, because
+    an empty index is a legitimate state. Convert first, verify counts, then
+    switch.
+
+    Reads the pickle directly rather than going through BM25Store so the
+    conversion does not depend on cache behaviour, and writes through
+    `replace()` so the result is atomic.
+    """
+    import pickle
+
+    src = root / f"{corpus}.pkl"
+    if not src.exists():
+        raise FileNotFoundError(src)
+    dest = root / f"{corpus}.db"
+    if dest.exists() and not force:
+        raise FileExistsError(f"{dest} exists; pass force=True to rebuild it")
+
+    idx = pickle.loads(src.read_bytes())
+    store = BM25SqliteStore(root)
+    try:
+        # The pickle holds tokens, not the original text. `replace()` tokenises
+        # what it is given, and tokenising already-split tokens is idempotent
+        # for this tokeniser, so joining them back is lossless here.
+        written = store.replace(
+            corpus,
+            (
+                (cid, " ".join(doc), payload)
+                for cid, doc, payload in zip(idx.ids, idx.docs, idx.payloads)
+            ),
+        )
+    finally:
+        store.close(corpus)
+    return written
+
+
+def migrate_all(root: Path, *, force: bool = False) -> dict[str, int]:
+    """Convert every pickled sidecar under `root`. Returns corpus -> rows."""
+    out: dict[str, int] = {}
+    for src in sorted(root.glob("*.pkl")):
+        out[src.stem] = migrate_from_pickle(root, src.stem, force=force)
+    return out

@@ -192,3 +192,60 @@ def test_cjk_and_camelcase_tokenisation_survives(tmp_path):
         a = [c for c, _s, _p in pickled.search("c", q, top_k=3)]
         b = [c for c, _s, _p in lite.search("c", q, top_k=3)]
         assert a == b, f"{q!r}: pickle={a} sqlite={b}"
+
+
+def test_migration_from_pickle_preserves_search_and_payloads(tmp_path):
+    """Switching backends without migrating is a SILENT downgrade: the SQLite
+    store starts empty, lexical queries return nothing, and hybrid search
+    quietly becomes vector-only with no error anywhere, because an empty index
+    is a legitimate state. This pins that a migrated corpus answers the same."""
+    from vecgrep.backend.store.bm25_sqlite import migrate_all, migrate_from_pickle
+
+    root = tmp_path / "bm25"
+    pickled = BM25Store(root)
+    ids = [d[0] for d in DOCS]
+    texts = [d[1] for d in DOCS]
+    payloads = [_payload(d[2], i) for i, d in enumerate(DOCS)]
+    pickled.upsert("c", ids, texts, payloads)
+
+    assert migrate_from_pickle(root, "c") == len(DOCS)
+    assert (root / "c.db").exists()
+
+    lite = BM25SqliteStore(root)
+    assert lite.count("c") == pickled.count("c")
+    assert list(lite.iter_payloads("c")) == list(pickled.iter_payloads("c"))
+    assert list(lite.iter_sources("c")) == list(pickled.iter_sources("c"))
+    for q in ("quick brown fox", "memory pressure", "getUserName"):
+        a = _tie_groups(pickled.search("c", q, top_k=5))
+        b = _tie_groups(lite.search("c", q, top_k=5))
+        assert a == b, q
+
+
+def test_migration_refuses_to_clobber_without_force(tmp_path):
+    from vecgrep.backend.store.bm25_sqlite import migrate_from_pickle
+
+    root = tmp_path / "bm25"
+    pickled = BM25Store(root)
+    pickled.upsert("c", ["a"], ["alpha"], [{"source_id": "/a"}])
+    migrate_from_pickle(root, "c")
+    with pytest.raises(FileExistsError):
+        migrate_from_pickle(root, "c")
+    assert migrate_from_pickle(root, "c", force=True) == 1
+
+
+def test_migrate_all_converts_every_corpus(tmp_path):
+    from vecgrep.backend.store.bm25_sqlite import migrate_all
+
+    root = tmp_path / "bm25"
+    pickled = BM25Store(root)
+    pickled.upsert("one", ["a"], ["alpha beta"], [{"source_id": "/a"}])
+    pickled.upsert("two", ["b", "c"], ["gamma", "delta"],
+                   [{"source_id": "/b"}, {"source_id": "/c"}])
+    assert migrate_all(root) == {"one": 1, "two": 2}
+
+
+def test_migration_of_a_missing_corpus_is_an_error_not_an_empty_index(tmp_path):
+    from vecgrep.backend.store.bm25_sqlite import migrate_from_pickle
+
+    with pytest.raises(FileNotFoundError):
+        migrate_from_pickle(tmp_path, "nope")
