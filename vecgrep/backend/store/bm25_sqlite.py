@@ -142,22 +142,43 @@ class BM25SqliteStore:
         for (raw,) in cur:
             yield json.loads(raw)
 
-    def iter_sources(self, corpus: str) -> Iterator[tuple[str, dict]]:
-        """(source_id, payload of its first chunk) for each distinct source,
-        replacing iteration over `by_source`."""
-        cur = self._conn(corpus).execute(
-            "SELECT source_id, payload FROM chunks WHERE pos IN "
-            "(SELECT MIN(pos) FROM chunks GROUP BY source_id) ORDER BY pos"
-        )
-        for sid, raw in cur:
-            yield sid, json.loads(raw)
+    def iter_sources(self, corpus: str) -> Iterator[tuple[str, dict, int]]:
+        """(source_id, payload of its first chunk, chunk count) per source.
 
-    def payload_for_source(self, corpus: str, source_id: str) -> dict | None:
+        Ordered by first appearance, which is what iterating the pickle
+        store's `by_source` gave, so callers see the same sequence."""
+        cur = self._conn(corpus).execute(
+            "SELECT c.source_id, c.payload, g.n FROM chunks c "
+            "JOIN (SELECT source_id, MIN(pos) AS first_pos, COUNT(*) AS n "
+            "      FROM chunks GROUP BY source_id) g "
+            "  ON g.first_pos = c.pos "
+            "ORDER BY c.pos"
+        )
+        for sid, raw, n in cur:
+            yield sid, json.loads(raw), int(n)
+
+    def first_chunk_for_source(self, corpus: str, source_id: str) -> tuple[str, dict] | None:
+        """(chunk id, payload) of a source's first chunk, or None."""
         row = self._conn(corpus).execute(
-            "SELECT payload FROM chunks WHERE source_id = ? ORDER BY pos LIMIT 1",
+            "SELECT cid, payload FROM chunks WHERE source_id = ? ORDER BY pos LIMIT 1",
             (source_id,),
         ).fetchone()
-        return None if row is None else json.loads(row[0])
+        return None if row is None else (row[0], json.loads(row[1]))
+
+    def update_payloads(self, corpus: str, mutate) -> int:
+        """Apply `mutate(payload)` to every payload, writing back the ones it
+        changed. `mutate` edits in place and returns True when it changed
+        something. Rows are streamed and written in one transaction."""
+        conn = self._conn(corpus)
+        changed: list[tuple[str, int]] = []
+        for pos, raw in conn.execute("SELECT pos, payload FROM chunks ORDER BY pos"):
+            payload = json.loads(raw)
+            if mutate(payload):
+                changed.append((json.dumps(payload), pos))
+        if changed:
+            conn.executemany("UPDATE chunks SET payload = ? WHERE pos = ?", changed)
+            conn.commit()
+        return len(changed)
 
     def source_counts(self, corpus: str) -> dict[str, int]:
         return {

@@ -14,7 +14,7 @@ import pickle
 import re
 import tempfile
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -466,6 +466,45 @@ class BM25Store:
         self._cache[corpus] = new
         self._bm25_instances.pop(corpus, None)
         self._persist(corpus)
+
+    # ── corpus queries ────────────────────────────────────────────────────
+    # These exist so callers stop reaching into `_load(corpus)` and holding a
+    # whole corpus to read a few fields off it. Against this backend they are
+    # thin wrappers, because the corpus is resident anyway; against a store
+    # that keeps its rows on disk they are the difference between a query and
+    # a full load. Same signatures on both, so a caller cannot tell which it
+    # is talking to.
+
+    def iter_payloads(self, corpus: str) -> Iterator[dict]:
+        """Every chunk payload, in insertion order."""
+        yield from self._load(corpus).payloads
+
+    def iter_sources(self, corpus: str) -> Iterator[tuple[str, dict, int]]:
+        """(source_id, payload of its first chunk, chunk count) per source."""
+        idx = self._load(corpus)
+        for source_id, positions in idx.by_source.items():
+            if not positions:
+                continue
+            yield source_id, idx.payloads[positions[0]], len(positions)
+
+    def first_chunk_for_source(self, corpus: str, source_id: str) -> tuple[str, dict] | None:
+        """(chunk id, payload) of a source's first chunk, or None."""
+        idx = self._load(corpus)
+        positions = idx.by_source.get(source_id)
+        if not positions:
+            return None
+        return idx.ids[positions[0]], idx.payloads[positions[0]]
+
+    def update_payloads(self, corpus: str, mutate) -> int:
+        """Apply `mutate(payload)` to every payload and persist if any changed.
+
+        `mutate` edits in place and returns True when it changed something.
+        Returns the number of payloads changed."""
+        idx = self._load(corpus)
+        changed = sum(1 for payload in idx.payloads if mutate(payload))
+        if changed:
+            self._persist(corpus)
+        return changed
 
     def get_by_id(self, corpus: str, cid: str) -> dict | None:
         """Look up a single chunk payload by cid. Returns None if missing."""

@@ -52,6 +52,7 @@ from .ingestion.chunkers import (
     TurnWindowChunker,
 )
 from .store import (
+    BM25SqliteStore,
     BM25Store,
     Corpus,
     CorpusError,
@@ -1276,12 +1277,8 @@ class VecgrepService:
         if until and until_ts is None:
             raise ValueError(f"unparseable until: {until!r} (want YYYY-MM-DD)")
 
-        idx = self.bm25._load(corpus.name)
         groups: list[dict] = []
-        for source_id, positions in idx.by_source.items():
-            if not positions:
-                continue
-            payload = idx.payloads[positions[0]]
+        for source_id, payload, _chunk_count in self.bm25.iter_sources(corpus.name):
             meta = payload.get("metadata") or {}
             if channel is not None:
                 have = str(meta.get("channel", "")).strip().strip("\"'")
@@ -1352,16 +1349,15 @@ class VecgrepService:
         get_chunk_window — a stub or corpus listing hands you the source_id;
         this hands back the file. None when the source isn't indexed."""
         corpus = self.registry.get(corpus_name)
-        idx = self.bm25._load(corpus.name)
-        positions = idx.by_source.get(source_id)
-        if not positions:
+        first = self.bm25.first_chunk_for_source(corpus.name, source_id)
+        if first is None:
             return None
-        payload = idx.payloads[positions[0]]
+        first_cid, payload = first
         # A recovery-built BM25 sidecar intentionally omits the duplicated
         # full source document. Qdrant is the canonical payload store, so use
         # it when available and retain BM25 only as the offline fallback.
         qdrant_payload = self.store.get_by_id(
-            _collection_for(corpus.name), idx.ids[positions[0]]
+            _collection_for(corpus.name), first_cid
         )
         if qdrant_payload is not None:
             payload = qdrant_payload
@@ -1406,18 +1402,14 @@ class VecgrepService:
             # One-time path for existing installations (and self-healing after
             # catalog loss): collapse the canonical chunk sidecar, then persist
             # the compact source rows so future process starts stay cheap.
-            idx = self.bm25._load(corpus.name)
             records = []
-            for source_id, positions in idx.by_source.items():
-                if not positions:
-                    continue
-                payload = idx.payloads[positions[0]]
+            for source_id, payload, chunk_count in self.bm25.iter_sources(corpus.name):
                 records.append(
                     {
                         "source_id": source_id,
                         "metadata": payload.get("metadata") or {},
                         "doc_timestamp": payload.get("doc_timestamp"),
-                        "chunk_count": len(positions),
+                        "chunk_count": chunk_count,
                     }
                 )
             try:
@@ -1571,8 +1563,7 @@ class VecgrepService:
         zero chunks inside the covered span — a broken archiver shows up as a
         growing gap), and per-source chunk sizes."""
         corpus = self.registry.get(corpus_name)
-        idx = self.bm25._load(corpus.name)
-        payloads = idx.payloads
+        payloads = list(self.bm25.iter_payloads(corpus.name))
         by_source: dict[str, int] = {}
         for p in payloads:
             sid = p.get("source_id", "") or ""
@@ -1620,8 +1611,7 @@ class VecgrepService:
         spaced deterministic sample of chunks for an LLM to theme. Sampling
         is explicit in the output — never a silent truncation."""
         corpus = self.registry.get(corpus_name)
-        idx = self.bm25._load(corpus.name)
-        payloads = idx.payloads
+        payloads = list(self.bm25.iter_payloads(corpus.name))
         if after or before:
             filters = []
             if after:
@@ -2636,16 +2626,19 @@ class VecgrepService:
         actor/channel/date before semantic ranking instead of guessing keys.
         """
         corpus = self.registry.get(corpus_name)  # raises CorpusError if absent
-        idx = self.bm25._load(corpus.name)
         meta_values: dict[str, set] = {}
-        for payload in idx.payloads:
+        has_timestamp = False
+        # One pass: the old form scanned the payload list twice, which is free
+        # when it is already in memory and is not when it is a query.
+        for payload in self.bm25.iter_payloads(corpus.name):
+            if payload.get("doc_timestamp") is not None:
+                has_timestamp = True
             meta = payload.get("metadata") or {}
             for k, v in meta.items():
                 if isinstance(v, (str, int, float, bool)):
                     meta_values.setdefault(k, set())
                     if len(meta_values[k]) < max_values:
                         meta_values[k].add(v)
-        has_timestamp = any(p.get("doc_timestamp") is not None for p in idx.payloads)
         out: dict = {
             "corpus": corpus.name,
             "filters": {
@@ -2840,11 +2833,13 @@ class VecgrepService:
         self.bm25.evict(temp_name)
         self.bm25.evict(name)
         # Now rewrite payloads under the new name.
-        idx = self.bm25._load(name)
-        for payload in idx.payloads:
-            if payload.get("corpus") != name:
-                payload["corpus"] = name
-        self.bm25._persist(name)
+        def _stamp_corpus(payload: dict) -> bool:
+            if payload.get("corpus") == name:
+                return False
+            payload["corpus"] = name
+            return True
+
+        self.bm25.update_payloads(name, _stamp_corpus)
 
         # Drop the temp registry entry; upsert under final name. We also
         # rewrite each chunk payload's "corpus" field to the final name —

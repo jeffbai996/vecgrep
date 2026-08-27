@@ -143,14 +143,40 @@ def test_replace_matches(tmp_path):
     assert a == b == ["z1"]
 
 
-def test_the_sqlite_backend_answers_source_queries_without_loading_the_corpus(tmp_path):
-    # These replace reaching into _load(corpus).by_source / .payloads, which is
-    # what actually kept a corpus resident.
-    _pickled, lite = _both(tmp_path)
+def test_the_corpus_queries_agree_across_backends(tmp_path):
+    """These are what service.py now calls instead of reaching into
+    `_load(corpus).by_source` / `.payloads`, which is what actually kept a
+    corpus resident. Both backends must answer identically, or migrating the
+    call sites changed behaviour."""
+    pickled, lite = _both(tmp_path)
+
+    assert list(pickled.iter_payloads("c")) == list(lite.iter_payloads("c"))
+    assert list(pickled.iter_sources("c")) == list(lite.iter_sources("c"))
+    assert [(sid, n) for sid, _p, n in lite.iter_sources("c")] == [
+        ("/animals", 3), ("/ops", 3), ("/code", 2)]
+
+    for sid in ("/animals", "/ops", "/code", "/missing"):
+        assert pickled.first_chunk_for_source("c", sid) == lite.first_chunk_for_source("c", sid)
+    assert lite.first_chunk_for_source("c", "/ops")[1]["chunk_index"] == 3
     assert dict(lite.source_counts("c")) == {"/animals": 3, "/ops": 3, "/code": 2}
-    assert [sid for sid, _p in lite.iter_sources("c")] == ["/animals", "/ops", "/code"]
-    assert lite.payload_for_source("c", "/ops")["chunk_index"] == 3
-    assert len(list(lite.iter_payloads("c"))) == 8
+
+
+def test_update_payloads_matches_across_backends(tmp_path):
+    """The corpus-rename path mutates every payload in place. Both backends
+    must change the same rows and persist them."""
+    pickled, lite = _both(tmp_path)
+
+    def stamp(payload: dict) -> bool:
+        if payload.get("corpus") == "renamed":
+            return False
+        payload["corpus"] = "renamed"
+        return True
+
+    assert pickled.update_payloads("c", stamp) == lite.update_payloads("c", stamp) == 8
+    # second pass changes nothing, in both
+    assert pickled.update_payloads("c", stamp) == lite.update_payloads("c", stamp) == 0
+    assert all(p["corpus"] == "renamed" for p in lite.iter_payloads("c"))
+    assert list(pickled.iter_payloads("c")) == list(lite.iter_payloads("c"))
 
 
 def test_cjk_and_camelcase_tokenisation_survives(tmp_path):
