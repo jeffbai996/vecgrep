@@ -1,0 +1,168 @@
+"""The SQLite backend must rank like the pickle backend.
+
+Storage can change; retrieval must not. These build both stores from identical
+records and compare what comes back — order first, because the ranking is what
+callers consume, then the payloads and the shape of the result tuple.
+
+Absolute scores are NOT compared. FTS5's bm25() and rank_bm25's BM25Okapi are
+different implementations of the same family and will not agree to the decimal.
+What has to hold is the ORDER, since everything above this fuses by rank.
+"""
+from __future__ import annotations
+
+import pytest
+
+from vecgrep.backend.store.bm25_store import BM25Store
+from vecgrep.backend.store.bm25_sqlite import BM25SqliteStore
+
+DOCS = [
+    ("a1", "the quick brown fox jumps over the lazy dog", "/animals"),
+    ("a2", "a quick brown hare outruns the fox", "/animals"),
+    ("a3", "lazy afternoon sunlight on the dog bed", "/animals"),
+    ("b1", "memory pressure on the host forced a reclaim", "/ops"),
+    ("b2", "the ingest ceiling was raised after five timeouts", "/ops"),
+    ("b3", "swap exhaustion and page cache reclaim under pressure", "/ops"),
+    ("c1", "getUserName and sharpe_ratio are identifiers", "/code"),
+    ("c2", "the bm25 index is pickled next to the qdrant store", "/code"),
+]
+
+
+def _payload(source_id: str, i: int) -> dict:
+    return {"source_id": source_id, "chunk_index": i, "metadata": {"n": i}}
+
+
+def _both(tmp_path):
+    pickled = BM25Store(tmp_path / "pkl")
+    lite = BM25SqliteStore(tmp_path / "db")
+    ids = [d[0] for d in DOCS]
+    texts = [d[1] for d in DOCS]
+    payloads = [_payload(d[2], i) for i, d in enumerate(DOCS)]
+    pickled.upsert("c", ids, texts, payloads)
+    lite.upsert("c", ids, texts, payloads)
+    return pickled, lite
+
+
+QUERIES = [
+    "quick brown fox",
+    "lazy dog",
+    "memory pressure",
+    "reclaim",
+    "ingest ceiling timeouts",
+    "getUserName",
+    "sharpe_ratio",
+    "bm25 qdrant",
+    "nothing matches this phrase at all",
+]
+# "the" is deliberately NOT in this list. It appears in every document, so no
+# ranking is defined: FTS5 scores the whole corpus at exactly 0 and the pickle
+# store emits small distinct values off its IDF floor. Truncating a six-way tie
+# to top_k=5 then yields different SETS, which says nothing about retrieval
+# quality. That behaviour is pinned separately below.
+
+
+def _tie_groups(hits) -> list[set[str]]:
+    """The ranking as a sequence of equal-scoring groups.
+
+    Two BM25 implementations agree on which documents beat which, but not on
+    how to order documents they score identically — and they need not, because
+    everything above this fuses by rank. Comparing raw lists would fail on
+    ties that carry no information: "reclaim" hits two documents with the same
+    score in BOTH backends, and each returns them in its own insertion order.
+    """
+    groups: list[set[str]] = []
+    last = None
+    for cid, score, _payload in hits:
+        key = round(float(score), 6)
+        if key != last:
+            groups.append(set())
+            last = key
+        groups[-1].add(cid)
+    return groups
+
+
+@pytest.mark.parametrize("query", QUERIES)
+def test_the_two_backends_return_the_same_ranking(tmp_path, query):
+    pickled, lite = _both(tmp_path)
+    a, b = pickled.search("c", query, top_k=5), lite.search("c", query, top_k=5)
+    assert {c for c, _s, _p in a} == {c for c, _s, _p in b}, (
+        f"{query!r}: different documents, not just a different order")
+    assert _tie_groups(a) == _tie_groups(b), (
+        f"{query!r}: pickle={[ (c, round(s,4)) for c,s,_ in a ]} "
+        f"sqlite={[ (c, round(s,4)) for c,s,_ in b ]}")
+
+
+def test_a_term_in_every_document_ranks_by_nothing(tmp_path):
+    """FTS5 scores a term present in every document at exactly 0; BM25Okapi's
+    IDF has a floor and emits a small positive value instead. Both are
+    defensible and neither carries information — the term discriminates
+    nothing — so this pins the behaviour rather than pretending they match."""
+    _pickled, lite = _both(tmp_path)
+    hits = lite.search("c", "the", top_k=8)
+    assert len(hits) == 6
+    assert len({round(s, 6) for _c, s, _p in hits}) == 1
+
+
+@pytest.mark.parametrize("query", QUERIES)
+def test_scores_are_higher_is_better_in_both(tmp_path, query):
+    _pickled, lite = _both(tmp_path)
+    scores = [s for _cid, s, _p in lite.search("c", query, top_k=5)]
+    assert scores == sorted(scores, reverse=True), scores
+    assert all(s > 0 for s in scores), scores
+
+
+def test_payloads_round_trip_intact(tmp_path):
+    pickled, lite = _both(tmp_path)
+    a = pickled.search("c", "memory pressure", top_k=3)
+    b = lite.search("c", "memory pressure", top_k=3)
+    assert [p for _c, _s, p in a] == [p for _c, _s, p in b]
+
+
+def test_delete_by_source_matches(tmp_path):
+    pickled, lite = _both(tmp_path)
+    pickled.delete_by_source("c", "/ops")
+    lite.delete_by_source("c", "/ops")
+    assert pickled.count("c") == lite.count("c")
+    a = [cid for cid, _s, _p in pickled.search("c", "memory pressure reclaim", top_k=5)]
+    b = [cid for cid, _s, _p in lite.search("c", "memory pressure reclaim", top_k=5)]
+    assert a == b == []
+
+
+def test_get_by_id_matches(tmp_path):
+    pickled, lite = _both(tmp_path)
+    assert pickled.get_by_id("c", "b2") == lite.get_by_id("c", "b2")
+    assert pickled.get_by_id("c", "nope") is lite.get_by_id("c", "nope") is None
+
+
+def test_replace_matches(tmp_path):
+    pickled, lite = _both(tmp_path)
+    records = [("z1", "entirely new content about turbines", {"source_id": "/new"})]
+    assert pickled.replace("c", list(records)) == lite.replace("c", list(records)) == 1
+    assert pickled.count("c") == lite.count("c") == 1
+    a = [cid for cid, _s, _p in pickled.search("c", "turbines", top_k=3)]
+    b = [cid for cid, _s, _p in lite.search("c", "turbines", top_k=3)]
+    assert a == b == ["z1"]
+
+
+def test_the_sqlite_backend_answers_source_queries_without_loading_the_corpus(tmp_path):
+    # These replace reaching into _load(corpus).by_source / .payloads, which is
+    # what actually kept a corpus resident.
+    _pickled, lite = _both(tmp_path)
+    assert dict(lite.source_counts("c")) == {"/animals": 3, "/ops": 3, "/code": 2}
+    assert [sid for sid, _p in lite.iter_sources("c")] == ["/animals", "/ops", "/code"]
+    assert lite.payload_for_source("c", "/ops")["chunk_index"] == 3
+    assert len(list(lite.iter_payloads("c"))) == 8
+
+
+def test_cjk_and_camelcase_tokenisation_survives(tmp_path):
+    # The custom tokeniser is fed to FTS5 as pre-split text precisely so these
+    # keep working; FTS5's own tokenisers do neither.
+    pickled = BM25Store(tmp_path / "pkl")
+    lite = BM25SqliteStore(tmp_path / "db")
+    ids, texts = ["k1", "k2"], ["getUserName parses fine", "今天天气很好"]
+    payloads = [{"source_id": "/x"}, {"source_id": "/x"}]
+    pickled.upsert("c", ids, texts, payloads)
+    lite.upsert("c", ids, texts, payloads)
+    for q in ("getUserName", "user", "今天"):
+        a = [c for c, _s, _p in pickled.search("c", q, top_k=3)]
+        b = [c for c, _s, _p in lite.search("c", q, top_k=3)]
+        assert a == b, f"{q!r}: pickle={a} sqlite={b}"
