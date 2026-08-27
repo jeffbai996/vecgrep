@@ -156,20 +156,48 @@ class _CorpusIndex:
     by_source: dict[str, list[int]] = field(default_factory=dict)
 
 
+# Default ceiling on resident BM25 indexes, in bytes of on-disk sidecar.
+#
+# Counting CORPORA was the wrong unit. Sidecars on this fleet range from 27 kB
+# (ticker-tape) to 270 MB (chats), so a cap of "1 corpus" means anything from
+# nothing to a quarter-gigabyte, and it forced a re-unpickle of the 270 MB
+# index every time a caller touched a different corpus. The squad memory hook
+# searches THREE corpora on every prompt submission of every bot, so that
+# happened on every turn, all day.
+#
+# Measured 2026-08-26 on a live deployment: twelve searches against ONE corpus cost
+# -3 MB; twelve searches ROTATING three corpora cost +957 MB, and the memory
+# did not come back. A 270 MB object graph shreds the allocator's arenas, so
+# repeatedly building and discarding one ratchets RSS even though the eviction
+# logic itself is correct. The process grew 859 MB -> 2782 MB in 8.5 hours.
+#
+# Budgeting by bytes keeps every small corpus resident for free and lets one
+# large one stay put, which is what removes the churn. Raise it if the working
+# set is genuinely bigger; lower it on a memory-tight host.
+DEFAULT_CACHE_BYTES = 512 * 1024 * 1024
+
+
 class BM25Store:
     def __init__(
         self,
         root: Path | None,
-        max_cached_corpora: int = 1,
+        max_cached_corpora: int | None = None,
+        max_cached_bytes: int | None = None,
     ) -> None:
         # root=None -> ephemeral (in-memory only).
         self.root = root
-        if max_cached_corpora < 1:
+        if max_cached_corpora is not None and max_cached_corpora < 1:
             raise ValueError("max_cached_corpora must be at least 1")
         # Persistent indexes can always be reloaded from disk, so retain only
-        # the most recently used corpora. Ephemeral stores have no reload path
-        # and therefore remain intentionally unbounded.
+        # what fits the budget. Ephemeral stores have no reload path and
+        # therefore remain intentionally unbounded.
         self.max_cached_corpora = None if root is None else max_cached_corpora
+        self.max_cached_bytes = None if root is None else (
+            DEFAULT_CACHE_BYTES if max_cached_bytes is None else max_cached_bytes
+        )
+        # On-disk size of each resident sidecar, the proxy for what it costs in
+        # memory. Measured 1:1 in practice: a 270 MB pickle loads to ~274 MB.
+        self._cached_bytes: dict[str, int] = {}
         self._cache: OrderedDict[str, _CorpusIndex] = OrderedDict()
         self._bm25_instances: OrderedDict[str, BM25Okapi] = OrderedDict()
         # A separate repair process can atomically replace a pickle while the
@@ -218,17 +246,40 @@ class BM25Store:
             idx = _CorpusIndex()
         self._cache[corpus] = idx
         self._disk_versions[corpus] = self._disk_version(corpus)
+        self._cached_bytes[corpus] = self._sidecar_bytes(corpus)
         return idx
 
+    def _sidecar_bytes(self, corpus: str) -> int:
+        p = self._path(corpus)
+        if p is None:
+            return 0
+        try:
+            return p.stat().st_size
+        except OSError:
+            return 0
+
+    def _over_budget(self, incoming_bytes: int) -> bool:
+        if self.max_cached_bytes is None:
+            return False
+        return sum(self._cached_bytes.values()) + incoming_bytes > self.max_cached_bytes
+
+    def _too_many(self) -> bool:
+        if self.max_cached_corpora is None:
+            return False
+        return len(self._cache) >= self.max_cached_corpora
+
     def _make_room(self, incoming: str) -> None:
-        if self.max_cached_corpora is None or incoming in self._cache:
+        if incoming in self._cache:
             return
-        while len(self._cache) >= self.max_cached_corpora:
+        if self.max_cached_corpora is None and self.max_cached_bytes is None:
+            return
+        incoming_bytes = self._sidecar_bytes(incoming)
+        while self._too_many() or self._over_budget(incoming_bytes):
             # A bulk index is newer than its on-disk pickle until the context
             # exits. Evicting it loses every unpersisted update; the next write
             # reloads the stale pickle and the final persist silently saves a
-            # truncated corpus. Temporarily exceed the LRU cap when every
-            # resident corpus is pinned by bulk().
+            # truncated corpus. Temporarily exceed the cap when every resident
+            # corpus is pinned by bulk().
             evicted = next(
                 (name for name in self._cache if name not in self._bulk),
                 None,
@@ -238,12 +289,18 @@ class BM25Store:
             self._cache.pop(evicted)
             self._bm25_instances.pop(evicted, None)
             self._disk_versions.pop(evicted, None)
+            self._cached_bytes.pop(evicted, None)
+            # One corpus larger than the whole budget must still be servable:
+            # having emptied the cache, stop rather than spin.
+            if not self._cache:
+                return
 
     def evict(self, corpus: str) -> None:
         """Release one corpus's expanded index and BM25 scoring structure."""
         self._cache.pop(corpus, None)
         self._bm25_instances.pop(corpus, None)
         self._disk_versions.pop(corpus, None)
+        self._cached_bytes.pop(corpus, None)
 
     def _marker(self, corpus: str) -> Path | None:
         p = self._path(corpus)
@@ -293,13 +350,12 @@ class BM25Store:
             # while this corpus was pinned. Prefer retaining the just-finished
             # corpus and shed older unpinned entries now that persistence is
             # complete.
-            if self.max_cached_corpora is not None:
-                for cached in list(self._cache):
-                    if len(self._cache) <= self.max_cached_corpora:
-                        break
-                    if cached == corpus or cached in self._bulk:
-                        continue
-                    self.evict(cached)
+            for cached in list(self._cache):
+                if not (self._too_many() or self._over_budget(0)):
+                    break
+                if cached == corpus or cached in self._bulk:
+                    continue
+                self.evict(cached)
 
     def count(self, corpus: str) -> int:
         return len(self._load(corpus).ids)
@@ -330,6 +386,10 @@ class BM25Store:
                 pickle.dump(idx, fh, protocol=pickle.HIGHEST_PROTOCOL)
             os.replace(temp_path, p)
             self._disk_versions[corpus] = self._disk_version(corpus)
+            # Refresh the budget's view. A corpus created in this process is
+            # first loaded before any sidecar exists, so it would otherwise be
+            # recorded as costing nothing and stay resident for free forever.
+            self._cached_bytes[corpus] = self._sidecar_bytes(corpus)
         finally:
             if temp_path is not None and temp_path.exists():
                 temp_path.unlink()

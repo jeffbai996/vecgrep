@@ -70,6 +70,23 @@ from .timeline import (
 from .mutation import CorpusLocks
 from .mutation_journal import MutationJournal
 
+
+def _env_int(name: str, default: int | None) -> int | None:
+    """An integer knob from the environment, or `default` when unset or junk.
+
+    Unset and unparseable are treated the same on purpose: a typo in a unit
+    file should fall back to the shipped default rather than crash the search
+    server at import time."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -273,7 +290,14 @@ class VecgrepService:
             None if ephemeral else self.settings.qdrant_path,
             url=None if ephemeral else self.settings.qdrant_url,
         )
-        self.bm25 = BM25Store(None if ephemeral else self.settings.home / "bm25")
+        # Budget the resident BM25 indexes by BYTES, not by corpus count: the
+        # sidecars on a real fleet span four orders of magnitude, so a count is
+        # not a limit on anything that matters. See DEFAULT_CACHE_BYTES.
+        self.bm25 = BM25Store(
+            None if ephemeral else self.settings.home / "bm25",
+            max_cached_corpora=_env_int("VECGREP_BM25_CACHE_CORPORA", None),
+            max_cached_bytes=_env_int("VECGREP_BM25_CACHE_BYTES", None),
+        )
         self.explorer_store = ExplorerStore(
             None if ephemeral else self.settings.home / "explorer.db"
         )

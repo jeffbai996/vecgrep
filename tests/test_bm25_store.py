@@ -105,7 +105,11 @@ def test_drop_removes_pickle(tmp_path):
 
 
 def test_persistent_store_bounds_loaded_corpora_by_default(tmp_path):
-    store = BM25Store(tmp_path)
+    # The default budget is BYTES, not corpora (see DEFAULT_CACHE_BYTES), so two
+    # tiny corpora now coexist rather than evicting each other. This test keeps
+    # its original subject — that a persistent store IS bounded — by asking for
+    # a byte budget small enough that the second corpus must displace the first.
+    store = BM25Store(tmp_path, max_cached_bytes=1)
     for corpus in ("one", "two"):
         store.upsert(
             corpus,
@@ -120,7 +124,10 @@ def test_persistent_store_bounds_loaded_corpora_by_default(tmp_path):
 
 
 def test_evicted_corpus_reloads_with_identical_results(tmp_path):
-    store = BM25Store(tmp_path)
+    # Force eviction explicitly: under the default byte budget these toy
+    # corpora both fit, and the point of this test is that a corpus which HAS
+    # been evicted reloads to identical results.
+    store = BM25Store(tmp_path, max_cached_bytes=1)
     store.upsert(
         "one",
         ids=["a", "b"],
