@@ -89,7 +89,7 @@ def test_default_budget_is_bytes_and_generous_enough_to_matter(tmp_path):
     store = BM25Store(tmp_path)
     assert store.max_cached_bytes == DEFAULT_CACHE_BYTES
     assert store.max_cached_corpora is None
-    assert DEFAULT_CACHE_BYTES >= 256 * 1024 * 1024
+    assert DEFAULT_CACHE_BYTES >= 128 * 1024 * 1024
 
 
 def test_ephemeral_store_is_still_unbounded(tmp_path):

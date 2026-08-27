@@ -172,9 +172,18 @@ class _CorpusIndex:
 # logic itself is correct. The process grew 859 MB -> 2782 MB in 8.5 hours.
 #
 # Budgeting by bytes keeps every small corpus resident for free and lets one
-# large one stay put, which is what removes the churn. Raise it if the working
-# set is genuinely bigger; lower it on a memory-tight host.
-DEFAULT_CACHE_BYTES = 512 * 1024 * 1024
+# large one stay put, which is what removes the churn.
+#
+# NOTE ON UNITS: this budget counts ON-DISK sidecar bytes, and a loaded index
+# costs roughly FOUR TIMES its pickle on the heap (measured: a 148 MB sidecar
+# added ~588 MB resident). So 256 MB here is on the order of a gigabyte of
+# process memory. Size it against the sidecars you actually have —
+# `ls -l ~/.vecgrep/bm25` — and remember the multiplier.
+#
+# The budget must be at least as large as the biggest corpus in the rotation,
+# or that corpus is evicted on every visit and the churn comes straight back.
+# Override with VECGREP_BM25_CACHE_BYTES.
+DEFAULT_CACHE_BYTES = 256 * 1024 * 1024
 
 
 class BM25Store:
