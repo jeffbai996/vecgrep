@@ -34,6 +34,18 @@ def test_ollama_num_batch_loads_as_an_integer(vg_home: Path, monkeypatch) -> Non
     assert config.config_provenance(settings)["ollama_num_batch"] == "env"
 
 
+def test_bm25_backend_persists_and_environment_still_wins(vg_home: Path, monkeypatch) -> None:
+    config.update_config({"bm25_backend": "sqlite"})
+    settings = config.load_settings()
+    assert settings.bm25_backend == "sqlite"
+    assert config.config_provenance(settings)["bm25_backend"] == "file"
+
+    monkeypatch.setenv("VECGREP_BM25_BACKEND", "pickle")
+    settings = config.load_settings()
+    assert settings.bm25_backend == "pickle"
+    assert config.config_provenance(settings)["bm25_backend"] == "env"
+
+
 def test_update_config_is_atomic_and_preserves_unknown_keys(
     vg_home: Path, monkeypatch
 ) -> None:
@@ -57,6 +69,7 @@ def test_update_config_is_atomic_and_preserves_unknown_keys(
         ({"api_port": 70000}, "between 1 and 65535"),
         ({"default_top_k": 0}, "positive"),
         ({"ollama_num_batch": 0}, "positive"),
+        ({"bm25_backend": "memory"}, "pickle or sqlite"),
         ({"embed_model": "  "}, "non-empty"),
         ({"oauth_enabled": True, "oauth_issuer_url": None}, "issuer"),
     ],

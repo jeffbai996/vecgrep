@@ -33,6 +33,7 @@ ENV_MAP = {
     "VECGREP_REST_ALLOWED_HOSTS": "rest_allowed_hosts",
     "VECGREP_ADMIN_TOKEN": "admin_token",
     "VECGREP_QDRANT_URL": "qdrant_url",
+    "VECGREP_BM25_BACKEND": "bm25_backend",
     "VECGREP_OAUTH_ENABLED": "oauth_enabled",
     "VECGREP_OAUTH_ISSUER_URL": "oauth_issuer_url",
     "VECGREP_OAUTH_LOOPBACK_BYPASS": "oauth_loopback_bypass",
@@ -60,6 +61,7 @@ EDITABLE_FIELDS = {
     "mcp_allowed_hosts",
     "mcp_allowed_origins",
     "qdrant_url",
+    "bm25_backend",
     "backup_enabled",
     "backup_frequency",
     "backup_time",
@@ -73,7 +75,7 @@ SECRET_FIELDS = {
     "openai_api_key", "api_token", "admin_token", "oauth_approval_token",
 }
 STRUCTURAL_FIELDS = {
-    "api_host", "api_port", "rest_allowed_hosts", "qdrant_url", "oauth_enabled",
+    "api_host", "api_port", "rest_allowed_hosts", "qdrant_url", "bm25_backend", "oauth_enabled",
     "oauth_issuer_url", "oauth_loopback_bypass", "oauth_tailscale_identity_bypass",
     "mcp_allowed_hosts", "mcp_allowed_origins",
 }
@@ -148,6 +150,9 @@ class Settings:
     # mode shares one daemon across all clients. Recommended for any setup
     # with concurrent readers/writers. Example: "http://localhost:6333".
     qdrant_url: str | None = None
+    # Lexical sidecar implementation. Pickle preserves the historical default;
+    # SQLite keeps large corpora off the Python heap after an explicit migration.
+    bm25_backend: str = "pickle"
     backup_enabled: bool = False
     backup_frequency: str = "daily"
     backup_time: str = "03:00"
@@ -341,6 +346,8 @@ def validate_settings(settings: Settings) -> None:
         raise ConfigError("default_top_k must be positive")
     if settings.ollama_num_batch is not None and int(settings.ollama_num_batch) <= 0:
         raise ConfigError("ollama_num_batch must be positive")
+    if settings.bm25_backend not in {"pickle", "sqlite"}:
+        raise ConfigError("bm25_backend must be pickle or sqlite")
     for name in ("embed_model", "openai_embed_model"):
         if not str(getattr(settings, name)).strip():
             raise ConfigError(f"{name} must be non-empty")

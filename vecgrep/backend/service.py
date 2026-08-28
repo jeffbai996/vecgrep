@@ -119,9 +119,9 @@ class SearchOutcome:
     warnings: list[SearchWarning]
 
 
-def _bm25_store(home: Path | None) -> BM25Store | BM25SqliteStore:
+def _bm25_store(home: Path | None, backend: str) -> BM25Store | BM25SqliteStore:
     """Construct the configured lexical store without silent downgrades."""
-    backend = os.environ.get("VECGREP_BM25_BACKEND", "pickle").strip().lower()
+    backend = backend.strip().lower()
     if backend in {"", "pickle"}:
         return BM25Store(
             home,
@@ -326,7 +326,8 @@ class VecgrepService:
         # SQLite keeps large lexical indexes on disk; pickle remains the
         # default for compatibility and uses the resident-byte budget.
         self.bm25 = _bm25_store(
-            None if ephemeral else self.settings.home / "bm25"
+            None if ephemeral else self.settings.home / "bm25",
+            self.settings.bm25_backend,
         )
         self.explorer_store = ExplorerStore(
             None if ephemeral else self.settings.home / "explorer.db"
