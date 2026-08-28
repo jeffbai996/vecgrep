@@ -249,6 +249,7 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 |---|---|---|
 | `VECGREP_HOME` | `~/.vecgrep` | Storage root |
 | `VECGREP_OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint |
+| `VECGREP_OLLAMA_NUM_BATCH` | unset | Optional Ollama runner batch bound; lower values reduce embedding-model working memory at the cost of bulk-index throughput |
 | `VECGREP_EMBED_MODEL` | `bge-m3` | Ollama model |
 | `VECGREP_OPENAI_EMBED_MODEL` | `text-embedding-3-small` | OpenAI model |
 | `OPENAI_API_KEY` | unset | If set, used as fallback when Ollama is down |

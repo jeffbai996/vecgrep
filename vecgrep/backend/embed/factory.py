@@ -30,10 +30,18 @@ def _resolve_ollama(settings, model: str | None):
     so a healthy primary costs exactly one probe."""
     chosen = model or settings.embed_model
     if _ollama_alive(settings.ollama_url):
-        return OllamaBackend(settings.ollama_url, chosen)
+        return OllamaBackend(
+            settings.ollama_url,
+            chosen,
+            num_batch=settings.ollama_num_batch,
+        )
     fallback = settings.ollama_fallback_url
     if fallback and _ollama_alive(fallback):
-        return OllamaBackend(fallback, chosen)
+        return OllamaBackend(
+            fallback,
+            chosen,
+            num_batch=settings.ollama_num_batch,
+        )
     return None
 
 

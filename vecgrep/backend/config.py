@@ -22,6 +22,7 @@ OAUTH_APPROVAL_ENV = "VECGREP_OAUTH_APPROVAL_TOKEN"
 ENV_MAP = {
     "VECGREP_OLLAMA_URL": "ollama_url",
     "VECGREP_OLLAMA_FALLBACK_URL": "ollama_fallback_url",
+    "VECGREP_OLLAMA_NUM_BATCH": "ollama_num_batch",
     "VECGREP_EMBED_MODEL": "embed_model",
     "OPENAI_API_KEY": "openai_api_key",
     "VECGREP_OPENAI_EMBED_MODEL": "openai_embed_model",
@@ -45,6 +46,7 @@ ENV_MAP = {
 EDITABLE_FIELDS = {
     "ollama_url",
     "ollama_fallback_url",
+    "ollama_num_batch",
     "embed_model",
     "openai_embed_model",
     "api_host",
@@ -90,6 +92,10 @@ class Settings:
     # is unreachable, before considering OpenAI. Lets a deployment run a primary
     # (e.g. a GPU box) with a local-host fallback. Unset (None) = no fallback.
     ollama_fallback_url: str | None = None
+    # Optional per-request Ollama runner batch bound. Lowering this reduces
+    # model working memory without changing weights, context, or vector shape.
+    # None preserves the model/runtime default.
+    ollama_num_batch: int | None = None
     embed_model: str = "bge-m3"
     openai_api_key: str | None = None
     openai_embed_model: str = "text-embedding-3-small"
@@ -209,7 +215,7 @@ def load_settings() -> Settings:
         if env_key in os.environ:
             val = os.environ[env_key]
             if attr in {"api_port", "default_top_k", "backup_weekday", "backup_retention",
-                        "thread_pool_size"}:
+                        "thread_pool_size", "ollama_num_batch"}:
                 val = int(val)
             elif attr in {
                 "oauth_enabled", "oauth_loopback_bypass",
@@ -333,6 +339,8 @@ def validate_settings(settings: Settings) -> None:
         raise ConfigError("api_port must be between 1 and 65535")
     if int(settings.default_top_k) <= 0:
         raise ConfigError("default_top_k must be positive")
+    if settings.ollama_num_batch is not None and int(settings.ollama_num_batch) <= 0:
+        raise ConfigError("ollama_num_batch must be positive")
     for name in ("embed_model", "openai_embed_model"):
         if not str(getattr(settings, name)).strip():
             raise ConfigError(f"{name} must be non-empty")
@@ -421,7 +429,10 @@ def update_config(
         for name in Settings.__dataclass_fields__
     })
     for name, value in updates.items():
-        if name in {"api_port", "default_top_k", "backup_weekday", "backup_retention"} and not isinstance(value, bool):
+        if name in {
+            "api_port", "default_top_k", "backup_weekday", "backup_retention",
+            "ollama_num_batch",
+        } and not isinstance(value, bool):
             try:
                 value = int(value)
             except (TypeError, ValueError) as exc:
@@ -431,14 +442,20 @@ def update_config(
             "oauth_tailscale_identity_bypass", "backup_enabled",
         } and not isinstance(value, bool):
             raise ConfigError(f"{name} must be a boolean")
-        if name in {"ollama_fallback_url", "oauth_issuer_url", "qdrant_url", "backup_destination"} and value == "":
+        if name in {
+            "ollama_fallback_url", "ollama_num_batch", "oauth_issuer_url",
+            "qdrant_url", "backup_destination",
+        } and value == "":
             value = None
         setattr(candidate, name, value)
     validate_settings(candidate)
 
     raw = _load_json(current.config_file)
     raw.update(updates)
-    for nullable in ("ollama_fallback_url", "oauth_issuer_url", "qdrant_url", "backup_destination"):
+    for nullable in (
+        "ollama_fallback_url", "ollama_num_batch", "oauth_issuer_url",
+        "qdrant_url", "backup_destination",
+    ):
         if raw.get(nullable) == "":
             raw[nullable] = None
     _atomic_write_json(current.config_file, raw)

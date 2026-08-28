@@ -32,6 +32,20 @@ def test_primary_alive_uses_primary(monkeypatch):
     assert b.base_url == "http://primary:11434"
 
 
+def test_ollama_num_batch_reaches_backend(monkeypatch):
+    s = _settings(
+        ollama_url="http://primary:11434",
+        ollama_fallback_url=None,
+        ollama_num_batch=2048,
+    )
+    monkeypatch.setattr(factory, "_ollama_alive", lambda url: True)
+
+    b = factory.get_embed_backend(s)
+
+    assert isinstance(b, OllamaBackend)
+    assert b.num_batch == 2048
+
+
 def test_primary_dead_falls_back_to_secondary_ollama(monkeypatch):
     s = _settings(ollama_url="http://primary:11434",
                   ollama_fallback_url="http://fallback:11434")

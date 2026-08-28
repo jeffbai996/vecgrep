@@ -166,7 +166,15 @@ def _load(model_name: str):
             "Install with `pip install vecgrep[rerank]`."
         ) from e
     try:
-        model = CrossEncoder(model_name)
+        import torch
+
+        kwargs = {}
+        if torch.cuda.is_available():
+            # The v2-m3 checkpoint is stored as 2.2 GB of FP32 weights. Loading
+            # directly in FP16 halves the steady-state model allocation and is
+            # the native fast path on CUDA. CPU keeps the upstream default.
+            kwargs = {"model_kwargs": {"torch_dtype": torch.float16}}
+        model = CrossEncoder(model_name, **kwargs)
     except Exception as e:
         raise RerankerError(
             f"Failed to load cross-encoder '{model_name}': {e}"
