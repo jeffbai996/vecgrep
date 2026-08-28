@@ -118,6 +118,38 @@ class SearchOutcome:
     results: list["SearchResult"]
     warnings: list[SearchWarning]
 
+
+def _bm25_store(home: Path | None) -> BM25Store | BM25SqliteStore:
+    """Construct the configured lexical store without silent downgrades."""
+    backend = os.environ.get("VECGREP_BM25_BACKEND", "pickle").strip().lower()
+    if backend in {"", "pickle"}:
+        return BM25Store(
+            home,
+            max_cached_corpora=_env_int("VECGREP_BM25_CACHE_CORPORA", None),
+            max_cached_bytes=_env_int("VECGREP_BM25_CACHE_BYTES", None),
+        )
+    if backend != "sqlite":
+        raise ValueError(
+            f"unsupported VECGREP_BM25_BACKEND={backend!r}; use 'pickle' or 'sqlite'"
+        )
+
+    if home is not None:
+        stale = []
+        for path in home.glob("*.pkl"):
+            database = path.with_suffix(".db")
+            if (
+                not database.exists()
+                or database.stat().st_mtime_ns < path.stat().st_mtime_ns
+            ):
+                stale.append(path.stem)
+        if stale:
+            names = ", ".join(sorted(stale))
+            raise RuntimeError(
+                f"SQLite BM25 backend has unmigrated or stale pickle indexes: {names}; "
+                "migrate them before switching backends"
+            )
+    return BM25SqliteStore(home)
+
 # Reciprocal Rank Fusion constant. 60 is the canonical value from the
 # original RRF paper; we expose it here as a single knob.
 RRF_K = 60
@@ -291,13 +323,10 @@ class VecgrepService:
             None if ephemeral else self.settings.qdrant_path,
             url=None if ephemeral else self.settings.qdrant_url,
         )
-        # Budget the resident BM25 indexes by BYTES, not by corpus count: the
-        # sidecars on a real fleet span four orders of magnitude, so a count is
-        # not a limit on anything that matters. See DEFAULT_CACHE_BYTES.
-        self.bm25 = BM25Store(
-            None if ephemeral else self.settings.home / "bm25",
-            max_cached_corpora=_env_int("VECGREP_BM25_CACHE_CORPORA", None),
-            max_cached_bytes=_env_int("VECGREP_BM25_CACHE_BYTES", None),
+        # SQLite keeps large lexical indexes on disk; pickle remains the
+        # default for compatibility and uses the resident-byte budget.
+        self.bm25 = _bm25_store(
+            None if ephemeral else self.settings.home / "bm25"
         )
         self.explorer_store = ExplorerStore(
             None if ephemeral else self.settings.home / "explorer.db"

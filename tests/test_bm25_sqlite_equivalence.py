@@ -249,3 +249,18 @@ def test_migration_of_a_missing_corpus_is_an_error_not_an_empty_index(tmp_path):
 
     with pytest.raises(FileNotFoundError):
         migrate_from_pickle(tmp_path, "nope")
+
+
+def test_sqlite_bulk_is_one_atomic_transaction(tmp_path):
+    lite = BM25SqliteStore(tmp_path / "db")
+    with lite.bulk("c"):
+        lite.upsert("c", ["a"], ["alpha"], [{"source_id": "/a"}])
+        lite.upsert("c", ["b"], ["beta"], [{"source_id": "/b"}])
+    assert lite.count("c") == 2
+
+    with pytest.raises(RuntimeError):
+        with lite.bulk("c"):
+            lite.upsert("c", ["z"], ["zeta"], [{"source_id": "/z"}])
+            raise RuntimeError("abort")
+    assert lite.get_by_id("c", "z") is None
+    assert lite.dirty_corpora() == []

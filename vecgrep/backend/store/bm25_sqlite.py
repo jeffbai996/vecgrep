@@ -22,6 +22,7 @@ import json
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from vecgrep.backend.store.bm25_store import (
@@ -119,6 +120,31 @@ class BM25SqliteStore:
     # `evict` exists so callers written against the pickle store keep working.
     # There is nothing resident to release, so it just drops the handle.
     evict = close
+
+    def dirty_corpora(self) -> list[str]:
+        """SQLite transactions need no external crash-recovery marker."""
+        return []
+
+    def clear_dirty(self, corpus: str) -> None:
+        """Compatibility no-op for the pickle store's marker protocol."""
+
+    @contextmanager
+    def bulk(self, corpus: str):
+        """Commit a multi-source update once, or roll it back as a unit."""
+        if corpus in self._bulk:
+            yield
+            return
+        conn = self._conn(corpus)
+        self._bulk.add(corpus)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            yield
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._bulk.discard(corpus)
 
     # ── reads ─────────────────────────────────────────────────────────────
     def exists(self, corpus: str) -> bool:
