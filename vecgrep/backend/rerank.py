@@ -12,8 +12,11 @@ when the user actually asks for reranking.
 """
 from __future__ import annotations
 
+import atexit
 import logging
+import math
 import os
+from pathlib import Path
 import threading
 import time
 
@@ -65,6 +68,32 @@ _RETRY_AFTER_S = 300.0
 RERANK_BATCH = int(os.environ.get("VECGREP_RERANK_BATCH", "8"))
 
 
+def _env_enabled(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Process isolation is opt-in so library/CLI callers keep the direct behavior
+# they have always had. Long-running servers should enable it: exiting the
+# child is the only reliable way to return every retained Torch/Python page to
+# the OS after a high-water workload.
+RERANK_WORKER_ENABLED = _env_enabled("VECGREP_RERANK_WORKER")
+RERANK_WORKER_MAX_BYTES = max(
+    0, int(os.environ.get("VECGREP_RERANK_WORKER_MAX_MB", "2300")) * 1024 * 1024
+)
+RERANK_WORKER_MAX_JOBS = max(
+    0, int(os.environ.get("VECGREP_RERANK_WORKER_MAX_JOBS", "64"))
+)
+RERANK_WORKER_START_TIMEOUT_S = float(
+    os.environ.get("VECGREP_RERANK_WORKER_START_TIMEOUT_S", "600")
+)
+RERANK_WORKER_CALL_TIMEOUT_S = float(
+    os.environ.get("VECGREP_RERANK_WORKER_CALL_TIMEOUT_S", "60")
+)
+
+
 def _release_cuda_cache() -> None:
     """Hand torch's reserve back to the driver.
 
@@ -97,10 +126,311 @@ _warming: dict[str, threading.Event] = {}
 _failed_at: dict[str, float] = {}
 
 
+def _process_committed_bytes(
+    path: Path = Path("/proc/self/smaps_rollup"),
+) -> int:
+    """Resident plus swapped pages owned by this process.
+
+    RSS alone falls when Linux swaps a retained allocator arena out, which can
+    make a bloated process look healthy immediately before it faults the same
+    pages back in. Counting both is the meaningful recycle threshold. On a
+    non-Linux host the metric is unavailable and the fixed job limit remains
+    the fallback bound.
+    """
+    values = {"Rss": 0, "Swap": 0}
+    try:
+        for line in path.read_text(encoding="ascii").splitlines():
+            key = line.split(":", 1)[0]
+            if key in values:
+                values[key] = int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return 0
+    return values["Rss"] + values["Swap"]
+
+
+def _construct_model(model_name: str):
+    try:
+        from sentence_transformers import CrossEncoder
+    except ImportError as e:
+        raise RerankerError(
+            "Reranking requires the 'rerank' extra. "
+            "Install with `pip install vecgrep[rerank]`."
+        ) from e
+    try:
+        import torch
+
+        kwargs = {}
+        if torch.cuda.is_available():
+            # The v2-m3 checkpoint is stored as 2.2 GB of FP32 weights. Loading
+            # directly in FP16 halves the steady-state model allocation and is
+            # the native fast path on CUDA. CPU keeps the upstream default.
+            kwargs = {"model_kwargs": {"torch_dtype": torch.float16}}
+        return CrossEncoder(model_name, **kwargs)
+    except Exception as e:
+        raise RerankerError(
+            f"Failed to load cross-encoder '{model_name}': {e}"
+        ) from e
+
+
+def _worker_main(
+    connection,
+    model_name: str,
+    *,
+    batch_size: int,
+    max_jobs: int,
+    max_bytes: int,
+) -> None:
+    """Own the model and CUDA context until the configured recycle point."""
+    try:
+        try:
+            model = _construct_model(model_name)
+        except Exception as exc:
+            connection.send(("load-error", type(exc).__name__, str(exc)))
+            return
+        connection.send(("ready",))
+        jobs = 0
+        while True:
+            try:
+                request = connection.recv()
+            except EOFError:
+                return
+            if not request or request[0] == "stop":
+                return
+            if request[0] != "predict":
+                connection.send(("error", "ProtocolError", "unknown command"))
+                return
+            _, query, texts = request
+            pairs = [(query, text) for text in texts]
+            try:
+                raw = model.predict(pairs, batch_size=batch_size)
+                scores = [float(score) for score in raw]
+            except Exception as exc:
+                connection.send(("error", type(exc).__name__, str(exc)))
+                return
+            finally:
+                _release_cuda_cache()
+            jobs += 1
+            committed = _process_committed_bytes()
+            recycle = (
+                (max_jobs > 0 and jobs >= max_jobs)
+                or (max_bytes > 0 and committed >= max_bytes)
+            )
+            connection.send(("result", scores, committed, recycle))
+            if recycle:
+                return
+    finally:
+        try:
+            connection.close()
+        except OSError:
+            pass
+
+
+class _WorkerClient:
+    """Thread-safe parent-side owner of one spawned reranker process."""
+
+    def __init__(self, model_name: str) -> None:
+        self.model_name = model_name
+        self.ready = threading.Event()
+        self.attempt_done = threading.Event()
+        self._state_lock = threading.Lock()
+        self._call_lock = threading.Lock()
+        self._process = None
+        self._connection = None
+        self._starting = False
+        self._failed_at: float | None = None
+
+    def is_ready(self) -> bool:
+        with self._state_lock:
+            process = self._process
+            ready = self.ready.is_set() and process is not None and process.is_alive()
+            if not ready:
+                self.ready.clear()
+            return ready
+
+    def ensure_started(self) -> threading.Event:
+        stale_connection = None
+        with self._state_lock:
+            process = self._process
+            if self.ready.is_set() and process is not None and process.is_alive():
+                self.attempt_done.set()
+                return self.attempt_done
+            if self._starting:
+                return self.attempt_done
+            if (
+                self._failed_at is not None
+                and time.monotonic() - self._failed_at < _RETRY_AFTER_S
+            ):
+                self.attempt_done.set()
+                return self.attempt_done
+            stale_connection = self._connection
+            self._process = None
+            self._connection = None
+            self._starting = True
+            self.ready.clear()
+            self.attempt_done.clear()
+        if stale_connection is not None:
+            try:
+                stale_connection.close()
+            except OSError:
+                pass
+        threading.Thread(
+            target=self._start,
+            name="vecgrep-rerank-worker-warm",
+            daemon=True,
+        ).start()
+        return self.attempt_done
+
+    def _start(self) -> None:
+        import multiprocessing
+
+        process = None
+        parent_connection = None
+        try:
+            context = multiprocessing.get_context("spawn")
+            parent_connection, child_connection = context.Pipe()
+            process = context.Process(
+                target=_worker_main,
+                args=(child_connection, self.model_name),
+                kwargs={
+                    "batch_size": RERANK_BATCH,
+                    "max_jobs": RERANK_WORKER_MAX_JOBS,
+                    "max_bytes": RERANK_WORKER_MAX_BYTES,
+                },
+                name="vecgrep-reranker",
+                daemon=True,
+            )
+            process.start()
+            child_connection.close()
+            with self._state_lock:
+                self._process = process
+                self._connection = parent_connection
+            if not parent_connection.poll(RERANK_WORKER_START_TIMEOUT_S):
+                raise TimeoutError("reranker worker load timed out")
+            response = parent_connection.recv()
+            if not response or response[0] != "ready":
+                detail = ": ".join(str(part) for part in response[1:])
+                raise RerankerError(detail or "reranker worker failed to load")
+            with self._state_lock:
+                self._starting = False
+                self._failed_at = None
+                self.ready.set()
+                self.attempt_done.set()
+            logger.info("reranker worker %s ready pid=%s", self.model_name, process.pid)
+        except Exception as exc:
+            logger.warning("reranker worker %s failed to start: %s", self.model_name, exc)
+            if parent_connection is not None:
+                try:
+                    parent_connection.close()
+                except OSError:
+                    pass
+            if process is not None and process.is_alive():
+                process.terminate()
+                process.join(timeout=2)
+            with self._state_lock:
+                if self._process is process:
+                    self._process = None
+                    self._connection = None
+                self._starting = False
+                self._failed_at = time.monotonic()
+                self.ready.clear()
+                self.attempt_done.set()
+
+    def predict(self, query: str, texts: list[str]) -> list[float]:
+        with self._call_lock:
+            if not self.is_ready():
+                raise RerankerError(f"reranker worker '{self.model_name}' is not ready")
+            with self._state_lock:
+                connection = self._connection
+            if connection is None:
+                raise RerankerError(f"reranker worker '{self.model_name}' is unavailable")
+            try:
+                connection.send(("predict", query, texts))
+                if not connection.poll(RERANK_WORKER_CALL_TIMEOUT_S):
+                    raise TimeoutError("reranker worker prediction timed out")
+                response = connection.recv()
+            except Exception as exc:
+                self._retire(terminate=True)
+                self.ensure_started()
+                raise RerankerError(str(exc)) from exc
+            if not response or response[0] != "result":
+                detail = ": ".join(str(part) for part in response[1:])
+                self._retire(terminate=True)
+                self.ensure_started()
+                raise RerankerError(detail or "reranker worker prediction failed")
+            _, scores, committed, recycle = response
+            if recycle:
+                logger.info(
+                    "recycling reranker worker %s after committed_mb=%.1f",
+                    self.model_name,
+                    committed / 1024 / 1024,
+                )
+                self._retire(terminate=False)
+                self.ensure_started()
+            return [float(score) for score in scores]
+
+    def _retire(self, *, terminate: bool) -> None:
+        with self._state_lock:
+            process = self._process
+            connection = self._connection
+            self._process = None
+            self._connection = None
+            self.ready.clear()
+            self.attempt_done.set()
+        if connection is not None:
+            if not terminate:
+                try:
+                    connection.send(("stop",))
+                except (BrokenPipeError, EOFError, OSError):
+                    pass
+            try:
+                connection.close()
+            except OSError:
+                pass
+        if process is not None:
+            process.join(timeout=2)
+            if terminate and process.is_alive():
+                process.terminate()
+                process.join(timeout=2)
+
+    def stop(self) -> None:
+        with self._call_lock:
+            self._retire(terminate=False)
+
+
+_workers: dict[str, _WorkerClient] = {}
+_workers_lock = threading.Lock()
+
+
+def _worker_for(model_name: str) -> _WorkerClient:
+    with _workers_lock:
+        worker = _workers.get(model_name)
+        if worker is None:
+            worker = _WorkerClient(model_name)
+            _workers[model_name] = worker
+        return worker
+
+
+def _worker_predict(query: str, texts: list[str], model_name: str) -> list[float]:
+    return _worker_for(model_name).predict(query, texts)
+
+
+def shutdown_workers() -> None:
+    with _workers_lock:
+        workers = list(_workers.values())
+        _workers.clear()
+    for worker in workers:
+        worker.stop()
+
+
+atexit.register(shutdown_workers)
+
+
 def ensure_warm(model_name: str = DEFAULT_RERANKER) -> threading.Event:
     """Load `model_name` in the background if it is neither loaded nor already
     loading. Returns an Event set once the attempt finishes, successfully or
     not. Idempotent, so calling it per request is free after the first."""
+    if RERANK_WORKER_ENABLED:
+        return _worker_for(model_name).ensure_started()
     with _lock:
         if model_name in _cache:
             done = threading.Event()
@@ -135,6 +465,8 @@ def ensure_warm(model_name: str = DEFAULT_RERANKER) -> threading.Event:
 
 def is_ready(model_name: str = DEFAULT_RERANKER) -> bool:
     """True when the model is loaded and predict() will not block on I/O."""
+    if RERANK_WORKER_ENABLED:
+        return _worker_for(model_name).is_ready()
     with _lock:
         return model_name in _cache
 
@@ -158,27 +490,7 @@ def _load(model_name: str):
         cached = _cache.get(model_name)
     if cached is not None:
         return cached
-    try:
-        from sentence_transformers import CrossEncoder
-    except ImportError as e:
-        raise RerankerError(
-            "Reranking requires the 'rerank' extra. "
-            "Install with `pip install vecgrep[rerank]`."
-        ) from e
-    try:
-        import torch
-
-        kwargs = {}
-        if torch.cuda.is_available():
-            # The v2-m3 checkpoint is stored as 2.2 GB of FP32 weights. Loading
-            # directly in FP16 halves the steady-state model allocation and is
-            # the native fast path on CUDA. CPU keeps the upstream default.
-            kwargs = {"model_kwargs": {"torch_dtype": torch.float16}}
-        model = CrossEncoder(model_name, **kwargs)
-    except Exception as e:
-        raise RerankerError(
-            f"Failed to load cross-encoder '{model_name}': {e}"
-        ) from e
+    model = _construct_model(model_name)
     with _lock:
         _cache[model_name] = model
     return model
@@ -195,19 +507,21 @@ def rerank(
     """
     if not candidates:
         return []
-    model = _load(model_name)
-    pairs = [(query, text) for text, _ in candidates]
-    try:
-        raw = model.predict(pairs, batch_size=RERANK_BATCH)  # numpy logits
-    finally:
-        # Release on the failure path too: a rerank that dies mid-batch is
-        # exactly when the card is most full and the next caller needs room.
-        _release_cuda_cache()
+    texts = [text for text, _ in candidates]
+    if RERANK_WORKER_ENABLED:
+        raw = _worker_predict(query, texts, model_name)
+    else:
+        model = _load(model_name)
+        pairs = [(query, text) for text in texts]
+        try:
+            raw = model.predict(pairs, batch_size=RERANK_BATCH)  # numpy logits
+        finally:
+            # Release on the failure path too: a rerank that dies mid-batch is
+            # exactly when the card is most full and the next caller needs room.
+            _release_cuda_cache()
 
     # bge-reranker emits raw logits; squashing through sigmoid puts them in
     # 0..1 which is more useful for percentage display than raw values.
-    import math
-
     scored = [
         (1 / (1 + math.exp(-float(s))), payload)
         for s, (_, payload) in zip(raw, candidates)
