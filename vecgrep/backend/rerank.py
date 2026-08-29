@@ -92,6 +92,25 @@ RERANK_WORKER_START_TIMEOUT_S = float(
 RERANK_WORKER_CALL_TIMEOUT_S = float(
     os.environ.get("VECGREP_RERANK_WORKER_CALL_TIMEOUT_S", "60")
 )
+# Retire the worker after this many seconds without a predict. The
+# cross-encoder is ~1.2 GB resident for a feature most searches never touch;
+# on a shared box that is the difference between the host having headroom
+# and not. The next rerank respawns it (searches that arrive while it loads
+# already fall back to fusion order). 0 keeps the worker for the life of the
+# server, which was the behaviour before this knob existed.
+RERANK_WORKER_IDLE_S = max(
+    0.0, float(os.environ.get("VECGREP_RERANK_WORKER_IDLE_S", "600"))
+)
+
+
+def warm_at_boot() -> bool:
+    """Should the server pre-load the reranker at startup?
+
+    Only when it would stay loaded anyway. A worker that retires when idle
+    would be spawned at boot just to be retired ten minutes later — 1.2 GB of
+    churn for nothing, on the one occasion (startup) the box is busiest.
+    """
+    return not (RERANK_WORKER_ENABLED and RERANK_WORKER_IDLE_S > 0)
 
 
 def _release_cuda_cache() -> None:
@@ -238,6 +257,47 @@ class _WorkerClient:
         self._connection = None
         self._starting = False
         self._failed_at: float | None = None
+        self._last_used = time.monotonic()
+        self._idle_timer: threading.Timer | None = None
+
+    def _mark_ready(self) -> None:
+        with self._state_lock:
+            self._starting = False
+            self._failed_at = None
+            self._last_used = time.monotonic()
+            self.ready.set()
+            self.attempt_done.set()
+        self._arm_idle_timer()
+
+    def _arm_idle_timer(self) -> None:
+        idle = RERANK_WORKER_IDLE_S
+        if idle <= 0:
+            return
+        with self._state_lock:
+            if self._idle_timer is not None:
+                self._idle_timer.cancel()
+            timer = threading.Timer(idle, self._retire_if_idle)
+            timer.daemon = True
+            timer.name = "vecgrep-rerank-worker-idle"
+            self._idle_timer = timer
+        timer.start()
+
+    def _retire_if_idle(self) -> None:
+        # A predict may have landed just before the timer fired; if so, the
+        # clock was reset and this firing is stale — re-arm for the remainder.
+        idle = RERANK_WORKER_IDLE_S
+        with self._state_lock:
+            elapsed = time.monotonic() - self._last_used
+            in_use = self._call_lock.locked()
+        if in_use or elapsed < idle:
+            self._arm_idle_timer()
+            return
+        if not self.is_ready():
+            return
+        logger.info(
+            "retiring idle reranker worker %s after %.0fs", self.model_name, elapsed
+        )
+        self._retire(terminate=False)
 
     def is_ready(self) -> bool:
         with self._state_lock:
@@ -310,11 +370,7 @@ class _WorkerClient:
             if not response or response[0] != "ready":
                 detail = ": ".join(str(part) for part in response[1:])
                 raise RerankerError(detail or "reranker worker failed to load")
-            with self._state_lock:
-                self._starting = False
-                self._failed_at = None
-                self.ready.set()
-                self.attempt_done.set()
+            self._mark_ready()
             logger.info("reranker worker %s ready pid=%s", self.model_name, process.pid)
         except Exception as exc:
             logger.warning("reranker worker %s failed to start: %s", self.model_name, exc)
@@ -358,6 +414,8 @@ class _WorkerClient:
                 self.ensure_started()
                 raise RerankerError(detail or "reranker worker prediction failed")
             _, scores, committed, recycle = response
+            with self._state_lock:
+                self._last_used = time.monotonic()
             if recycle:
                 logger.info(
                     "recycling reranker worker %s after committed_mb=%.1f",
@@ -376,6 +434,9 @@ class _WorkerClient:
             self._connection = None
             self.ready.clear()
             self.attempt_done.set()
+            if self._idle_timer is not None:
+                self._idle_timer.cancel()
+                self._idle_timer = None
         if connection is not None:
             if not terminate:
                 try:

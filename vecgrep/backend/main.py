@@ -115,10 +115,15 @@ def create_app() -> FastAPI:
         # first search that wants it does not pay the load inside a
         # threadpool slot. Best-effort: a box without the rerank extra logs
         # and carries on serving unreranked.
+        # Skipped when the worker retires on idle: it would only be spawned
+        # to be torn down again before anyone searched.
         try:
-            from .rerank import ensure_warm as _warm_reranker
+            from .rerank import ensure_warm as _warm_reranker, warm_at_boot
 
-            _warm_reranker()
+            if warm_at_boot():
+                _warm_reranker()
+            else:
+                logger.info("reranker is lazy: loads on first rerank, retires when idle")
         except Exception as exc:
             logger.warning("reranker warm-up could not start: %s", exc)
 
