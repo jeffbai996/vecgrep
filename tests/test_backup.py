@@ -166,6 +166,43 @@ def test_server_snapshot_transport_downloads_and_uploads(vg_home: Path, monkeypa
     assert uploaded and uploaded[0][0][0].endswith("/vecgrep__notes/snapshots/upload")
 
 
+def test_server_snapshot_cleanup_failure_keeps_download(
+    vg_home: Path, monkeypatch, caplog
+) -> None:
+    class Description:
+        name = "snapshot-1.snapshot"
+
+    class Client:
+        def create_snapshot(self, collection, wait=True):
+            return Description()
+
+        def delete_snapshot(self, collection, name, wait=True):
+            raise RuntimeError("cleanup transport dropped")
+
+    class Store:
+        client = Client()
+
+    class Service:
+        store = Store()
+
+    class Download:
+        def __enter__(self): return self
+        def __exit__(self, *args): return None
+        def raise_for_status(self): return None
+        def iter_bytes(self): yield b"verified native snapshot"
+
+    monkeypatch.setattr("vecgrep.backend.backup.httpx.stream", lambda *a, **k: Download())
+    settings = Settings(home=vg_home, qdrant_url="http://localhost:6333")
+    snapshots = QdrantSnapshots(settings, Service())
+    vg_home.mkdir(parents=True)
+
+    snapshot_format, path = snapshots.create("notes", vg_home)
+
+    assert snapshot_format == "qdrant-native"
+    assert path.read_bytes() == b"verified native snapshot"
+    assert "cleanup deferred" in caplog.text
+
+
 def test_restore_failure_runs_automatic_rollback(vg_home: Path, monkeypatch) -> None:
     manager = BackupManager(Settings(home=vg_home))
     archive = manager.create()

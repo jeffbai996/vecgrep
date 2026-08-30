@@ -19,6 +19,8 @@ backend until an equivalence run says this one ranks identically.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator
@@ -28,6 +30,21 @@ from pathlib import Path
 from vecgrep.backend.store.bm25_store import (
     _coverage_factor,
     tokenize,
+)
+
+logger = logging.getLogger(__name__)
+
+# Keep WAL growth bounded without blocking readers. SQLite's default automatic
+# checkpoint is also 1,000 pages, but spelling it out makes the contract
+# inspectable and lets operators tune unusual filesystems. The byte limit is
+# applied when a checkpoint can reset the WAL; a busy reader may defer the
+# shrink, never the committed data.
+WAL_AUTOCHECKPOINT_PAGES = max(
+    1, int(os.environ.get("VECGREP_BM25_WAL_AUTOCHECKPOINT_PAGES", "1000"))
+)
+WAL_JOURNAL_SIZE_LIMIT_BYTES = max(
+    0,
+    int(os.environ.get("VECGREP_BM25_WAL_LIMIT_MB", "64")) * 1024 * 1024,
 )
 
 # FTS5 ranks with bm25(), which returns a NEGATIVE number where more negative
@@ -95,6 +112,8 @@ class BM25SqliteStore:
                 c = sqlite3.connect(str(p), check_same_thread=False)
                 c.execute("PRAGMA journal_mode=WAL")
                 c.execute("PRAGMA synchronous=NORMAL")
+                c.execute(f"PRAGMA wal_autocheckpoint={WAL_AUTOCHECKPOINT_PAGES}")
+                c.execute(f"PRAGMA journal_size_limit={WAL_JOURNAL_SIZE_LIMIT_BYTES}")
             c.execute("PRAGMA busy_timeout=10000")
             # Keep SQLite's own page cache small. The point of this backend is
             # that the index does NOT live in the process; a large cache here
@@ -104,6 +123,30 @@ class BM25SqliteStore:
             c.commit()
             self._conns[corpus] = c
             return c
+
+    def _checkpoint(self, corpus: str, conn: sqlite3.Connection) -> tuple[int, int, int] | None:
+        """Best-effort passive checkpoint after a potentially large mutation.
+
+        PASSIVE never waits for readers, so searches keep their existing
+        latency and snapshot semantics. If a reader pins old WAL frames, a
+        later mutation or clean connection close gets another chance.
+        """
+        try:
+            row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        except sqlite3.Error as exc:
+            logger.warning("BM25 WAL checkpoint deferred for %s: %s", corpus, exc)
+            return None
+        if row is None:
+            return None
+        busy, log_frames, checkpointed = (int(row[0]), int(row[1]), int(row[2]))
+        if busy:
+            logger.info(
+                "BM25 WAL checkpoint busy for %s frames=%d checkpointed=%d",
+                corpus,
+                log_frames,
+                checkpointed,
+            )
+        return busy, log_frames, checkpointed
 
     def close(self, corpus: str) -> None:
         with self._lock:
@@ -140,6 +183,7 @@ class BM25SqliteStore:
             conn.execute("BEGIN IMMEDIATE")
             yield
             conn.commit()
+            self._checkpoint(corpus, conn)
         except Exception:
             conn.rollback()
             raise
@@ -204,6 +248,7 @@ class BM25SqliteStore:
         if changed:
             conn.executemany("UPDATE chunks SET payload = ? WHERE pos = ?", changed)
             conn.commit()
+            self._checkpoint(corpus, conn)
         return len(changed)
 
     def source_counts(self, corpus: str) -> dict[str, int]:
@@ -256,6 +301,7 @@ class BM25SqliteStore:
                              " ".join(tokenize(text)), payload)
                 n += 1
             conn.commit()
+            self._checkpoint(corpus, conn)
         except Exception:
             conn.rollback()
             raise
@@ -271,6 +317,7 @@ class BM25SqliteStore:
         conn.execute("DELETE FROM chunks WHERE source_id = ?", (source_id,))
         if corpus not in self._bulk:
             conn.commit()
+            self._checkpoint(corpus, conn)
 
     def drop(self, corpus: str) -> None:
         self.close(corpus)

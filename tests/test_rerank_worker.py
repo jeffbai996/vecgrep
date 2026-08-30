@@ -7,6 +7,9 @@ search semantics or require the service itself to restart.
 from __future__ import annotations
 
 import math
+import time
+
+import pytest
 
 from vecgrep.backend import rerank as rr
 
@@ -34,6 +37,35 @@ class _Model:
     def predict(self, pairs, **kwargs):
         self.calls.append((pairs, kwargs))
         return [-1.0, 2.0]
+
+
+class _Process:
+    def __init__(self):
+        self.alive = True
+
+    def is_alive(self):
+        return self.alive
+
+    def join(self, timeout=None):
+        pass
+
+    def terminate(self):
+        self.alive = False
+
+
+class _TimeoutConnection:
+    def __init__(self):
+        self.sent = []
+        self.closed = False
+
+    def send(self, value):
+        self.sent.append(value)
+
+    def poll(self, timeout=None):
+        return False
+
+    def close(self):
+        self.closed = True
 
 
 def test_worker_scores_primitive_texts_and_releases_cuda(monkeypatch):
@@ -107,3 +139,29 @@ def test_committed_memory_counts_resident_and_swapped_pages(tmp_path):
     )
 
     assert rr._process_committed_bytes(smaps) == 1500 * 1024
+
+
+def test_prediction_timeout_opens_circuit_before_retry(monkeypatch):
+    monkeypatch.setattr(rr, "RERANK_WORKER_FAILURE_COOLDOWN_S", 60.0)
+    monkeypatch.setattr(rr, "_worker_pressure_active", lambda: False)
+    worker = rr._WorkerClient("model")
+    worker._process = _Process()
+    worker._connection = _TimeoutConnection()
+    worker.ready.set()
+    worker.attempt_done.set()
+    started = []
+    monkeypatch.setattr(worker, "_start", lambda: started.append(True))
+
+    with pytest.raises(rr.RerankerError, match="prediction timed out"):
+        worker.predict("q", ["candidate"])
+
+    assert worker._failed_at is not None
+    assert worker.is_ready() is False
+    worker.ensure_started()
+    time.sleep(0.02)
+    assert started == []
+
+    worker._failed_at -= 61.0
+    worker.ensure_started()
+    time.sleep(0.05)
+    assert started == [True]

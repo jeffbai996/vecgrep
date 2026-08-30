@@ -11,6 +11,7 @@ import gzip
 import hashlib
 import hmac
 import json
+import logging
 import os
 import shutil
 import stat
@@ -30,6 +31,8 @@ from .. import __version__
 from .config import EDITABLE_FIELDS, SECRET_FIELDS, Settings, _atomic_write_json, _load_json
 from .service import VecgrepService, _collection_for
 from .store import CorpusError
+
+logger = logging.getLogger(__name__)
 
 
 class BackupError(RuntimeError):
@@ -80,9 +83,17 @@ class QdrantSnapshots:
                         for chunk in response.iter_bytes():
                             output.write(chunk)
             finally:
-                self.service.store.client.delete_snapshot(
-                    collection, description.name, wait=True
-                )
+                try:
+                    self.service.store.client.delete_snapshot(
+                        collection, description.name, wait=True
+                    )
+                except Exception as exc:  # noqa: BLE001 - cleanup cannot invalidate a download
+                    logger.warning(
+                        "Qdrant temporary snapshot cleanup deferred for %s/%s: %s",
+                        collection,
+                        description.name,
+                        exc,
+                    )
             return "qdrant-native", path
 
         path = destination / f"{corpus}.jsonl.gz"

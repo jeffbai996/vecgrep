@@ -13,6 +13,7 @@ when the user actually asks for reranking.
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import math
 import os
@@ -92,6 +93,16 @@ RERANK_WORKER_START_TIMEOUT_S = float(
 RERANK_WORKER_CALL_TIMEOUT_S = float(
     os.environ.get("VECGREP_RERANK_WORKER_CALL_TIMEOUT_S", "60")
 )
+# A timed-out or crashed prediction usually means the accelerator is wedged or
+# unavailable, not that immediately loading another 1.2 GB worker will help.
+# Keep automatic callers on the already-computed fusion order for a bounded
+# cooldown, then let the next request probe again. Scores and candidate sets
+# are untouched; this only stops a failed enhancement from becoming a respawn
+# loop.
+RERANK_WORKER_FAILURE_COOLDOWN_S = max(
+    0.0,
+    float(os.environ.get("VECGREP_RERANK_WORKER_FAILURE_COOLDOWN_S", "300")),
+)
 # Retire the worker after this many seconds without a predict. The
 # cross-encoder is ~1.2 GB resident for a feature most searches never touch;
 # on a shared box that is the difference between the host having headroom
@@ -101,6 +112,52 @@ RERANK_WORKER_CALL_TIMEOUT_S = float(
 RERANK_WORKER_IDLE_S = max(
     0.0, float(os.environ.get("VECGREP_RERANK_WORKER_IDLE_S", "600"))
 )
+
+# Optional host-pressure signal. The production watcher writes a tiny JSON
+# document containing either ``level`` (warn/protect/hard/critical) or a
+# boolean ``pressure``. This remains opt-in so vecgrep has no dependency on a
+# particular host governor. A stale or malformed signal fails open: retrieval
+# still works, and the ordinary idle/max-bytes bounds remain in force.
+RERANK_WORKER_PRESSURE_FILE = os.environ.get("VECGREP_RERANK_WORKER_PRESSURE_FILE")
+RERANK_WORKER_PRESSURE_POLL_S = max(
+    1.0, float(os.environ.get("VECGREP_RERANK_WORKER_PRESSURE_POLL_S", "15"))
+)
+RERANK_WORKER_PRESSURE_MAX_AGE_S = max(
+    1.0,
+    float(os.environ.get("VECGREP_RERANK_WORKER_PRESSURE_MAX_AGE_S", "120")),
+)
+RERANK_WORKER_PRESSURE_LEVELS = frozenset(
+    level.strip().lower()
+    for level in os.environ.get(
+        "VECGREP_RERANK_WORKER_PRESSURE_LEVELS", "protect,hard,critical"
+    ).split(",")
+    if level.strip()
+)
+
+
+def _worker_pressure_active(
+    path: str | os.PathLike[str] | None = None,
+    *,
+    now: float | None = None,
+) -> bool:
+    """Return whether a fresh, valid host signal asks heavy workers to yield."""
+    raw_path = path if path is not None else RERANK_WORKER_PRESSURE_FILE
+    if not raw_path:
+        return False
+    signal = Path(raw_path)
+    try:
+        stat = signal.stat()
+        current = time.time() if now is None else now
+        if current - stat.st_mtime > RERANK_WORKER_PRESSURE_MAX_AGE_S:
+            return False
+        payload = json.loads(signal.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("pressure") is True:
+        return True
+    return str(payload.get("level") or "").strip().lower() in RERANK_WORKER_PRESSURE_LEVELS
 
 
 def warm_at_boot() -> bool:
@@ -259,6 +316,7 @@ class _WorkerClient:
         self._failed_at: float | None = None
         self._last_used = time.monotonic()
         self._idle_timer: threading.Timer | None = None
+        self._pressure_logged = False
 
     def _mark_ready(self) -> None:
         with self._state_lock:
@@ -271,12 +329,17 @@ class _WorkerClient:
 
     def _arm_idle_timer(self) -> None:
         idle = RERANK_WORKER_IDLE_S
-        if idle <= 0:
+        delays = []
+        if idle > 0:
+            delays.append(idle)
+        if RERANK_WORKER_PRESSURE_FILE:
+            delays.append(RERANK_WORKER_PRESSURE_POLL_S)
+        if not delays:
             return
         with self._state_lock:
             if self._idle_timer is not None:
                 self._idle_timer.cancel()
-            timer = threading.Timer(idle, self._retire_if_idle)
+            timer = threading.Timer(min(delays), self._retire_if_idle)
             timer.daemon = True
             timer.name = "vecgrep-rerank-worker-idle"
             self._idle_timer = timer
@@ -286,18 +349,34 @@ class _WorkerClient:
         # A predict may have landed just before the timer fired; if so, the
         # clock was reset and this firing is stale — re-arm for the remainder.
         idle = RERANK_WORKER_IDLE_S
-        with self._state_lock:
-            elapsed = time.monotonic() - self._last_used
-            in_use = self._call_lock.locked()
-        if in_use or elapsed < idle:
+        pressure = _worker_pressure_active()
+        if not self._call_lock.acquire(blocking=False):
             self._arm_idle_timer()
             return
-        if not self.is_ready():
-            return
-        logger.info(
-            "retiring idle reranker worker %s after %.0fs", self.model_name, elapsed
-        )
-        self._retire(terminate=False)
+        try:
+            with self._state_lock:
+                elapsed = time.monotonic() - self._last_used
+            if pressure and self.is_ready():
+                logger.info(
+                    "retiring reranker worker %s under host memory pressure",
+                    self.model_name,
+                )
+                self._retire(terminate=False)
+                return
+            if idle > 0 and elapsed < idle:
+                self._arm_idle_timer()
+                return
+            if idle <= 0:
+                self._arm_idle_timer()
+                return
+            if not self.is_ready():
+                return
+            logger.info(
+                "retiring idle reranker worker %s after %.0fs", self.model_name, elapsed
+            )
+            self._retire(terminate=False)
+        finally:
+            self._call_lock.release()
 
     def is_ready(self) -> bool:
         with self._state_lock:
@@ -318,10 +397,38 @@ class _WorkerClient:
                 return self.attempt_done
             if (
                 self._failed_at is not None
-                and time.monotonic() - self._failed_at < _RETRY_AFTER_S
+                and time.monotonic() - self._failed_at
+                < RERANK_WORKER_FAILURE_COOLDOWN_S
             ):
                 self.attempt_done.set()
                 return self.attempt_done
+        pressure = _worker_pressure_active()
+        with self._state_lock:
+            # The pressure-file read happens outside the lock. Recheck the
+            # state so two cold callers cannot both decide to spawn.
+            process = self._process
+            if self.ready.is_set() and process is not None and process.is_alive():
+                self.attempt_done.set()
+                return self.attempt_done
+            if self._starting:
+                return self.attempt_done
+            if (
+                self._failed_at is not None
+                and time.monotonic() - self._failed_at
+                < RERANK_WORKER_FAILURE_COOLDOWN_S
+            ):
+                self.attempt_done.set()
+                return self.attempt_done
+            if pressure:
+                if not self._pressure_logged:
+                    logger.info(
+                        "reranker worker %s suppressed under host memory pressure",
+                        self.model_name,
+                    )
+                    self._pressure_logged = True
+                self.attempt_done.set()
+                return self.attempt_done
+            self._pressure_logged = False
             stale_connection = self._connection
             self._process = None
             self._connection = None
@@ -406,13 +513,14 @@ class _WorkerClient:
                 response = connection.recv()
             except Exception as exc:
                 self._retire(terminate=True)
-                self.ensure_started()
+                self._open_circuit(exc)
                 raise RerankerError(str(exc)) from exc
             if not response or response[0] != "result":
                 detail = ": ".join(str(part) for part in response[1:])
                 self._retire(terminate=True)
-                self.ensure_started()
-                raise RerankerError(detail or "reranker worker prediction failed")
+                error = RerankerError(detail or "reranker worker prediction failed")
+                self._open_circuit(error)
+                raise error
             _, scores, committed, recycle = response
             with self._state_lock:
                 self._last_used = time.monotonic()
@@ -425,6 +533,17 @@ class _WorkerClient:
                 self._retire(terminate=False)
                 self.ensure_started()
             return [float(score) for score in scores]
+
+    def _open_circuit(self, exc: Exception) -> None:
+        with self._state_lock:
+            self._failed_at = time.monotonic()
+            self.attempt_done.set()
+        logger.warning(
+            "reranker worker %s circuit open for %.0fs after %s",
+            self.model_name,
+            RERANK_WORKER_FAILURE_COOLDOWN_S,
+            type(exc).__name__,
+        )
 
     def _retire(self, *, terminate: bool) -> None:
         with self._state_lock:

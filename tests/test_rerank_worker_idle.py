@@ -4,6 +4,7 @@ spell, come back on the next rerank, and never be spawned at boot just in case.
 """
 from __future__ import annotations
 
+import json
 import time
 
 from vecgrep.backend import rerank as rr
@@ -97,6 +98,7 @@ def test_predict_resets_the_idle_clock(monkeypatch):
 
 def test_idle_zero_disables_retirement(monkeypatch):
     monkeypatch.setattr(rr, "RERANK_WORKER_IDLE_S", 0.0)
+    monkeypatch.setattr(rr, "RERANK_WORKER_PRESSURE_FILE", None)
     worker = _ready_worker(_Connection())
     worker._mark_ready()
     time.sleep(0.2)
@@ -113,3 +115,71 @@ def test_boot_warm_is_skipped_when_worker_is_lazy(monkeypatch):
 
     monkeypatch.setattr(rr, "RERANK_WORKER_ENABLED", False)
     assert rr.warm_at_boot() is True     # in-process model: boot warm stays as it was
+
+
+def test_fresh_pressure_signal_is_fail_open_for_missing_stale_or_bad_data(
+    tmp_path, monkeypatch
+):
+    signal = tmp_path / "pressure.json"
+    monkeypatch.setattr(rr, "RERANK_WORKER_PRESSURE_MAX_AGE_S", 120.0)
+
+    assert rr._worker_pressure_active(signal) is False
+    signal.write_text("not-json", encoding="utf-8")
+    assert rr._worker_pressure_active(signal) is False
+    signal.write_text(json.dumps({"level": "protect"}), encoding="utf-8")
+    mtime = signal.stat().st_mtime
+    assert rr._worker_pressure_active(signal, now=mtime + 1) is True
+    assert rr._worker_pressure_active(signal, now=mtime + 121) is False
+    signal.write_text(json.dumps({"level": "warn"}), encoding="utf-8")
+    assert rr._worker_pressure_active(signal) is False
+    signal.write_text(json.dumps({"pressure": True}), encoding="utf-8")
+    assert rr._worker_pressure_active(signal) is True
+
+
+def test_pressure_retires_ready_worker_without_waiting_full_idle(monkeypatch):
+    monkeypatch.setattr(rr, "RERANK_WORKER_IDLE_S", 2700.0)
+    monkeypatch.setattr(rr, "RERANK_WORKER_PRESSURE_FILE", "/pressure.json")
+    monkeypatch.setattr(rr, "RERANK_WORKER_PRESSURE_POLL_S", 0.02)
+    monkeypatch.setattr(rr, "_worker_pressure_active", lambda: True)
+    conn = _Connection()
+    worker = _ready_worker(conn)
+    process = worker._process
+
+    worker._mark_ready()
+    time.sleep(0.2)
+
+    assert worker.is_ready() is False
+    assert conn.sent == [("stop",)]
+    assert process.terminated is False
+
+
+def test_pressure_blocks_cold_worker_spawn(monkeypatch):
+    monkeypatch.setattr(rr, "_worker_pressure_active", lambda: True)
+    worker = rr._WorkerClient("model")
+    started = []
+    monkeypatch.setattr(worker, "_start", lambda: started.append(True))
+
+    event = worker.ensure_started()
+
+    assert event.is_set()
+    assert started == []
+    assert worker.is_ready() is False
+
+
+def test_pressure_never_retires_an_inflight_prediction(monkeypatch):
+    monkeypatch.setattr(rr, "RERANK_WORKER_IDLE_S", 2700.0)
+    monkeypatch.setattr(rr, "RERANK_WORKER_PRESSURE_FILE", "/pressure.json")
+    monkeypatch.setattr(rr, "RERANK_WORKER_PRESSURE_POLL_S", 60.0)
+    monkeypatch.setattr(rr, "_worker_pressure_active", lambda: True)
+    conn = _Connection()
+    worker = _ready_worker(conn)
+
+    worker._call_lock.acquire()
+    try:
+        worker._retire_if_idle()
+        assert worker.is_ready() is True
+        assert conn.sent == []
+    finally:
+        worker._call_lock.release()
+        if worker._idle_timer is not None:
+            worker._idle_timer.cancel()

@@ -264,3 +264,48 @@ def test_sqlite_bulk_is_one_atomic_transaction(tmp_path):
             raise RuntimeError("abort")
     assert lite.get_by_id("c", "z") is None
     assert lite.dirty_corpora() == []
+
+
+def test_sqlite_connection_sets_explicit_wal_bounds(tmp_path):
+    from vecgrep.backend.store import bm25_sqlite as module
+
+    lite = BM25SqliteStore(tmp_path / "db")
+    conn = lite._conn("c")
+
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == (
+        module.WAL_AUTOCHECKPOINT_PAGES
+    )
+    assert conn.execute("PRAGMA journal_size_limit").fetchone()[0] == (
+        module.WAL_JOURNAL_SIZE_LIMIT_BYTES
+    )
+
+
+def test_large_sqlite_mutations_checkpoint_without_changing_ranking(
+    tmp_path, monkeypatch
+):
+    lite = BM25SqliteStore(tmp_path / "db")
+    checkpoints = []
+    real = BM25SqliteStore._checkpoint
+
+    def recording(self, corpus, conn):
+        checkpoints.append(corpus)
+        return real(self, corpus, conn)
+
+    monkeypatch.setattr(BM25SqliteStore, "_checkpoint", recording)
+    records = [
+        (cid, text, _payload(source, i))
+        for i, (cid, text, source) in enumerate(DOCS)
+    ]
+    lite.replace("c", records)
+    before = [cid for cid, _score, _payload in lite.search("c", "memory pressure", 5)]
+
+    with lite.bulk("c"):
+        lite.upsert("c", ["d1"], ["memory pressure circuit breaker"], [_payload("/ops", 9)])
+    before_checkpoint = lite.search("c", "memory pressure", 5)
+    real(lite, "c", lite._conn("c"))
+    after_checkpoint = lite.search("c", "memory pressure", 5)
+
+    assert checkpoints == ["c", "c"]
+    assert before
+    assert after_checkpoint == before_checkpoint
