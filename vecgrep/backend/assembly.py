@@ -76,6 +76,10 @@ class ResultStub:
     snippet: str
     score: float
     similarity_pct: float
+    relevance_pct: float
+    relevance_label: str
+    matched_by: tuple[str, ...]
+    scores: dict
 
 
 def estimate_tokens(text: str) -> int:
@@ -93,6 +97,10 @@ def _stub_of(r: "SearchResult") -> ResultStub:
         snippet=snippet,
         score=r.score,
         similarity_pct=r.similarity_pct,
+        relevance_pct=r.relevance_pct,
+        relevance_label=r.relevance_label,
+        matched_by=tuple(r.matched_by),
+        scores=dict(r.explain or {}),
     )
 
 

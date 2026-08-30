@@ -81,6 +81,12 @@ class SearchStub(BaseModel):
     doc_timestamp: float | None = None
     snippet: str
     similarity_pct: float
+    # `similarity_pct` is the legacy compatibility name. In hybrid mode this
+    # is a calibrated relevance display, not raw vector cosine.
+    relevance_pct: float
+    relevance_label: str
+    matched_by: list[str] = Field(default_factory=list)
+    scores: dict = Field(default_factory=dict)
 
 
 class ChunkWindow(BaseModel):

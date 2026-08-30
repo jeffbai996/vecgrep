@@ -38,6 +38,7 @@ def _hit(i: int, score: float = 0.5, chunk: str = LONG_CHUNK) -> SearchResult:
         chunk_id=f"cid-{i}",
         matched_by=["vector"],
         doc_timestamp=1_700_000_000.0 + i,
+        explain={"vector_cosine": score, "vector_rank": i + 1},
     )
 
 
@@ -73,6 +74,10 @@ def test_split_stub_shape() -> None:
     assert "\n" not in s.snippet, "stub snippet must be one line"
     assert len(s.snippet) <= 200
     assert s.score > 0 and s.similarity_pct > 0
+    assert s.relevance_pct == s.similarity_pct
+    assert s.relevance_label == "related"
+    assert s.matched_by == ("vector",)
+    assert s.scores == {"vector_cosine": 0.5, "vector_rank": 9}
     # Stubs must NOT carry context windows — that's the whole point.
     assert not hasattr(s, "context_before")
 

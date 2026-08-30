@@ -245,6 +245,9 @@ def _run_search(args: dict) -> str:
         mode=args.get("mode", "hybrid"),
         rerank=_should_rerank(svc, args),
         filters=args.get("filters") or None,
+        # Bots use the raw retriever breakdown to interpret a blended display
+        # score. It is assembled from scores already in hand; no extra search.
+        explain=True,
     )
     if _should_budget(svc, args):
         # Breadth mode: full head + one-line stub tail under a token ceiling.
@@ -265,6 +268,10 @@ def _run_search(args: dict) -> str:
                     "doc_timestamp": s.doc_timestamp,
                     "snippet": s.snippet,
                     "similarity_pct": round(s.similarity_pct, 1),
+                    "relevance_pct": round(s.relevance_pct, 1),
+                    "relevance_label": s.relevance_label,
+                    "matched_by": list(s.matched_by),
+                    "scores": s.scores,
                 }
                 for s in stubs
             ],
@@ -2325,6 +2332,9 @@ def build_http_app(
             "one-line previews. The stubs are real results, not filler — scan "
             "them and call get_chunk on any that look right before concluding "
             "something isn't there."
+            " `relevance_pct` is the calibrated blended/reranked display score; "
+            "`similarity_pct` is its legacy alias, not raw cosine. Inspect "
+            "`scores.vector_cosine` when the vector signal itself matters."
             " Do not guess corpus names: call list_corpora when scope is "
             "uncertain, then search the smallest relevant set."
         )
