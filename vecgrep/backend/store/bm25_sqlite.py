@@ -322,12 +322,21 @@ class BM25SqliteStore:
     def drop(self, corpus: str) -> None:
         self.close(corpus)
         p = self._path(corpus)
-        if p and p.exists():
-            p.unlink()
-        for suffix in ("-wal", "-shm"):
-            side = None if p is None else p.with_name(p.name + suffix)
-            if side is not None and side.exists():
-                side.unlink()
+        if p is None:
+            return
+        # The .db, its sidecars, AND the legacy pickle this backend replaced.
+        # convert() builds <corpus>.db from <corpus>.pkl, so a converted corpus
+        # carries both on disk. Dropping only the .db stranded a pickle owning a
+        # corpus that no longer existed: deleting three eval corpora freed 639 MB
+        # of qdrant and left 298 MB of pickle behind (2026-08-30).
+        for stale in (
+            p,
+            p.with_name(p.name + "-wal"),
+            p.with_name(p.name + "-shm"),
+            p.with_name(f"{corpus}.pkl"),
+            p.with_name(f"{corpus}.pkl.dirty"),
+        ):
+            stale.unlink(missing_ok=True)
 
     # ── search ────────────────────────────────────────────────────────────
     def search(self, corpus: str, query: str, top_k: int) -> list[tuple[str, float, dict]]:
