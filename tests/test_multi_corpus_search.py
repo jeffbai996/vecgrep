@@ -107,3 +107,83 @@ def test_hybrid_hydrates_missing_payloads_in_one_batch(
     assert hits
     assert len(calls) == 1
     assert set(calls[0]) == {cid for cid, _, _ in stripped}
+
+
+@pytest.mark.parametrize("workers", [1, 8])
+def test_multi_corpus_search_embeds_query_once_per_model(
+    svc, make_doc, monkeypatch, workers
+) -> None:
+    _seed(svc, make_doc)
+    monkeypatch.setattr(svc.settings, "search_fanout_workers", workers)
+    inner = svc._backend_cache["auto"]._inner
+    original = inner.embed
+    calls: list[list[str]] = []
+
+    def counted(texts):
+        calls.append(list(texts))
+        return original(texts)
+
+    monkeypatch.setattr(inner, "embed", counted)
+    svc.search(
+        "one-off query embedding marker",
+        corpus_names=["a", "b", "c"],
+        mode="vector",
+        top_k=20,
+    )
+
+    assert calls == [["one-off query embedding marker"]]
+
+
+def test_multi_corpus_search_keeps_distinct_model_embeddings(
+    svc, make_doc, monkeypatch
+) -> None:
+    _seed(svc, make_doc)
+    corpus_b = svc.registry.get("b")
+    corpus_b.embed_model = "stub-2"
+    svc.registry.upsert(corpus_b)
+    calls: list[str] = []
+
+    def embed(corpus, _query):
+        calls.append(corpus.embed_model)
+        return [0.0] * corpus.dim
+
+    monkeypatch.setattr(svc, "_embed_query_with_failover", embed)
+    svc.search(
+        "mixed model marker",
+        corpus_names=["a", "b", "c"],
+        mode="vector",
+        top_k=20,
+    )
+
+    assert sorted(calls) == ["stub-1", "stub-2"]
+
+
+def test_shared_embedding_failure_warns_for_each_affected_corpus(
+    svc, make_doc, monkeypatch
+) -> None:
+    _seed(svc, make_doc)
+    corpus_b = svc.registry.get("b")
+    corpus_b.embed_model = "stub-2"
+    svc.registry.upsert(corpus_b)
+    calls: list[str] = []
+
+    def embed(corpus, _query):
+        calls.append(corpus.embed_model)
+        if corpus.embed_model == "stub-1":
+            raise RuntimeError("shared embed backend failed")
+        return [0.0] * corpus.dim
+
+    monkeypatch.setattr(svc, "_embed_query_with_failover", embed)
+    outcome = svc.search_with_diagnostics(
+        "shared failure marker",
+        corpus_names=["a", "b", "c"],
+        mode="vector",
+        top_k=20,
+    )
+
+    assert calls.count("stub-1") == 1
+    assert calls.count("stub-2") == 1
+    assert [(w.corpus, w.code) for w in outcome.warnings] == [
+        ("a", "search_failed"),
+        ("c", "search_failed"),
+    ]

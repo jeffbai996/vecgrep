@@ -8,13 +8,14 @@ from __future__ import annotations
 import contextlib
 
 import fnmatch
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import hashlib
 import json
 import logging
 import math
 import os
 import re
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -117,6 +118,46 @@ class SearchWarning:
 class SearchOutcome:
     results: list["SearchResult"]
     warnings: list[SearchWarning]
+
+
+class _QueryVectorMemo:
+    """One query embedding per backend/model/dimension within a search.
+
+    Cross-corpus fan-out runs one thread per corpus. Most installations pin
+    several corpora to the same embedding model, so without request-local
+    coordination every thread can miss the persistent cache at the same time
+    and send the identical query to Ollama. A Future gives the first thread
+    ownership of that work while peers wait for its result. Different models
+    retain their independent fan-out and failures still surface per corpus.
+    """
+
+    def __init__(self, service: "VecgrepService", query: str) -> None:
+        self._service = service
+        self._query = query
+        self._lock = threading.Lock()
+        self._futures: dict[tuple[str, int], Future[list[float]]] = {}
+
+    def get(self, corpus: Corpus) -> list[float]:
+        key = (self._service._cache_key_for(corpus), corpus.dim)
+        with self._lock:
+            future = self._futures.get(key)
+            owns_work = future is None
+            if future is None:
+                future = Future()
+                self._futures[key] = future
+
+        if owns_work:
+            try:
+                vector = self._service._embed_query_with_failover(
+                    corpus, self._query
+                )
+            except BaseException as exc:
+                # Always resolve the Future: a waiting corpus must observe the
+                # same backend failure rather than hang behind a dead owner.
+                future.set_exception(exc)
+            else:
+                future.set_result(vector)
+        return future.result()
 
 
 def _bm25_store(home: Path | None, backend: str) -> BM25Store | BM25SqliteStore:
@@ -983,6 +1024,11 @@ class VecgrepService:
         warnings: list[SearchWarning] = []
         successful: list[str] = []
         failures: list[tuple[Corpus, Exception]] = []
+        query_vectors = (
+            _QueryVectorMemo(self, query)
+            if len(corpora) > 1 and mode in ("hybrid", "vector")
+            else None
+        )
         workers = min(
             len(corpora), max(1, int(getattr(self.settings, "search_fanout_workers", 8) or 1))
         )
@@ -996,6 +1042,7 @@ class VecgrepService:
                     (c, pool.submit(
                         self._search_one, c, query, per_corpus_k, mode,
                         explain=explain,
+                        query_vectors=query_vectors,
                     ))
                     for c in corpora
                 ]
@@ -1010,7 +1057,10 @@ class VecgrepService:
         else:
             for c in corpora:
                 try:
-                    results.extend(self._search_one(c, query, per_corpus_k, mode, explain=explain))
+                    results.extend(self._search_one(
+                        c, query, per_corpus_k, mode, explain=explain,
+                        query_vectors=query_vectors,
+                    ))
                     successful.append(c.name)
                 except Exception as exc:
                     failures.append((c, exc))
@@ -1931,13 +1981,16 @@ class VecgrepService:
         top_k: int,
         mode: SearchMode,
         explain: bool = False,
+        query_vectors: _QueryVectorMemo | None = None,
     ) -> list[SearchResult]:
         self._recover_if_pending(corpus.name)
         with self.locks.read(corpus.name):
             # A migration/delete may have completed while query assembly was
             # selecting corpora. Re-resolve metadata inside admission.
             corpus = self.registry.get(corpus.name)
-            return self._search_one_locked(corpus, query, top_k, mode, explain)
+            return self._search_one_locked(
+                corpus, query, top_k, mode, explain, query_vectors
+            )
 
     def _search_one_locked(
         self,
@@ -1946,6 +1999,7 @@ class VecgrepService:
         top_k: int,
         mode: SearchMode,
         explain: bool = False,
+        query_vectors: _QueryVectorMemo | None = None,
     ) -> list[SearchResult]:
         collection = _collection_for(corpus.name)
 
@@ -1956,7 +2010,11 @@ class VecgrepService:
             # Use the failover-aware embed so a backend that died mid-session
             # (primary Ollama down) re-resolves to the fallback instead of
             # raising forever on a stale cached backend.
-            qv = self._embed_query_with_failover(corpus, query)
+            qv = (
+                query_vectors.get(corpus)
+                if query_vectors is not None
+                else self._embed_query_with_failover(corpus, query)
+            )
             vector_hits = self.store.search(collection, qv, top_k=CANDIDATE_POOL)
             # Drop sub-noise vector hits before they reach fusion (see
             # COSINE_FLOOR_MARGIN). Gentle by default; keeps the real signal band.

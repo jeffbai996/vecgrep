@@ -145,9 +145,14 @@ def test_search_budgeted_widens_candidate_pool(svc, monkeypatch) -> None:
     seen: list[int] = []
     orig = type(svc)._search_one
 
-    def spy(self, corpus, query, top_k, mode, explain=False):
+    def spy(
+        self, corpus, query, top_k, mode, explain=False, query_vectors=None
+    ):
         seen.append(top_k)
-        return orig(self, corpus, query, top_k, mode, explain=explain)
+        return orig(
+            self, corpus, query, top_k, mode, explain=explain,
+            query_vectors=query_vectors,
+        )
 
     monkeypatch.setattr(type(svc), "_search_one", spy)
     svc.search_budgeted("relay-service", "evalchat", max_total=80)
