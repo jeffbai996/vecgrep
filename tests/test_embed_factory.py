@@ -56,16 +56,21 @@ def test_primary_dead_falls_back_to_secondary_ollama(monkeypatch):
     assert b.base_url == "http://fallback:11434"
 
 
-def test_both_ollama_dead_falls_to_openai_when_key_set(monkeypatch):
-    # Stub OpenAIBackend so the test doesn't need the openai package installed —
-    # we're asserting the SELECTION (OpenAI chosen), not the client itself.
-    sentinel = object()
-    monkeypatch.setattr(factory, "OpenAIBackend", lambda *a, **k: sentinel)
+def test_both_ollama_dead_never_reaches_for_openai(monkeypatch):
+    # This used to select OpenAI. It no longer does, with or without a key:
+    # OpenAI embeds in its own vector space, so writing those vectors into a
+    # corpus built with bge-m3 corrupts it with no error anywhere — and it is
+    # a metered call nobody asked for. Only an explicit pin reaches OpenAI.
+    monkeypatch.setattr(factory, "OpenAIBackend",
+                        lambda *a, **k: pytest.fail("reached OpenAI"))
     s = _settings(ollama_url="http://primary:11434",
                   ollama_fallback_url="http://fallback:11434",
-                  openai_api_key="sk-test")
+                  openai_api_key="sk-test")  # a key being present is the trap
     monkeypatch.setattr(factory, "_ollama_alive", lambda url: False)
-    assert factory.get_embed_backend(s) is sentinel
+    with pytest.raises(factory.EmbedBackendError, match="Ollama not reachable") as exc:
+        factory.get_embed_backend(s)
+    # The old message advised exporting a key. That advice was the bug.
+    assert "OPENAI_API_KEY" not in str(exc.value)
 
 
 def test_both_ollama_dead_no_key_raises(monkeypatch):
@@ -76,14 +81,24 @@ def test_both_ollama_dead_no_key_raises(monkeypatch):
         factory.get_embed_backend(s)
 
 
-def test_no_fallback_url_preserves_old_behavior(monkeypatch):
-    # Unset fallback → behave exactly as before: primary probe, then OpenAI.
+def test_no_fallback_url_also_raises_rather_than_billing(monkeypatch):
+    # Unset fallback: one dead probe, then the same loud failure.
+    monkeypatch.setattr(factory, "OpenAIBackend",
+                        lambda *a, **k: pytest.fail("reached OpenAI"))
+    s = _settings(ollama_url="http://primary:11434", ollama_fallback_url=None,
+                  openai_api_key="sk-test")  # a key being present is the trap
+    monkeypatch.setattr(factory, "_ollama_alive", lambda url: False)
+    with pytest.raises(factory.EmbedBackendError):
+        factory.get_embed_backend(s)
+
+
+def test_explicit_openai_pin_still_works(monkeypatch):
+    """Only the AUTOMATIC path is gone; pinning is a decision, not a surprise."""
     sentinel = object()
     monkeypatch.setattr(factory, "OpenAIBackend", lambda *a, **k: sentinel)
-    s = _settings(ollama_url="http://primary:11434", ollama_fallback_url=None,
-                  openai_api_key="sk-test")
+    s = _settings(ollama_url="http://primary:11434", openai_api_key="sk-test")
     monkeypatch.setattr(factory, "_ollama_alive", lambda url: False)
-    assert factory.get_embed_backend(s) is sentinel
+    assert factory.get_embed_backend(s, prefer="openai") is sentinel
 
 
 def test_prefer_ollama_uses_primary_when_alive(monkeypatch):
