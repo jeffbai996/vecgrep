@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import logging
+import threading
+import time
 
 import pytest
 
+from vecgrep.backend import service as service_module
 from vecgrep.backend.store import CorpusError
 
 
@@ -187,3 +191,193 @@ def test_shared_embedding_failure_warns_for_each_affected_corpus(
         ("a", "search_failed"),
         ("c", "search_failed"),
     ]
+
+
+def test_concurrent_requests_share_one_bounded_fanout_pool(
+    svc, make_doc, monkeypatch
+) -> None:
+    _seed(svc, make_doc)
+    monkeypatch.setattr(svc.settings, "search_fanout_workers", 2)
+    active = 0
+    peak = 0
+    calls = 0
+    lock = threading.Lock()
+    two_active = threading.Event()
+    release = threading.Event()
+    request_barrier = threading.Barrier(3)
+
+    def searched(*_args, **_kwargs):
+        nonlocal active, peak, calls
+        with lock:
+            active += 1
+            calls += 1
+            peak = max(peak, active)
+            if active == 2:
+                two_active.set()
+        try:
+            if not release.wait(5):
+                raise AssertionError("timed out waiting to release corpus searches")
+            return []
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(svc, "_search_one", searched)
+
+    def request() -> list:
+        request_barrier.wait(timeout=2)
+        return svc.search(
+            "bounded fanout",
+            corpus_names=["a", "b", "c"],
+            mode="bm25",
+        )
+
+    with ThreadPoolExecutor(max_workers=3) as requests:
+        futures = [requests.submit(request) for _ in range(3)]
+        assert two_active.wait(2)
+        # Give every outer request time to submit. Request-local pools would
+        # reach six active corpus calls here; the shared pool must stay at two.
+        time.sleep(0.05)
+        assert peak == 2
+        release.set()
+        assert [future.result(timeout=5) for future in futures] == [[], [], []]
+
+    assert calls == 9
+
+
+def test_identical_concurrent_queries_share_one_embedding(
+    svc, make_doc, monkeypatch
+) -> None:
+    _seed(svc, make_doc)
+    corpus = svc.registry.get("a")
+    secret_query = "private same-query singleflight marker"
+    vector = [0.25] * corpus.dim
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+    lock = threading.Lock()
+
+    def embed(_corpus, query):
+        nonlocal calls
+        assert query == secret_query
+        with lock:
+            calls += 1
+        entered.set()
+        if not release.wait(5):
+            raise AssertionError("timed out waiting to release query embedding")
+        return vector
+
+    monkeypatch.setattr(svc, "_embed_query_with_failover", embed)
+    with ThreadPoolExecutor(max_workers=2) as requests:
+        first = requests.submit(svc._embed_query_singleflight, corpus, secret_query)
+        assert entered.wait(2)
+        second = requests.submit(svc._embed_query_singleflight, corpus, secret_query)
+        deadline = time.monotonic() + 2
+        while not second.running() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert second.running()
+        time.sleep(0.02)
+        assert calls == 1
+
+        runtime = svc._search_runtime()
+        assert len(runtime._embedding_futures) == 1
+        assert all(
+            secret_query != part
+            for key in runtime._embedding_futures
+            for part in key
+        )
+
+        release.set()
+        assert first.result(timeout=5) == vector
+        assert second.result(timeout=5) == vector
+
+    assert runtime._embedding_futures == {}
+
+
+def test_singleflight_failure_is_shared_then_later_request_retries(
+    svc, make_doc, monkeypatch
+) -> None:
+    _seed(svc, make_doc)
+    corpus = svc.registry.get("a")
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def fail(_corpus, _query):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        if not release.wait(5):
+            raise AssertionError("timed out waiting to release failed embedding")
+        raise RuntimeError("embedding backend failed")
+
+    monkeypatch.setattr(svc, "_embed_query_with_failover", fail)
+    with ThreadPoolExecutor(max_workers=2) as requests:
+        first = requests.submit(svc._embed_query_singleflight, corpus, "retry marker")
+        assert entered.wait(2)
+        second = requests.submit(svc._embed_query_singleflight, corpus, "retry marker")
+        deadline = time.monotonic() + 2
+        while not second.running() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        time.sleep(0.02)
+        release.set()
+        for future in (first, second):
+            with pytest.raises(RuntimeError, match="embedding backend failed"):
+                future.result(timeout=5)
+
+    assert calls == 1
+    assert svc._search_runtime()._embedding_futures == {}
+
+    expected = [0.5] * corpus.dim
+    monkeypatch.setattr(
+        svc,
+        "_embed_query_with_failover",
+        lambda _corpus, _query: expected,
+    )
+    assert svc._embed_query_singleflight(corpus, "retry marker") == expected
+
+
+def test_concurrent_cold_backend_resolution_builds_one_client(
+    svc, make_doc, monkeypatch
+) -> None:
+    _seed(svc, make_doc)
+    corpus = svc.registry.get("a")
+    corpus.embed_backend = "cold-backend"
+    corpus.embed_model = "cold-model"
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    class Backend:
+        name = "cold-backend"
+        model = "cold-model"
+        dim = corpus.dim
+
+    backend = Backend()
+
+    def resolve(_settings, *, prefer, model):
+        nonlocal calls
+        assert (prefer, model) == ("cold-backend", "cold-model")
+        calls += 1
+        entered.set()
+        if not release.wait(5):
+            raise AssertionError("timed out waiting to release backend resolution")
+        return backend
+
+    monkeypatch.setattr(service_module, "get_embed_backend", resolve)
+    with ThreadPoolExecutor(max_workers=2) as requests:
+        first = requests.submit(svc._backend_for, corpus)
+        assert entered.wait(2)
+        second = requests.submit(svc._backend_for, corpus)
+        deadline = time.monotonic() + 2
+        while not second.running() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        time.sleep(0.02)
+        assert calls == 1
+        release.set()
+        first_backend = first.result(timeout=5)
+        second_backend = second.result(timeout=5)
+        assert first_backend is second_backend
+        assert getattr(first_backend, "_inner", first_backend) is backend
+
+    assert calls == 1

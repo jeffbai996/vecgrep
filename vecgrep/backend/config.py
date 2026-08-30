@@ -172,9 +172,10 @@ class Settings:
     # and doubles the fan-out cost. Naming a corpus explicitly always reaches
     # it, so the eval harness can still query its own build.
     cross_corpus_exclude: list[str] = field(default_factory=lambda: ["eval-*"])
-    # Corpora searched concurrently on an unscoped query. The fan-out was
-    # serial, so latency was the SUM of per-corpus cost: measured 16.3s across
-    # 8 corpora where the slowest single corpus was 5.3s. 1 restores serial.
+    # Process-wide corpus-search worker bound shared by REST/MCP requests using
+    # the same settings generation. The fan-out was serial, so latency was the
+    # SUM of per-corpus cost: measured 16.3s across 8 corpora where the slowest
+    # single corpus was 5.3s. 1 restores serial behavior.
     search_fanout_workers: int = 8
 
     @property
