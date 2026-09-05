@@ -8,15 +8,17 @@ from __future__ import annotations
 import contextlib
 
 import fnmatch
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import hashlib
 import json
 import logging
 import math
 import os
 import re
+import threading
 import time
 import uuid
+import weakref
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -117,6 +119,178 @@ class SearchWarning:
 class SearchOutcome:
     results: list["SearchResult"]
     warnings: list[SearchWarning]
+
+
+class _SearchRuntime:
+    """Process-shared resources for one immutable settings generation.
+
+    REST and MCP each keep their own ``VecgrepService`` instance, but they use
+    the same Settings object. Sharing the inner executor through that identity
+    keeps simultaneous requests from multiplying into one thread pool per
+    request (and per transport). Query vectors are singleflighted only while
+    work is in progress; completed queries are left to the persistent embed
+    cache, so raw query text never becomes process-global retained state.
+    """
+
+    def __init__(self, workers: int) -> None:
+        self.workers = max(1, workers)
+        self.executor = ThreadPoolExecutor(
+            max_workers=self.workers,
+            thread_name_prefix="vecgrep-corpus",
+        )
+        self._embedding_lock = threading.Lock()
+        self._embedding_futures: dict[
+            tuple[str, int, bytes], Future[list[float]]
+        ] = {}
+
+    def query_vector(
+        self,
+        service: "VecgrepService",
+        corpus: Corpus,
+        query: str,
+    ) -> list[float]:
+        # A digest is sufficient to coordinate identical in-flight work and
+        # avoids retaining private query text in a long-lived runtime object.
+        key = (
+            service._cache_key_for(corpus),
+            corpus.dim,
+            hashlib.sha256(query.encode("utf-8")).digest(),
+        )
+        with self._embedding_lock:
+            future = self._embedding_futures.get(key)
+            owns_work = future is None
+            if future is None:
+                future = Future()
+                self._embedding_futures[key] = future
+
+        if owns_work:
+            try:
+                vector = service._embed_query_with_failover(corpus, query)
+            except BaseException as exc:
+                # Resolve before removal so every waiter already holding this
+                # Future observes the same failure. A later request may retry.
+                future.set_exception(exc)
+            else:
+                future.set_result(vector)
+            finally:
+                with self._embedding_lock:
+                    if self._embedding_futures.get(key) is future:
+                        self._embedding_futures.pop(key, None)
+        return future.result()
+
+    def shutdown(self) -> None:
+        # Settings cannot become unreachable while submitted bound methods are
+        # still running, so pending work is allowed to finish without blocking
+        # the config-reload or garbage-collection thread.
+        self.executor.shutdown(wait=False, cancel_futures=False)
+
+
+_SEARCH_RUNTIMES_LOCK = threading.Lock()
+_SEARCH_RUNTIMES: dict[int, _SearchRuntime] = {}
+_SEARCH_RUNTIME_FINALIZERS: dict[int, weakref.finalize] = {}
+
+
+def _release_search_runtime(key: int, runtime: _SearchRuntime) -> None:
+    with _SEARCH_RUNTIMES_LOCK:
+        if _SEARCH_RUNTIMES.get(key) is not runtime:
+            return
+        _SEARCH_RUNTIMES.pop(key, None)
+        _SEARCH_RUNTIME_FINALIZERS.pop(key, None)
+    runtime.shutdown()
+
+
+def _search_runtime_for(settings: Settings) -> _SearchRuntime:
+    """Return the bounded runtime shared by services using ``settings``."""
+    key = id(settings)
+    with _SEARCH_RUNTIMES_LOCK:
+        runtime = _SEARCH_RUNTIMES.get(key)
+        if runtime is None:
+            workers = max(
+                1,
+                int(getattr(settings, "search_fanout_workers", 8) or 1),
+            )
+            runtime = _SearchRuntime(workers)
+            _SEARCH_RUNTIMES[key] = runtime
+            finalizer = weakref.finalize(
+                settings, _release_search_runtime, key, runtime
+            )
+            # ThreadPoolExecutor has its own interpreter-exit handling. Avoid
+            # running a registry callback after module globals are torn down.
+            finalizer.atexit = False
+            _SEARCH_RUNTIME_FINALIZERS[key] = finalizer
+        return runtime
+
+
+class _QueryVectorMemo:
+    """One query embedding per backend/model/dimension within a search.
+
+    Cross-corpus fan-out runs one thread per corpus. Most installations pin
+    several corpora to the same embedding model, so without request-local
+    coordination every thread can miss the persistent cache at the same time
+    and send the identical query to Ollama. A Future gives the first thread
+    ownership of that work while peers wait for its result. Different models
+    retain their independent fan-out and failures still surface per corpus.
+    """
+
+    def __init__(self, service: "VecgrepService", query: str) -> None:
+        self._service = service
+        self._query = query
+        self._lock = threading.Lock()
+        self._futures: dict[tuple[str, int], Future[list[float]]] = {}
+
+    def get(self, corpus: Corpus) -> list[float]:
+        key = (self._service._cache_key_for(corpus), corpus.dim)
+        with self._lock:
+            future = self._futures.get(key)
+            owns_work = future is None
+            if future is None:
+                future = Future()
+                self._futures[key] = future
+
+        if owns_work:
+            try:
+                vector = self._service._embed_query_singleflight(
+                    corpus, self._query
+                )
+            except BaseException as exc:
+                # Always resolve the Future: a waiting corpus must observe the
+                # same backend failure rather than hang behind a dead owner.
+                future.set_exception(exc)
+            else:
+                future.set_result(vector)
+        return future.result()
+
+
+def _bm25_store(home: Path | None, backend: str) -> BM25Store | BM25SqliteStore:
+    """Construct the configured lexical store without silent downgrades."""
+    backend = backend.strip().lower()
+    if backend in {"", "pickle"}:
+        return BM25Store(
+            home,
+            max_cached_corpora=_env_int("VECGREP_BM25_CACHE_CORPORA", None),
+            max_cached_bytes=_env_int("VECGREP_BM25_CACHE_BYTES", None),
+        )
+    if backend != "sqlite":
+        raise ValueError(
+            f"unsupported VECGREP_BM25_BACKEND={backend!r}; use 'pickle' or 'sqlite'"
+        )
+
+    if home is not None:
+        stale = []
+        for path in home.glob("*.pkl"):
+            database = path.with_suffix(".db")
+            if (
+                not database.exists()
+                or database.stat().st_mtime_ns < path.stat().st_mtime_ns
+            ):
+                stale.append(path.stem)
+        if stale:
+            names = ", ".join(sorted(stale))
+            raise RuntimeError(
+                f"SQLite BM25 backend has unmigrated or stale pickle indexes: {names}; "
+                "migrate them before switching backends"
+            )
+    return BM25SqliteStore(home)
 
 # Reciprocal Rank Fusion constant. 60 is the canonical value from the
 # original RRF paper; we expose it here as a single knob.
@@ -291,13 +465,11 @@ class VecgrepService:
             None if ephemeral else self.settings.qdrant_path,
             url=None if ephemeral else self.settings.qdrant_url,
         )
-        # Budget the resident BM25 indexes by BYTES, not by corpus count: the
-        # sidecars on a real fleet span four orders of magnitude, so a count is
-        # not a limit on anything that matters. See DEFAULT_CACHE_BYTES.
-        self.bm25 = BM25Store(
+        # SQLite keeps large lexical indexes on disk; pickle remains the
+        # default for compatibility and uses the resident-byte budget.
+        self.bm25 = _bm25_store(
             None if ephemeral else self.settings.home / "bm25",
-            max_cached_corpora=_env_int("VECGREP_BM25_CACHE_CORPORA", None),
-            max_cached_bytes=_env_int("VECGREP_BM25_CACHE_BYTES", None),
+            self.settings.bm25_backend,
         )
         self.explorer_store = ExplorerStore(
             None if ephemeral else self.settings.home / "explorer.db"
@@ -306,6 +478,8 @@ class VecgrepService:
             None if ephemeral else self.settings.home / "mutations"
         )
         self._backend_cache: dict[str, EmbedBackend] = {}
+        self._backend_cache_lock = threading.RLock()
+        self._search_runtime_instance: _SearchRuntime | None = None
         # Source-level explorer catalogs live in a compact, disposable SQLite
         # sidecar. Cache their rendered tree by corpus generation; canonical
         # search data remains Qdrant + BM25.
@@ -509,19 +683,26 @@ class VecgrepService:
         # different models — each gets its own backend, keyed by (backend,model).
         model = corpus.embed_model if corpus else None
         cache_key = f"{prefer}:{model}" if (prefer and model) else (prefer or "auto")
-        if cache_key not in self._backend_cache:
-            # Reuse an already-resolved 'auto' backend if it happens to match
-            # the corpus's pinned backend AND model — avoids a redundant live
-            # resolve (and lets tests inject just one mock).
-            auto = self._backend_cache.get("auto")
-            if auto is not None and auto.name == prefer and (model is None or auto.model == model):
-                self._backend_cache[cache_key] = auto
-            else:
-                raw = get_embed_backend(self.settings, prefer=prefer, model=model)
-                self._backend_cache[cache_key] = (
-                    CachedBackend(raw, self._embed_cache) if self._embed_cache else raw
-                )
-        backend = self._backend_cache[cache_key]
+        with self._backend_cache_lock:
+            if cache_key not in self._backend_cache:
+                # Reuse an already-resolved 'auto' backend if it happens to
+                # match the corpus's pinned backend AND model — avoids a
+                # redundant live resolve (and lets tests inject one mock).
+                auto = self._backend_cache.get("auto")
+                if (
+                    auto is not None
+                    and auto.name == prefer
+                    and (model is None or auto.model == model)
+                ):
+                    self._backend_cache[cache_key] = auto
+                else:
+                    raw = get_embed_backend(self.settings, prefer=prefer, model=model)
+                    self._backend_cache[cache_key] = (
+                        CachedBackend(raw, self._embed_cache)
+                        if self._embed_cache
+                        else raw
+                    )
+            backend = self._backend_cache[cache_key]
         # Dim is the only hard invariant left: a model mismatch can't happen now
         # (we resolved by the corpus's model), but a dim mismatch would mean the
         # stored vectors are incompatible — recreate is the only fix.
@@ -537,6 +718,16 @@ class VecgrepService:
         prefer = corpus.embed_backend if corpus else None
         model = corpus.embed_model if corpus else None
         return f"{prefer}:{model}" if (prefer and model) else (prefer or "auto")
+
+    def _search_runtime(self) -> _SearchRuntime:
+        runtime = self._search_runtime_instance
+        if runtime is None:
+            runtime = _search_runtime_for(self.settings)
+            self._search_runtime_instance = runtime
+        return runtime
+
+    def _embed_query_singleflight(self, corpus: Corpus, query: str) -> list[float]:
+        return self._search_runtime().query_vector(self, corpus, query)
 
     def _embed_query_with_failover(self, corpus: Corpus | None, query: str) -> list[float]:
         """Embed a query, recovering from a backend that died mid-session.
@@ -556,8 +747,13 @@ class VecgrepService:
             # (re-probing primary→fallback). Clearing 'auto' too forces a true
             # re-resolve rather than reusing the same dead object.
             key = self._cache_key_for(corpus)
-            self._backend_cache.pop(key, None)
-            self._backend_cache.pop("auto", None)
+            with self._backend_cache_lock:
+                # Do not evict a healthy replacement another request resolved
+                # after this request captured its now-stale backend reference.
+                if self._backend_cache.get(key) is backend:
+                    self._backend_cache.pop(key, None)
+                if self._backend_cache.get("auto") is backend:
+                    self._backend_cache.pop("auto", None)
             backend = self._backend_for(corpus)
             return backend.embed_one(query)
 
@@ -953,34 +1149,46 @@ class VecgrepService:
         warnings: list[SearchWarning] = []
         successful: list[str] = []
         failures: list[tuple[Corpus, Exception]] = []
+        query_vectors = (
+            _QueryVectorMemo(self, query)
+            if len(corpora) > 1 and mode in ("hybrid", "vector")
+            else None
+        )
         workers = min(
             len(corpora), max(1, int(getattr(self.settings, "search_fanout_workers", 8) or 1))
         )
         if workers > 1 and len(corpora) > 1:
             # Serial fan-out made unscoped latency the SUM of per-corpus cost.
             # Each _search_one is an independent read (its own qdrant query and
-            # BM25 lookup), so they overlap cleanly. Results are concatenated in
-            # corpus order, not completion order, to keep output deterministic.
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                pending = [
-                    (c, pool.submit(
-                        self._search_one, c, query, per_corpus_k, mode,
-                        explain=explain,
-                    ))
-                    for c in corpora
-                ]
-                # Consume in request/registry order, not completion order, so
-                # both results and warnings remain deterministic.
-                for c, future in pending:
-                    try:
-                        results.extend(future.result())
-                        successful.append(c.name)
-                    except Exception as exc:
-                        failures.append((c, exc))
+            # BM25 lookup), so they overlap cleanly. The executor is shared by
+            # every request using this settings generation: concurrent bots
+            # queue behind one bound instead of creating N request-local pools.
+            # Results are still consumed in corpus order, not completion order,
+            # so ranking and warnings remain deterministic.
+            pool = self._search_runtime().executor
+            pending = [
+                (c, pool.submit(
+                    self._search_one, c, query, per_corpus_k, mode,
+                    explain=explain,
+                    query_vectors=query_vectors,
+                ))
+                for c in corpora
+            ]
+            # Consume in request/registry order, not completion order, so
+            # both results and warnings remain deterministic.
+            for c, future in pending:
+                try:
+                    results.extend(future.result())
+                    successful.append(c.name)
+                except Exception as exc:
+                    failures.append((c, exc))
         else:
             for c in corpora:
                 try:
-                    results.extend(self._search_one(c, query, per_corpus_k, mode, explain=explain))
+                    results.extend(self._search_one(
+                        c, query, per_corpus_k, mode, explain=explain,
+                        query_vectors=query_vectors,
+                    ))
                     successful.append(c.name)
                 except Exception as exc:
                     failures.append((c, exc))
@@ -1901,13 +2109,16 @@ class VecgrepService:
         top_k: int,
         mode: SearchMode,
         explain: bool = False,
+        query_vectors: _QueryVectorMemo | None = None,
     ) -> list[SearchResult]:
         self._recover_if_pending(corpus.name)
         with self.locks.read(corpus.name):
             # A migration/delete may have completed while query assembly was
             # selecting corpora. Re-resolve metadata inside admission.
             corpus = self.registry.get(corpus.name)
-            return self._search_one_locked(corpus, query, top_k, mode, explain)
+            return self._search_one_locked(
+                corpus, query, top_k, mode, explain, query_vectors
+            )
 
     def _search_one_locked(
         self,
@@ -1916,6 +2127,7 @@ class VecgrepService:
         top_k: int,
         mode: SearchMode,
         explain: bool = False,
+        query_vectors: _QueryVectorMemo | None = None,
     ) -> list[SearchResult]:
         collection = _collection_for(corpus.name)
 
@@ -1926,7 +2138,11 @@ class VecgrepService:
             # Use the failover-aware embed so a backend that died mid-session
             # (primary Ollama down) re-resolves to the fallback instead of
             # raising forever on a stale cached backend.
-            qv = self._embed_query_with_failover(corpus, query)
+            qv = (
+                query_vectors.get(corpus)
+                if query_vectors is not None
+                else self._embed_query_singleflight(corpus, query)
+            )
             vector_hits = self.store.search(collection, qv, top_k=CANDIDATE_POOL)
             # Drop sub-noise vector hits before they reach fusion (see
             # COSINE_FLOOR_MARGIN). Gentle by default; keeps the real signal band.

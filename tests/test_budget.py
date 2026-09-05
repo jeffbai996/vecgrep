@@ -38,6 +38,7 @@ def _hit(i: int, score: float = 0.5, chunk: str = LONG_CHUNK) -> SearchResult:
         chunk_id=f"cid-{i}",
         matched_by=["vector"],
         doc_timestamp=1_700_000_000.0 + i,
+        explain={"vector_cosine": score, "vector_rank": i + 1},
     )
 
 
@@ -73,6 +74,10 @@ def test_split_stub_shape() -> None:
     assert "\n" not in s.snippet, "stub snippet must be one line"
     assert len(s.snippet) <= 200
     assert s.score > 0 and s.similarity_pct > 0
+    assert s.relevance_pct == s.similarity_pct
+    assert s.relevance_label == "related"
+    assert s.matched_by == ("vector",)
+    assert s.scores == {"vector_cosine": 0.5, "vector_rank": 9}
     # Stubs must NOT carry context windows — that's the whole point.
     assert not hasattr(s, "context_before")
 
@@ -145,9 +150,14 @@ def test_search_budgeted_widens_candidate_pool(svc, monkeypatch) -> None:
     seen: list[int] = []
     orig = type(svc)._search_one
 
-    def spy(self, corpus, query, top_k, mode, explain=False):
+    def spy(
+        self, corpus, query, top_k, mode, explain=False, query_vectors=None
+    ):
         seen.append(top_k)
-        return orig(self, corpus, query, top_k, mode, explain=explain)
+        return orig(
+            self, corpus, query, top_k, mode, explain=explain,
+            query_vectors=query_vectors,
+        )
 
     monkeypatch.setattr(type(svc), "_search_one", spy)
     svc.search_budgeted("relay-service", "evalchat", max_total=80)

@@ -30,10 +30,18 @@ def _resolve_ollama(settings, model: str | None):
     so a healthy primary costs exactly one probe."""
     chosen = model or settings.embed_model
     if _ollama_alive(settings.ollama_url):
-        return OllamaBackend(settings.ollama_url, chosen)
+        return OllamaBackend(
+            settings.ollama_url,
+            chosen,
+            num_batch=settings.ollama_num_batch,
+        )
     fallback = settings.ollama_fallback_url
     if fallback and _ollama_alive(fallback):
-        return OllamaBackend(fallback, chosen)
+        return OllamaBackend(
+            fallback,
+            chosen,
+            num_batch=settings.ollama_num_batch,
+        )
     return None
 
 
@@ -47,8 +55,9 @@ def get_embed_backend(
     default — this is what lets the engine serve corpora embedded with
     DIFFERENT models simultaneously (each corpus queries with its own model)
     instead of forcing one global model and erroring on mismatch.
-    If pinned, we honor it or fail loudly. If unpinned, prefer Ollama, fall
-    back to OpenAI when key is set.
+    Pinned or not, Ollama is the only backend reached automatically. OpenAI is
+    metered and embeds in its own vector space, so it is used only when a
+    corpus pins it. Every other path fails loudly instead.
     """
     if prefer == "openai":
         if not settings.openai_api_key:
@@ -75,16 +84,18 @@ def get_embed_backend(
     if ob is not None:
         return ob
 
-    # Both Ollama endpoints down — fall to OpenAI if a key is set.
-    if settings.openai_api_key:
-        return OpenAIBackend(settings.openai_api_key, model or settings.openai_embed_model)
-
+    # Both Ollama endpoints are down. We do NOT reach for OpenAI here, for the
+    # reason the pinned branch above already gives: a different provider means a
+    # different embed model, and writing those vectors into a corpus embedded
+    # with another one silently breaks its vector space. It is also a metered
+    # call nobody asked for. OpenAI is reachable only by pinning a corpus to it
+    # (`prefer="openai"`), which is a decision someone made on purpose.
     fallback_hint = (
         f" (fallback {settings.ollama_fallback_url} also unreachable)"
         if settings.ollama_fallback_url else ""
     )
     raise EmbedBackendError(
-        f"Ollama not reachable at {settings.ollama_url}{fallback_hint} and "
-        f"OPENAI_API_KEY is not set. Either start Ollama (`ollama serve` and "
-        f"`ollama pull {settings.embed_model}`) or export OPENAI_API_KEY."
+        f"Ollama not reachable at {settings.ollama_url}{fallback_hint}. Start "
+        f"it (`ollama serve` and `ollama pull {settings.embed_model}`), or pin "
+        f"this corpus to a backend that is up."
     )

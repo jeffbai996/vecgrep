@@ -22,6 +22,7 @@ OAUTH_APPROVAL_ENV = "VECGREP_OAUTH_APPROVAL_TOKEN"
 ENV_MAP = {
     "VECGREP_OLLAMA_URL": "ollama_url",
     "VECGREP_OLLAMA_FALLBACK_URL": "ollama_fallback_url",
+    "VECGREP_OLLAMA_NUM_BATCH": "ollama_num_batch",
     "VECGREP_EMBED_MODEL": "embed_model",
     "OPENAI_API_KEY": "openai_api_key",
     "VECGREP_OPENAI_EMBED_MODEL": "openai_embed_model",
@@ -32,6 +33,7 @@ ENV_MAP = {
     "VECGREP_REST_ALLOWED_HOSTS": "rest_allowed_hosts",
     "VECGREP_ADMIN_TOKEN": "admin_token",
     "VECGREP_QDRANT_URL": "qdrant_url",
+    "VECGREP_BM25_BACKEND": "bm25_backend",
     "VECGREP_OAUTH_ENABLED": "oauth_enabled",
     "VECGREP_OAUTH_ISSUER_URL": "oauth_issuer_url",
     "VECGREP_OAUTH_LOOPBACK_BYPASS": "oauth_loopback_bypass",
@@ -45,6 +47,7 @@ ENV_MAP = {
 EDITABLE_FIELDS = {
     "ollama_url",
     "ollama_fallback_url",
+    "ollama_num_batch",
     "embed_model",
     "openai_embed_model",
     "api_host",
@@ -58,6 +61,7 @@ EDITABLE_FIELDS = {
     "mcp_allowed_hosts",
     "mcp_allowed_origins",
     "qdrant_url",
+    "bm25_backend",
     "backup_enabled",
     "backup_frequency",
     "backup_time",
@@ -71,7 +75,7 @@ SECRET_FIELDS = {
     "openai_api_key", "api_token", "admin_token", "oauth_approval_token",
 }
 STRUCTURAL_FIELDS = {
-    "api_host", "api_port", "rest_allowed_hosts", "qdrant_url", "oauth_enabled",
+    "api_host", "api_port", "rest_allowed_hosts", "qdrant_url", "bm25_backend", "oauth_enabled",
     "oauth_issuer_url", "oauth_loopback_bypass", "oauth_tailscale_identity_bypass",
     "mcp_allowed_hosts", "mcp_allowed_origins",
 }
@@ -90,6 +94,10 @@ class Settings:
     # is unreachable, before considering OpenAI. Lets a deployment run a primary
     # (e.g. a GPU box) with a local-host fallback. Unset (None) = no fallback.
     ollama_fallback_url: str | None = None
+    # Optional per-request Ollama runner batch bound. Lowering this reduces
+    # model working memory without changing weights, context, or vector shape.
+    # None preserves the model/runtime default.
+    ollama_num_batch: int | None = None
     embed_model: str = "bge-m3"
     openai_api_key: str | None = None
     openai_embed_model: str = "text-embedding-3-small"
@@ -142,6 +150,9 @@ class Settings:
     # mode shares one daemon across all clients. Recommended for any setup
     # with concurrent readers/writers. Example: "http://localhost:6333".
     qdrant_url: str | None = None
+    # Lexical sidecar implementation. Pickle preserves the historical default;
+    # SQLite keeps large corpora off the Python heap after an explicit migration.
+    bm25_backend: str = "pickle"
     backup_enabled: bool = False
     backup_frequency: str = "daily"
     backup_time: str = "03:00"
@@ -161,9 +172,10 @@ class Settings:
     # and doubles the fan-out cost. Naming a corpus explicitly always reaches
     # it, so the eval harness can still query its own build.
     cross_corpus_exclude: list[str] = field(default_factory=lambda: ["eval-*"])
-    # Corpora searched concurrently on an unscoped query. The fan-out was
-    # serial, so latency was the SUM of per-corpus cost: measured 16.3s across
-    # 8 corpora where the slowest single corpus was 5.3s. 1 restores serial.
+    # Process-wide corpus-search worker bound shared by REST/MCP requests using
+    # the same settings generation. The fan-out was serial, so latency was the
+    # SUM of per-corpus cost: measured 16.3s across 8 corpora where the slowest
+    # single corpus was 5.3s. 1 restores serial behavior.
     search_fanout_workers: int = 8
 
     @property
@@ -209,7 +221,7 @@ def load_settings() -> Settings:
         if env_key in os.environ:
             val = os.environ[env_key]
             if attr in {"api_port", "default_top_k", "backup_weekday", "backup_retention",
-                        "thread_pool_size"}:
+                        "thread_pool_size", "ollama_num_batch"}:
                 val = int(val)
             elif attr in {
                 "oauth_enabled", "oauth_loopback_bypass",
@@ -333,6 +345,10 @@ def validate_settings(settings: Settings) -> None:
         raise ConfigError("api_port must be between 1 and 65535")
     if int(settings.default_top_k) <= 0:
         raise ConfigError("default_top_k must be positive")
+    if settings.ollama_num_batch is not None and int(settings.ollama_num_batch) <= 0:
+        raise ConfigError("ollama_num_batch must be positive")
+    if settings.bm25_backend not in {"pickle", "sqlite"}:
+        raise ConfigError("bm25_backend must be pickle or sqlite")
     for name in ("embed_model", "openai_embed_model"):
         if not str(getattr(settings, name)).strip():
             raise ConfigError(f"{name} must be non-empty")
@@ -421,7 +437,10 @@ def update_config(
         for name in Settings.__dataclass_fields__
     })
     for name, value in updates.items():
-        if name in {"api_port", "default_top_k", "backup_weekday", "backup_retention"} and not isinstance(value, bool):
+        if name in {
+            "api_port", "default_top_k", "backup_weekday", "backup_retention",
+            "ollama_num_batch",
+        } and not isinstance(value, bool):
             try:
                 value = int(value)
             except (TypeError, ValueError) as exc:
@@ -431,14 +450,20 @@ def update_config(
             "oauth_tailscale_identity_bypass", "backup_enabled",
         } and not isinstance(value, bool):
             raise ConfigError(f"{name} must be a boolean")
-        if name in {"ollama_fallback_url", "oauth_issuer_url", "qdrant_url", "backup_destination"} and value == "":
+        if name in {
+            "ollama_fallback_url", "ollama_num_batch", "oauth_issuer_url",
+            "qdrant_url", "backup_destination",
+        } and value == "":
             value = None
         setattr(candidate, name, value)
     validate_settings(candidate)
 
     raw = _load_json(current.config_file)
     raw.update(updates)
-    for nullable in ("ollama_fallback_url", "oauth_issuer_url", "qdrant_url", "backup_destination"):
+    for nullable in (
+        "ollama_fallback_url", "ollama_num_batch", "oauth_issuer_url",
+        "qdrant_url", "backup_destination",
+    ):
         if raw.get(nullable) == "":
             raw[nullable] = None
     _atomic_write_json(current.config_file, raw)

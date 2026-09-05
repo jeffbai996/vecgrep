@@ -19,14 +19,32 @@ backend until an equivalence run says this one ranks identically.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from vecgrep.backend.store.bm25_store import (
     _coverage_factor,
     tokenize,
+)
+
+logger = logging.getLogger(__name__)
+
+# Keep WAL growth bounded without blocking readers. SQLite's default automatic
+# checkpoint is also 1,000 pages, but spelling it out makes the contract
+# inspectable and lets operators tune unusual filesystems. The byte limit is
+# applied when a checkpoint can reset the WAL; a busy reader may defer the
+# shrink, never the committed data.
+WAL_AUTOCHECKPOINT_PAGES = max(
+    1, int(os.environ.get("VECGREP_BM25_WAL_AUTOCHECKPOINT_PAGES", "1000"))
+)
+WAL_JOURNAL_SIZE_LIMIT_BYTES = max(
+    0,
+    int(os.environ.get("VECGREP_BM25_WAL_LIMIT_MB", "64")) * 1024 * 1024,
 )
 
 # FTS5 ranks with bm25(), which returns a NEGATIVE number where more negative
@@ -94,6 +112,8 @@ class BM25SqliteStore:
                 c = sqlite3.connect(str(p), check_same_thread=False)
                 c.execute("PRAGMA journal_mode=WAL")
                 c.execute("PRAGMA synchronous=NORMAL")
+                c.execute(f"PRAGMA wal_autocheckpoint={WAL_AUTOCHECKPOINT_PAGES}")
+                c.execute(f"PRAGMA journal_size_limit={WAL_JOURNAL_SIZE_LIMIT_BYTES}")
             c.execute("PRAGMA busy_timeout=10000")
             # Keep SQLite's own page cache small. The point of this backend is
             # that the index does NOT live in the process; a large cache here
@@ -103,6 +123,30 @@ class BM25SqliteStore:
             c.commit()
             self._conns[corpus] = c
             return c
+
+    def _checkpoint(self, corpus: str, conn: sqlite3.Connection) -> tuple[int, int, int] | None:
+        """Best-effort passive checkpoint after a potentially large mutation.
+
+        PASSIVE never waits for readers, so searches keep their existing
+        latency and snapshot semantics. If a reader pins old WAL frames, a
+        later mutation or clean connection close gets another chance.
+        """
+        try:
+            row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        except sqlite3.Error as exc:
+            logger.warning("BM25 WAL checkpoint deferred for %s: %s", corpus, exc)
+            return None
+        if row is None:
+            return None
+        busy, log_frames, checkpointed = (int(row[0]), int(row[1]), int(row[2]))
+        if busy:
+            logger.info(
+                "BM25 WAL checkpoint busy for %s frames=%d checkpointed=%d",
+                corpus,
+                log_frames,
+                checkpointed,
+            )
+        return busy, log_frames, checkpointed
 
     def close(self, corpus: str) -> None:
         with self._lock:
@@ -119,6 +163,32 @@ class BM25SqliteStore:
     # `evict` exists so callers written against the pickle store keep working.
     # There is nothing resident to release, so it just drops the handle.
     evict = close
+
+    def dirty_corpora(self) -> list[str]:
+        """SQLite transactions need no external crash-recovery marker."""
+        return []
+
+    def clear_dirty(self, corpus: str) -> None:
+        """Compatibility no-op for the pickle store's marker protocol."""
+
+    @contextmanager
+    def bulk(self, corpus: str):
+        """Commit a multi-source update once, or roll it back as a unit."""
+        if corpus in self._bulk:
+            yield
+            return
+        conn = self._conn(corpus)
+        self._bulk.add(corpus)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            yield
+            conn.commit()
+            self._checkpoint(corpus, conn)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._bulk.discard(corpus)
 
     # ── reads ─────────────────────────────────────────────────────────────
     def exists(self, corpus: str) -> bool:
@@ -178,6 +248,7 @@ class BM25SqliteStore:
         if changed:
             conn.executemany("UPDATE chunks SET payload = ? WHERE pos = ?", changed)
             conn.commit()
+            self._checkpoint(corpus, conn)
         return len(changed)
 
     def source_counts(self, corpus: str) -> dict[str, int]:
@@ -230,6 +301,7 @@ class BM25SqliteStore:
                              " ".join(tokenize(text)), payload)
                 n += 1
             conn.commit()
+            self._checkpoint(corpus, conn)
         except Exception:
             conn.rollback()
             raise
@@ -245,16 +317,26 @@ class BM25SqliteStore:
         conn.execute("DELETE FROM chunks WHERE source_id = ?", (source_id,))
         if corpus not in self._bulk:
             conn.commit()
+            self._checkpoint(corpus, conn)
 
     def drop(self, corpus: str) -> None:
         self.close(corpus)
         p = self._path(corpus)
-        if p and p.exists():
-            p.unlink()
-        for suffix in ("-wal", "-shm"):
-            side = None if p is None else p.with_name(p.name + suffix)
-            if side is not None and side.exists():
-                side.unlink()
+        if p is None:
+            return
+        # The .db, its sidecars, AND the legacy pickle this backend replaced.
+        # convert() builds <corpus>.db from <corpus>.pkl, so a converted corpus
+        # carries both on disk. Dropping only the .db stranded a pickle owning a
+        # corpus that no longer existed: deleting three eval corpora freed 639 MB
+        # of qdrant and left 298 MB of pickle behind (2026-08-30).
+        for stale in (
+            p,
+            p.with_name(p.name + "-wal"),
+            p.with_name(p.name + "-shm"),
+            p.with_name(f"{corpus}.pkl"),
+            p.with_name(f"{corpus}.pkl.dirty"),
+        ):
+            stale.unlink(missing_ok=True)
 
     # ── search ────────────────────────────────────────────────────────────
     def search(self, corpus: str, query: str, top_k: int) -> list[tuple[str, float, dict]]:
