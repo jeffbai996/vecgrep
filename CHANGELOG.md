@@ -7,6 +7,25 @@ patch = fixes). The version is a single source of truth in
 
 ## [Unreleased]
 
+### Added
+- Push/PR validation reuses the release gate: Python tests, frontend build,
+  package build, and clean-environment wheel install/import smoke.
+- Experimental SQLite/FTS5 BM25 store and explicit pickle conversion utility.
+  The service still uses pickle; production cutover requires corpus parity.
+- Corpus routing descriptions and use/avoid guidance, plus search operations
+  and corpus exploration views.
+
+### Fixed
+- Test settings are isolated by default; production paths and symlink escapes
+  fail before settings can open persistent state.
+- Reranker failures preserve hybrid ranking, model warming stays outside search,
+  and bounded batches/token lengths limit prediction memory.
+- Active BM25 bulk indexes cannot be evicted and reloaded from stale sidecars;
+  interrupted bulk operations are repairable from Qdrant.
+- OAuth registration, public-client metadata, callback CSP, proxy admission,
+  and REST/MCP DNS-rebinding boundaries are covered by defensive tests.
+- Protected write confirmation and metadata validation reject invalid changes.
+
 ## [1.2.0] — 2026-07-09
 
 Operational safety and self-hosting release. Search and ranking behavior are
