@@ -7,6 +7,7 @@ import pytest
 
 from vecgrep.backend.api.schemas import CorpusContextRequest, SearchRequest
 from vecgrep.backend.api import routes
+from vecgrep.backend.assembly import ResultStub
 from vecgrep.cli import main as cli_main
 from vecgrep.backend.service import SearchOutcome, SearchWarning
 from vecgrep.mcp import server as mcp_server
@@ -129,6 +130,7 @@ def test_mcp_success_shape_stays_list_and_partial_shape_adds_warnings(monkeypatc
 
         def search_with_diagnostics(self, query, **kwargs):
             assert kwargs["corpus_names"] == ["chats", "cli"]
+            assert kwargs["explain"] is True
             warnings = (
                 [SearchWarning("cli", "search_failed", "RuntimeError: corpus search failed")]
                 if self.warning else []
@@ -149,3 +151,35 @@ def test_mcp_success_shape_stays_list_and_partial_shape_adds_warnings(monkeypatc
     partial = json.loads(mcp_server._run_search(args))
     assert partial["hits"] == []
     assert partial["warnings"][0]["corpus"] == "cli"
+
+
+def test_mcp_budget_stub_exposes_relevance_and_raw_scores(monkeypatch) -> None:
+    class Service:
+        def search_budgeted_with_diagnostics(self, query, **kwargs):
+            assert kwargs["explain"] is True
+            return [], [ResultStub(
+                chunk_id="cid-1",
+                corpus="chats",
+                source_id="cl-1/2026-08-30.md",
+                doc_timestamp=1_788_000_000.0,
+                snippet="needle in context",
+                score=0.02,
+                similarity_pct=82.5,
+                relevance_pct=82.5,
+                relevance_label="strong",
+                matched_by=("vector", "bm25"),
+                scores={"vector_cosine": 0.6888, "vector_rank": 1},
+            )], []
+
+    monkeypatch.setattr(mcp_server, "_svc", lambda: Service())
+    payload = json.loads(mcp_server._run_search({
+        "query": "needle",
+        "corpus": "chats",
+        "rerank": False,
+        "budget": True,
+    }))
+    stub = payload["stubs"][0]
+    assert stub["similarity_pct"] == stub["relevance_pct"] == 82.5
+    assert stub["relevance_label"] == "strong"
+    assert stub["matched_by"] == ["vector", "bm25"]
+    assert stub["scores"] == {"vector_cosine": 0.6888, "vector_rank": 1}

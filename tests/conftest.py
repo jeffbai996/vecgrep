@@ -47,14 +47,28 @@ class StubEmbed(EmbedBackend):
         return out
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def vg_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Isolate VECGREP_HOME per test. Resets the config singleton so the
     new env var actually wins.
     """
     home = tmp_path / "vg"
+    # An inherited endpoint or credential must never redirect a test to a
+    # running instance, even when that test forgot to request this fixture.
+    for key in list(os.environ):
+        if key.startswith("VECGREP_") or key == "OPENAI_API_KEY":
+            monkeypatch.delenv(key)
     monkeypatch.setenv("VECGREP_HOME", str(home))
     monkeypatch.setattr(cfg_mod, "_settings", None)
+    original_init = cfg_mod.Settings.__init__
+
+    def isolated_init(settings, *args, **kwargs):
+        original_init(settings, *args, **kwargs)
+        assert settings.home.resolve().is_relative_to(tmp_path.resolve()), (
+            "Settings home resolves outside the test directory"
+        )
+
+    monkeypatch.setattr(cfg_mod.Settings, "__init__", isolated_init)
     yield home
 
 

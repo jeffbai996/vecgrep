@@ -256,6 +256,10 @@ def search(req: SearchRequest) -> SearchResponse:
                         doc_timestamp=s.doc_timestamp,
                         snippet=s.snippet,
                         similarity_pct=s.similarity_pct,
+                        relevance_pct=s.relevance_pct,
+                        relevance_label=s.relevance_label,
+                        matched_by=list(s.matched_by),
+                        scores=s.scores,
                     )
                     for s in stubs
                 ],

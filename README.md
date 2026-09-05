@@ -208,7 +208,7 @@ docs ──▶ adapters ──▶ chunkers ──┤                      ├─
   - Alternates: any other Ollama model via `VECGREP_EMBED_MODEL` (e.g. `nomic-embed-text`, 768-dim, lighter/faster; `mxbai-embed-large`, 1024-dim).
   - Fallback: OpenAI `text-embedding-3-small` (1536-dim) takes over when Ollama is unreachable and `OPENAI_API_KEY` is set.
 - **Qdrant** runs in embedded mode (no server, no Docker) at `~/.vecgrep/qdrant/`. Each named corpus is its own collection.
-- **BM25** index runs alongside Qdrant, persisted as a pickle per corpus. Tokenizer splits identifiers (`sharpe_ratio` → `sharpe`, `ratio`) so code search isn't blind to underscore- or camelCase-style naming.
+- **BM25** index runs alongside Qdrant. `bm25_backend` (`VECGREP_BM25_BACKEND`) selects `pickle` (compatibility default) or `sqlite` (one SQLite/FTS5 file per corpus). Convert and verify existing sidecars before selecting SQLite; unmigrated/stale pickles block startup, and missing or inconsistent SQLite indexes block lexical/hybrid search until `vecgrep bm25 rebuild <corpus>` repairs them. Tokenizer splits identifiers (`sharpe_ratio` → `sharpe`, `ratio`) so code search isn't blind to underscore- or camelCase-style naming.
 - **Concurrent mutation integrity.** Search takes a shared corpus lease; index,
   delete, confirmed writes, and direct edits take an exclusive lease shared by
   API, MCP, CLI, and watcher processes. A durable per-corpus intent journal
@@ -223,7 +223,7 @@ docs ──▶ adapters ──▶ chunkers ──┤                      ├─
   - Otherwise: a sigmoid over cosine, **calibrated per embedding model** — different models put their noise floor and signal range in different places, so the same `%` means the same thing across corpora.
   - BM25-only hits (which have no cosine) are rescaled rank-relative, so a real keyword match doesn't read as the `~1.6%` raw-RRF noise floor.
   - The web UI surfaces V/K/VK badges and tier colors plus a "how search works" panel.
-- **Cross-encoder reranker** (`--rerank`, off by default) rescores the candidate pool with `BAAI/bge-reranker-base`. Lazy-loaded — the heavy `torch` import only happens when you ask for it. It's a real quality win on hard, paraphrase-heavy queries where plain hybrid whiffs, but it adds meaningful latency (order ~100ms+ for a small candidate pool) and on easy literal queries it can be a wash or worse — so it's opt-in, not the default. Reach for it when a hybrid search returns near-misses for something you know is in the corpus.
+- **Cross-encoder reranker** (`--rerank`) rescores candidates with `BAAI/bge-reranker-v2-m3` by default (`VECGREP_RERANKER` overrides it). The model warms outside the request path. While warming or after prediction failure, search preserves hybrid results and marks them as not reranked. Prediction batches and token length are bounded to control peak memory. Explicit reranking is optional; large-corpus MCP defaults can enable it when the caller omits the setting.
 
 Each corpus pins the embedding backend, model, and dimension at index time and refuses to mix models *within* a single corpus — but the engine resolves each corpus's query embedding from its own pinned model, so multiple corpora on different models coexist fine. To change the model of an existing corpus, `vecgrep corpora migrate` it (or recreate it).
 
@@ -232,7 +232,7 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 ```
 ~/.vecgrep/
 ├── qdrant/         # vector store, one collection per corpus
-├── bm25/           # BM25 inverted index, one pickle per corpus
+├── bm25/           # BM25 inverted index, one .pkl or SQLite .db per corpus
 ├── locks/          # cross-process corpus and registry admission
 ├── mutations/      # pending crash-recovery intents (normally empty)
 ├── corpora.json    # named-corpus metadata
@@ -249,6 +249,7 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 |---|---|---|
 | `VECGREP_HOME` | `~/.vecgrep` | Storage root |
 | `VECGREP_OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint |
+| `VECGREP_OLLAMA_NUM_BATCH` | unset | Optional Ollama runner batch bound; lower values reduce embedding-model working memory at the cost of bulk-index throughput |
 | `VECGREP_EMBED_MODEL` | `bge-m3` | Ollama model |
 | `VECGREP_OPENAI_EMBED_MODEL` | `text-embedding-3-small` | OpenAI model |
 | `OPENAI_API_KEY` | unset | If set, used as fallback when Ollama is down |
@@ -288,7 +289,7 @@ it can only inspect the backend selected by its own effective config.
 
 Whole-instance backups contain per-corpus Qdrant snapshots, the corpus
 registry, non-secret configuration, aliases, and write-through documents.
-Embedding caches and BM25 pickles are excluded; BM25 is rebuilt from trusted
+Embedding caches and BM25 sidecars are excluded; BM25 is rebuilt from trusted
 Qdrant payloads after restore.
 
 ```bash

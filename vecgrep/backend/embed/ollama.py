@@ -33,9 +33,16 @@ def _is_finite_vector(vec: list[float]) -> bool:
 class OllamaBackend(EmbedBackend):
     name = "ollama"
 
-    def __init__(self, base_url: str, model: str, timeout: float = 60.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        timeout: float = 60.0,
+        num_batch: int | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.num_batch = num_batch
         # Phase-split timeout: a SHORT connect timeout so an unreachable host
         # (asleep / no service) fails over fast instead of hanging the full
         # read budget, but a LONG read timeout so a slow-but-alive embed (big
@@ -44,6 +51,12 @@ class OllamaBackend(EmbedBackend):
         # before failover triggers.
         self._client = self._make_client(read=timeout)
         self.dim = _KNOWN_DIMS.get(model) or self._probe_dim()
+
+    def _request_payload(self, input_: str | list[str]) -> dict:
+        payload = {"model": self.model, "input": input_, "truncate": True}
+        if self.num_batch is not None:
+            payload["options"] = {"num_batch": self.num_batch}
+        return payload
 
     @staticmethod
     def _make_client(connect: float = 2.0, read: float = 60.0) -> httpx.Client:
@@ -95,7 +108,7 @@ class OllamaBackend(EmbedBackend):
         try:
             r = self._client.post(
                 f"{self.base_url}/api/embed",
-                json={"model": self.model, "input": texts, "truncate": True},
+                json=self._request_payload(texts),
             )
         except httpx.ConnectError as e:
             # An unreachable backend is a whole-backend problem, not a batch
@@ -146,7 +159,7 @@ class OllamaBackend(EmbedBackend):
                 # clips the input to the window instead.
                 r = self._client.post(
                     f"{self.base_url}/api/embed",
-                    json={"model": self.model, "input": text, "truncate": True},
+                    json=self._request_payload(text),
                 )
             except httpx.ConnectError as e:
                 raise EmbedBackendError(

@@ -9,6 +9,9 @@ rotates, revoke kills the token.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 from mcp.shared.auth import OAuthClientInformationFull
 from mcp.server.auth.provider import AuthorizeError, AuthorizationParams
@@ -185,3 +188,29 @@ def test_stdio_without_oauth_token_preserves_local_tools():
     from vecgrep.mcp.server import _require_remote_scope
 
     assert _require_remote_scope("propose") is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "case",
+    json.loads(
+        (Path(__file__).parent / "fixtures/contracts/oauth-scopes-v1.json").read_text()
+    )["refresh_scope_cases"],
+    ids=lambda case: case["id"],
+)
+async def test_shared_refresh_scope_contract(provider, case):
+    from mcp.server.auth.provider import TokenError
+
+    client = _client()
+    await provider.register_client(client)
+    original = provider.store.issue_refresh_token(client.client_id, case["original"])
+    if case["error"]:
+        with pytest.raises(TokenError) as error:
+            await provider.exchange_refresh_token(client, original, case["requested"])
+        assert error.value.error == case["error"]
+        assert await provider.load_refresh_token(client, original.token) is not None
+        return
+    result = await provider.exchange_refresh_token(client, original, case["requested"])
+    access = await provider.load_access_token(result.access_token)
+    successor = await provider.load_refresh_token(client, result.refresh_token)
+    assert access.scopes == successor.scopes == case["granted"]

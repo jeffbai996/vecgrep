@@ -7,6 +7,8 @@ regress to the rename approach.
 """
 from __future__ import annotations
 
+import pytest
+
 from vecgrep.backend.embed.base import EmbedBackend
 from vecgrep.backend.embed.cache import CachedBackend
 
@@ -29,7 +31,12 @@ class _M2(EmbedBackend):
         return [[(len(t) % 5 + i) / 10 for i in range(self.dim)] for t in texts]
 
 
-def test_migrate_swaps_backend_and_keeps_data(svc, make_doc, monkeypatch):
+@pytest.mark.parametrize("lexical_backend", ["pickle", "sqlite"])
+def test_migrate_swaps_backend_and_keeps_data(svc, make_doc, monkeypatch, lexical_backend):
+    if lexical_backend == "sqlite":
+        from vecgrep.backend.store.bm25_sqlite import BM25SqliteStore
+
+        svc.bm25 = BM25SqliteStore(svc.settings.home / "bm25")
     p = make_doc("doc.md", "Cats and dogs and fish. Three sentences here.")
     svc.index(str(p), "test")
     pre_hits = svc.search("cats", "test", top_k=5)

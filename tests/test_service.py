@@ -163,7 +163,7 @@ def test_reconcile_rebuilds_missing_bm25_from_qdrant(svc, make_doc):
     assert hits[0].matched_by == ["bm25"]
     # The redundant full source stays in Qdrant, not duplicated into every
     # rebuilt BM25 chunk; source expansion still fetches the canonical copy.
-    assert "source_text" not in svc.bm25._load("test").payloads[0]
+    assert "source_text" not in next(svc.bm25.iter_payloads("test"))
     source = svc.get_source("test", str(p.resolve()))
     assert source is not None
     assert source["text"] == p.read_text()
@@ -177,9 +177,10 @@ def test_reconcile_rebuilds_bm25_count_drift_from_qdrant(svc, make_doc):
     expected = svc.list_corpora()[0].chunk_count
     assert expected > 1
 
-    idx = svc.bm25._load("test")
+    payload = next(svc.bm25.iter_payloads("test"))
+    cid, payload = svc.bm25.first_chunk_for_source("test", payload["source_id"])
     svc.bm25.replace("test", [
-        (idx.ids[0], idx.payloads[0]["text"], idx.payloads[0]),
+        (cid, payload["text"], payload),
     ])
 
     issue = next(i for i in svc.diagnose() if i["kind"] == "bm25_count_drift")

@@ -17,10 +17,12 @@ from vecgrep.cli.main import cli
 
 
 @pytest.fixture
-def runner_home(tmp_path, monkeypatch):
-    monkeypatch.setenv("VECGREP_HOME", str(tmp_path / "vg"))
-    from vecgrep.backend import config as cfg
-    monkeypatch.setattr(cfg, "_settings", None)
+def runner_home(svc, monkeypatch):
+    import importlib
+
+    cli_module = importlib.import_module("vecgrep.cli.main")
+    # Reuse the hermetic service and stub embedder across commands in one test.
+    monkeypatch.setattr(cli_module, "VecgrepService", lambda **kwargs: svc)
     return CliRunner()
 
 
@@ -39,11 +41,6 @@ def test_write_creates_and_indexes_a_doc(runner_home):
     #  service-layer tests, not this hermetic CLI test.)
 
 
-# (id distinctness across rapid writes is unit-tested in test_write_propose.py
-#  ::test_propose_ids_are_unique — exercising it here needs a live Qdrant server,
-#  since two CLI invokes in one hermetic test collide on the embedded client.)
-
-
 def test_write_records_metadata_and_confirmer(runner_home):
     r = runner_home.invoke(cli, ["write", "notes", "a decision",
                                  "--source-kind", "decision", "--tag", "x", "--tag", "y"])
@@ -59,43 +56,15 @@ def test_write_records_metadata_and_confirmer(runner_home):
     assert "confirmed_by:" in body            # the local user recorded
 
 
-def _qdrant_lock_collision(result) -> bool:
-    # Each CLI invoke opens its own VecgrepService against the same on-disk
-    # embedded Qdrant path and never closes it (no context manager /
-    # explicit close in `_do_write`), so one invoke's still-open client can
-    # collide with the next invoke's client inside this process. A real
-    # constraint of the in-process double-invoke, not a regression in the
-    # command under test — skip rather than fail when we hit exactly it.
-    return (
-        result.exit_code != 0
-        and isinstance(result.exception, RuntimeError)
-        and "already accessed by another instance of Qdrant client"
-        in str(result.exception)
-    )
-
-
 def test_edit_overwrites_existing(runner_home):
     import glob
     import re
 
     w = runner_home.invoke(cli, ["write", "notes", "old content"])
-    if _qdrant_lock_collision(w):
-        pytest.skip("embedded Qdrant single-process lock hit the setup write")
     assert w.exit_code == 0, w.output
-    # ids are nanosecond timestamps (notes-<digits>), so the edit target must
-    # come from the write's reported id. This test hardcoded notes-001 from
-    # the pre-timestamp scheme and survived unnoticed for weeks because the
-    # lock collision above made it skip on every full-suite run — the first
-    # run where the timing shifted and it actually EXECUTED, it failed
-    # (2026-07-27).
+    # Use the generated id so the edit exercises the actual newly written doc.
     doc_id = re.search(r"notes-\d+", w.output).group(0)
     r = runner_home.invoke(cli, ["edit", doc_id, "new content"])
-    if _qdrant_lock_collision(r):
-        pytest.skip(
-            "embedded Qdrant single-process lock: the prior `write` invoke's "
-            "client is still open when `edit` opens a second client against "
-            "the same on-disk path in this process"
-        )
     assert r.exit_code == 0, r.output
     f = glob.glob(f"{os.environ['VECGREP_HOME']}/write/notes/{doc_id}.md")[0]
     body = open(f).read()

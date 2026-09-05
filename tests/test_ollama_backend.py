@@ -15,13 +15,15 @@ from vecgrep.backend.embed.base import EmbedBackendError
 from vecgrep.backend.embed.ollama import OllamaBackend
 
 
-def _backend_with_handler(handler) -> OllamaBackend:
+def _backend_with_handler(handler, *, num_batch: int | None = None) -> OllamaBackend:
     """Build an OllamaBackend whose HTTP client is driven by `handler`.
 
     Uses model 'bge-m3' so __init__ skips the dim-probe call (1024 is a known
     dim), letting the handler see only the embed calls under test.
     """
-    b = OllamaBackend(base_url="http://fake", model="bge-m3")
+    b = OllamaBackend(
+        base_url="http://fake", model="bge-m3", num_batch=num_batch
+    )
     b._client = httpx.Client(transport=httpx.MockTransport(handler))
     return b
 
@@ -147,6 +149,26 @@ def test_uses_modern_embed_endpoint_with_truncate() -> None:
     assert "prompt" not in seen["body"], "legacy `prompt` key must not come back"
     assert seen["body"]["input"] == ["hello"]
     assert out[0] == [0.3] * 1024
+
+
+def test_num_batch_option_is_sent_on_batch_and_resilient_requests() -> None:
+    seen: list[dict] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        payload = _json.loads(req.content)
+        seen.append(payload)
+        if isinstance(payload["input"], list):
+            return httpx.Response(500, text="retry individually")
+        return httpx.Response(200, json={"embeddings": [[0.4] * 1024]})
+
+    b = _backend_with_handler(handler, num_batch=2048)
+    out = b.embed(["hello"])
+
+    assert out == [[0.4] * 1024]
+    assert len(seen) == 2
+    assert all(payload["options"] == {"num_batch": 2048} for payload in seen)
 
 
 def test_oversized_chunk_is_truncated_not_zero_vectored() -> None:
