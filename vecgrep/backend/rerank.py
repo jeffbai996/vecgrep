@@ -476,10 +476,12 @@ class _WorkerClient:
                 daemon=True,
             )
             process.start()
-            child_connection.close()
+            # Own the live child before any fallible post-start operation so
+            # startup cleanup can always find and retire it.
             with self._state_lock:
                 self._process = process
                 self._connection = parent_connection
+            child_connection.close()
             if not parent_connection.poll(RERANK_WORKER_START_TIMEOUT_S):
                 raise TimeoutError("reranker worker load timed out")
             response = parent_connection.recv()

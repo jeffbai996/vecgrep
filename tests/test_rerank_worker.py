@@ -217,3 +217,34 @@ def test_retirement_keeps_ownership_until_child_exits(monkeypatch, exit_on, forc
         assert not child.is_alive()
     assert ("terminate" in events) == (force or exit_on != "join")
     assert ("kill" in events) == (exit_on in {"kill", "never"})
+
+
+def test_start_owns_child_before_unused_pipe_close_can_fail(monkeypatch):
+    import multiprocessing
+
+    worker = rr._WorkerClient("model")
+    worker._starting = True
+    process = _Process()
+    process.start = lambda: None
+    parent = _Connection([])
+
+    class BrokenChildPipe:
+        def close(self):
+            raise OSError("unused pipe close failed")
+
+    class Context:
+        def Pipe(self):
+            return parent, BrokenChildPipe()
+
+        def Process(self, **kwargs):
+            return process
+
+    monkeypatch.setattr(multiprocessing, "get_context", lambda method: Context())
+    worker._start()
+
+    assert not process.is_alive()
+    assert worker._process is None
+    assert not worker._starting
+    assert not worker.ready.is_set()
+    assert worker._failed_at is not None
+    assert parent.closed
