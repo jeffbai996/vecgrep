@@ -204,6 +204,7 @@ def _hit_out(r) -> SearchHit:
         relevance_pct=r.relevance_pct,
         relevance_label=r.relevance_label,
         explain=r.explain or {},
+        source_label=r.source_label,
     )
 
 

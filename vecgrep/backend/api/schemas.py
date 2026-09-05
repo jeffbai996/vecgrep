@@ -70,6 +70,9 @@ class SearchHit(BaseModel):
     relevance_pct: float = 0.0
     relevance_label: str = ""
     explain: dict = {}
+    # Deployment-defined origin stamp (source_labels.json) — e.g. the
+    # agent/host that owns this source's channel. None when unmapped.
+    source_label: str | None = None
 
 
 class SearchStub(BaseModel):
