@@ -104,13 +104,22 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        # Narrow to requested scopes (can't widen beyond the refresh token's).
-        granted = [s for s in (scopes or refresh_token.scopes) if s in refresh_token.scopes]
-        at = self.store.issue_access_token(client.client_id, granted or refresh_token.scopes)
+        # Reject before minting; filtering an invalid request must never renew
+        # the original authority. Successor refresh grants stay narrowed too.
+        granted = list(scopes or refresh_token.scopes)
+        if (
+            not granted
+            or not set(granted).issubset(refresh_token.scopes)
+            or not set(granted).issubset(self.valid_scopes)
+        ):
+            from mcp.server.auth.provider import TokenError
+
+            raise TokenError("invalid_scope", "unsupported requested scope")
+        at = self.store.issue_access_token(client.client_id, granted)
         # Rotate-and-revoke so replaying an already-used refresh token cannot
         # mint a second access token.
         self.store.revoke(refresh_token.token)
-        rt = self.store.issue_refresh_token(client.client_id, refresh_token.scopes)
+        rt = self.store.issue_refresh_token(client.client_id, granted)
         return _oauth_token(at, rt)
 
     # ----- access token (also the verify path the bearer middleware uses) -----

@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "refresh_scope_cases": [
+    {
+      "id": "omitted-retains",
+      "original": [
+        "read"
+      ],
+      "requested": [],
+      "granted": [
+        "read"
+      ],
+      "error": null
+    },
+    {
+      "id": "same-scope",
+      "original": [
+        "read"
+      ],
+      "requested": [
+        "read"
+      ],
+      "granted": [
+        "read"
+      ],
+      "error": null
+    },
+    {
+      "id": "narrow",
+      "original": [
+        "read",
+        "propose"
+      ],
+      "requested": [
+        "read"
+      ],
+      "granted": [
+        "read"
+      ],
+      "error": null
+    },
+    {
+      "id": "unknown-only",
+      "original": [
+        "read"
+      ],
+      "requested": [
+        "unknown"
+      ],
+      "granted": null,
+      "error": "invalid_scope"
+    },
+    {
+      "id": "mixed-invalid",
+      "original": [
+        "read"
+      ],
+      "requested": [
+        "read",
+        "unknown"
+      ],
+      "granted": null,
+      "error": "invalid_scope"
+    },
+    {
+      "id": "widen",
+      "original": [
+        "read"
+      ],
+      "requested": [
+        "read",
+        "propose"
+      ],
+      "granted": null,
+      "error": "invalid_scope"
+    }
+  ]
+}
