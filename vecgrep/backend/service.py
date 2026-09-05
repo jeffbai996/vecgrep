@@ -888,7 +888,10 @@ class VecgrepService:
         # the end of the batch: persisting per source re-pickled the whole
         # growing index N times (O(N^2) bytes -- see BM25Store.bulk).
         _bulk = contextlib.ExitStack()
-        if update_bm25 and len(docs) > 1:
+        # SQLite must commit before each source intent is retired. Its bulk
+        # transaction would otherwise roll back earlier sources after their
+        # Qdrant writes and journal removals have already committed.
+        if update_bm25 and len(docs) > 1 and not isinstance(self.bm25, BM25SqliteStore):
             _bulk.enter_context(self.bm25.bulk(corpus_name))
         with _bulk:
             for doc in docs:
@@ -2131,6 +2134,17 @@ class VecgrepService:
     ) -> list[SearchResult]:
         collection = _collection_for(corpus.name)
 
+        if mode in ("hybrid", "bm25") and isinstance(self.bm25, BM25SqliteStore):
+            expected = self.store.count(collection)
+            if expected and (
+                not self.bm25.exists(corpus.name)
+                or self.bm25.count(corpus.name) != expected
+            ):
+                raise CorpusError(
+                    f"BM25 SQLite index missing or inconsistent for {corpus.name}; "
+                    f"run vecgrep bm25 rebuild {corpus.name} before searching"
+                )
+
         vector_hits: list[StoredHit] = []
         bm25_hits: list[tuple[str, float, dict]] = []
 
@@ -3035,28 +3049,6 @@ class VecgrepService:
                 break
         self.store.drop_collection(temp_collection)
 
-        # BM25 pickle: rename file AND rewrite payload.corpus inside it.
-        # Otherwise BM25 hits surface with the temp_name in their payload,
-        # which leaks the implementation detail into search results and
-        # breaks corpus filters.
-        old_bm25 = self.settings.home / "bm25" / f"{temp_name}.pkl"
-        new_bm25 = self.settings.home / "bm25" / f"{name}.pkl"
-        if old_bm25.exists():
-            if new_bm25.exists():
-                new_bm25.unlink()
-            old_bm25.rename(new_bm25)
-        # Drop in-memory caches for BOTH names so the rename is visible.
-        self.bm25.evict(temp_name)
-        self.bm25.evict(name)
-        # Now rewrite payloads under the new name.
-        def _stamp_corpus(payload: dict) -> bool:
-            if payload.get("corpus") == name:
-                return False
-            payload["corpus"] = name
-            return True
-
-        self.bm25.update_payloads(name, _stamp_corpus)
-
         # Drop the temp registry entry; upsert under final name. We also
         # rewrite each chunk payload's "corpus" field to the final name —
         # otherwise filters / display would still show the temp name.
@@ -3087,6 +3079,10 @@ class VecgrepService:
             if offset is None:
                 break
 
+        # Rebuild from the final canonical payloads through the selected store.
+        # Renaming a .pkl stranded SQLite corpora after embedding migration.
+        self._rebuild_bm25_from_store(new_corpus)
+        self.bm25.drop(temp_name)
         self.registry.delete(temp_name)
         self.registry.upsert(new_corpus)
 

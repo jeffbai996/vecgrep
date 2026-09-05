@@ -193,7 +193,7 @@ class BM25SqliteStore:
     # ── reads ─────────────────────────────────────────────────────────────
     def exists(self, corpus: str) -> bool:
         p = self._path(corpus)
-        return bool(p and p.exists())
+        return corpus in self._conns if p is None else p.exists()
 
     def count(self, corpus: str) -> int:
         return int(self._conn(corpus).execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
@@ -345,17 +345,15 @@ class BM25SqliteStore:
             return []
         conn = self._conn(corpus)
         limit = max(_MIN_CANDIDATES, top_k * _OVERFETCH)
-        try:
-            cur = conn.execute(
-                "SELECT c.cid, c.tokens, c.payload, bm25(chunks_fts) "
-                "FROM chunks_fts JOIN chunks c ON c.pos = chunks_fts.rowid "
-                "WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts) LIMIT ?",
-                (_fts_query(q_tokens), limit),
-            )
-            rows = cur.fetchall()
-        except sqlite3.OperationalError:
-            # A malformed MATCH expression must not take down a search.
-            return []
+        cur = conn.execute(
+            "SELECT c.cid, c.tokens, c.payload, bm25(chunks_fts) "
+            "FROM chunks_fts JOIN chunks c ON c.pos = chunks_fts.rowid "
+            "WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts) LIMIT ?",
+            (_fts_query(q_tokens), limit),
+        )
+        # Query tokens are quoted by _fts_query. Operational failures indicate
+        # an unhealthy store and must not silently become vector-only results.
+        rows = cur.fetchall()
 
         ranked: list[tuple[float, str, dict]] = []
         for cid, tokens, raw_payload, score in rows:
