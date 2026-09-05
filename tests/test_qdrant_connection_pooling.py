@@ -10,7 +10,22 @@ Qdrant, so it stays hermetic like the rest of the suite.
 """
 from __future__ import annotations
 
+import pytest
+
+from qdrant_client import QdrantClient
 from vecgrep.backend.store.qdrant_store import QdrantStore
+
+
+@pytest.fixture(autouse=True)
+def no_compatibility_probe(monkeypatch):
+    original_init = QdrantClient.__init__
+
+    def offline_init(client, *args, **kwargs):
+        # Inspect the real transport pool without probing a live daemon.
+        kwargs["check_compatibility"] = False
+        original_init(client, *args, **kwargs)
+
+    monkeypatch.setattr(QdrantClient, "__init__", offline_init)
 
 
 def test_server_mode_enables_connection_keepalive() -> None:
