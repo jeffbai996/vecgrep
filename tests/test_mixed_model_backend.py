@@ -9,18 +9,14 @@ from __future__ import annotations
 import pytest
 
 from vecgrep.backend.config import Settings
-from vecgrep.backend.embed.factory import _ollama_alive, get_embed_backend
+from vecgrep.backend.embed.factory import get_embed_backend
 
 _OLLAMA_URL = "http://localhost:11434"
 
 
-@pytest.mark.skipif(
-    not _ollama_alive(_OLLAMA_URL),
-    reason=f"requires a live Ollama backend at {_OLLAMA_URL} to resolve a real "
-    "OllamaBackend — not a stub target, this test exercises the actual "
-    "reachability/resolution path in get_embed_backend()",
-)
-def test_get_embed_backend_honors_explicit_model():
+def test_get_embed_backend_honors_explicit_model(monkeypatch):
+    # Model selection is independent of whether the developer runs Ollama.
+    monkeypatch.setattr("vecgrep.backend.embed.factory._ollama_alive", lambda url: True)
     s = Settings(ollama_url=_OLLAMA_URL, embed_model="nomic-embed-text")
     # Pin a different model than the settings default; backend must use it.
     b = get_embed_backend(s, prefer="ollama", model="bge-m3")
