@@ -27,6 +27,7 @@ from typing import Literal
 from .config import Settings, get_settings
 from .embed import EmbedBackend, EmbedBackendError, get_embed_backend
 from .aliases import aliases_path, expand_query, load_alias_map_cached
+from .source_labels import apply_labels, load_source_labels_cached, source_labels_path
 from .assembly import (
     DEFAULT_FULL_K,
     DEFAULT_MAX_TOTAL,
@@ -409,6 +410,10 @@ class SearchResult:
     # Empty dict otherwise. Keys: vector_cosine, vector_rank, bm25_score,
     # bm25_rank, rrf, rerank_score (when reranked).
     explain: dict = None  # type: ignore[assignment]
+    # Deployment-defined origin stamp (source_labels.json glob map) — e.g.
+    # which agent/host owns the channel a chat transcript came from. The
+    # inline display names frozen into archived text drift; this doesn't.
+    source_label: str | None = None
 
     def __post_init__(self) -> None:
         if self.explain is None:
@@ -1283,6 +1288,10 @@ class VecgrepService:
                 counts,
                 round((time.monotonic() - started) * 1000),
             )
+        # Origin stamp (deployment-supplied glob map, outside the repo;
+        # missing map = exact no-op). Applied here so every assembly built on
+        # this — search, budget, timeline, incident — inherits the stamp.
+        apply_labels(results, load_source_labels_cached(source_labels_path()))
         return SearchOutcome(results, warnings)
 
     def search(

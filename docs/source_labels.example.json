@@ -1,0 +1,5 @@
+{
+  "*/transcripts/team-a/*": "alice@host-1",
+  "*/transcripts/team-b/*": "bob@host-2",
+  "*/transcripts/*": "shared-archive"
+}

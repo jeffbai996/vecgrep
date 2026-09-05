@@ -158,6 +158,7 @@ def _result_payload(r) -> dict:
         "similarity_pct": round(r.similarity_pct, 1),  # compat alias
         "relevance_pct": round(r.relevance_pct, 1),
         "relevance_label": r.relevance_label,
+        "source_label": r.source_label,
         "corpus": r.corpus,
         "source_id": r.source_id,
         "matched_by": r.matched_by,

@@ -129,8 +129,10 @@ def _print_results(hits: list[dict], json_out: bool) -> None:
         matched_by = h.get("matched_by") or []
         badge = f"  [{'+'.join(matched_by)}]" if matched_by else ""
         label = h.get("relevance_label") or ""
+        origin = h.get("source_label") or ""
+        origin_s = f"  «{origin}»" if origin else ""
         label_s = f" {label:<7s}" if label else ""
-        click.echo(f"\n[{i}] {pct:5.1f}%{label_s}  {corpus}  {sid}{badge}")
+        click.echo(f"\n[{i}] {pct:5.1f}%{label_s}  {corpus}{origin_s}  {sid}{badge}")
         explain = h.get("explain") or {}
         if explain:
             parts: list[str] = []
@@ -483,6 +485,7 @@ def _run_budget_search(
                 "matched_by": r.matched_by,
                 "relevance_pct": r.relevance_pct,
                 "relevance_label": r.relevance_label,
+                "source_label": r.source_label,
                 "explain": r.explain or {},
             }
             for r in full
@@ -755,6 +758,7 @@ def search(
                 "matched_by": r.matched_by,
                 "relevance_pct": r.relevance_pct,
                 "relevance_label": r.relevance_label,
+                "source_label": r.source_label,
                 "explain": r.explain or {},
             }
             for r in outcome.results
