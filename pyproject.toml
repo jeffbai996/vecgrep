@@ -42,7 +42,8 @@ dependencies = [
 [project.optional-dependencies]
 openai = ["openai>=2.37.0"]
 rerank = ["sentence-transformers>=2.7"]
-mcp = ["mcp>=1.27.1"]
+# This transport uses the v1 FastMCP/OAuth API; v2 requires a separate migration.
+mcp = ["mcp>=1.27.1,<2"]
 watch = ["watchfiles>=1.2.0"]
 dev = ["pytest>=8.0"]
 
