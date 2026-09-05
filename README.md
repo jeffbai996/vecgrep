@@ -208,7 +208,7 @@ docs ──▶ adapters ──▶ chunkers ──┤                      ├─
   - Alternates: any other Ollama model via `VECGREP_EMBED_MODEL` (e.g. `nomic-embed-text`, 768-dim, lighter/faster; `mxbai-embed-large`, 1024-dim).
   - Fallback: OpenAI `text-embedding-3-small` (1536-dim) takes over when Ollama is unreachable and `OPENAI_API_KEY` is set.
 - **Qdrant** runs in embedded mode (no server, no Docker) at `~/.vecgrep/qdrant/`. Each named corpus is its own collection.
-- **BM25** index runs alongside Qdrant, persisted as a pickle per corpus. Tokenizer splits identifiers (`sharpe_ratio` → `sharpe`, `ratio`) so code search isn't blind to underscore- or camelCase-style naming.
+- **BM25** index runs alongside Qdrant. `bm25_backend` (`VECGREP_BM25_BACKEND`) selects `pickle` (compatibility default) or `sqlite` (one SQLite/FTS5 file per corpus). Convert and verify existing sidecars before selecting SQLite; unmigrated/stale pickles block startup, and missing or inconsistent SQLite indexes block lexical/hybrid search until `vecgrep bm25 rebuild <corpus>` repairs them. Tokenizer splits identifiers (`sharpe_ratio` → `sharpe`, `ratio`) so code search isn't blind to underscore- or camelCase-style naming.
 - **Concurrent mutation integrity.** Search takes a shared corpus lease; index,
   delete, confirmed writes, and direct edits take an exclusive lease shared by
   API, MCP, CLI, and watcher processes. A durable per-corpus intent journal
@@ -232,7 +232,7 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 ```
 ~/.vecgrep/
 ├── qdrant/         # vector store, one collection per corpus
-├── bm25/           # BM25 inverted index, one pickle per corpus
+├── bm25/           # BM25 inverted index, one .pkl or SQLite .db per corpus
 ├── locks/          # cross-process corpus and registry admission
 ├── mutations/      # pending crash-recovery intents (normally empty)
 ├── corpora.json    # named-corpus metadata
@@ -289,7 +289,7 @@ it can only inspect the backend selected by its own effective config.
 
 Whole-instance backups contain per-corpus Qdrant snapshots, the corpus
 registry, non-secret configuration, aliases, and write-through documents.
-Embedding caches and BM25 pickles are excluded; BM25 is rebuilt from trusted
+Embedding caches and BM25 sidecars are excluded; BM25 is rebuilt from trusted
 Qdrant payloads after restore.
 
 ```bash
