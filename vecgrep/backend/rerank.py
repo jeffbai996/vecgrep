@@ -313,6 +313,7 @@ class _WorkerClient:
         self._process = None
         self._connection = None
         self._starting = False
+        self._retiring = False
         self._failed_at: float | None = None
         self._last_used = time.monotonic()
         self._idle_timer: threading.Timer | None = None
@@ -393,7 +394,11 @@ class _WorkerClient:
             if self.ready.is_set() and process is not None and process.is_alive():
                 self.attempt_done.set()
                 return self.attempt_done
-            if self._starting:
+            if self._starting or self._retiring:
+                return self.attempt_done
+            if process is not None and process.is_alive():
+                # A failed retirement still owns this model process.
+                self.attempt_done.set()
                 return self.attempt_done
             if (
                 self._failed_at is not None
@@ -410,7 +415,11 @@ class _WorkerClient:
             if self.ready.is_set() and process is not None and process.is_alive():
                 self.attempt_done.set()
                 return self.attempt_done
-            if self._starting:
+            if self._starting or self._retiring:
+                return self.attempt_done
+            if process is not None and process.is_alive():
+                # A failed retirement still owns this model process.
+                self.attempt_done.set()
                 return self.attempt_done
             if (
                 self._failed_at is not None
@@ -486,13 +495,9 @@ class _WorkerClient:
                     parent_connection.close()
                 except OSError:
                     pass
-            if process is not None and process.is_alive():
-                process.terminate()
-                process.join(timeout=2)
+            if process is not None:
+                self._retire(terminate=True)
             with self._state_lock:
-                if self._process is process:
-                    self._process = None
-                    self._connection = None
                 self._starting = False
                 self._failed_at = time.monotonic()
                 self.ready.clear()
@@ -549,7 +554,7 @@ class _WorkerClient:
         with self._state_lock:
             process = self._process
             connection = self._connection
-            self._process = None
+            self._retiring = True
             self._connection = None
             self.ready.clear()
             self.attempt_done.set()
@@ -566,11 +571,25 @@ class _WorkerClient:
                 connection.close()
             except OSError:
                 pass
-        if process is not None:
-            process.join(timeout=2)
-            if terminate and process.is_alive():
-                process.terminate()
-                process.join(timeout=2)
+        try:
+            if process is not None:
+                if not terminate:
+                    process.join(timeout=2)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=2)
+                if process.is_alive():
+                    process.kill()
+                    process.join(timeout=2)
+                if process.is_alive():
+                    logger.error("reranker worker %s survived shutdown", self.model_name)
+        finally:
+            with self._state_lock:
+                # Even failed OS termination must not abandon ownership and
+                # permit another model allocation alongside the survivor.
+                if self._process is process and (process is None or not process.is_alive()):
+                    self._process = None
+                self._retiring = False
 
     def stop(self) -> None:
         with self._call_lock:

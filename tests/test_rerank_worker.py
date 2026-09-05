@@ -165,3 +165,55 @@ def test_prediction_timeout_opens_circuit_before_retry(monkeypatch):
     worker.ensure_started()
     time.sleep(0.05)
     assert started == [True]
+
+
+@pytest.mark.parametrize("exit_on", ["join", "terminate", "kill", "never"])
+@pytest.mark.parametrize("force", [False, True])
+def test_retirement_keeps_ownership_until_child_exits(monkeypatch, exit_on, force):
+    worker = rr._WorkerClient("model")
+    events = []
+
+    class Child:
+        alive = True
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, timeout=None):
+            assert timeout == 2
+            events.append("join")
+            # A concurrent request must not replace a child during retirement.
+            worker.ensure_started()
+            if exit_on == "join":
+                self.alive = False
+
+        def terminate(self):
+            events.append("terminate")
+            if exit_on == "terminate":
+                self.alive = False
+
+        def kill(self):
+            events.append("kill")
+            if exit_on == "kill":
+                self.alive = False
+
+    child = Child()
+    worker._process = child
+    worker._connection = _Connection([])
+    worker.ready.set()
+    started = []
+    monkeypatch.setattr(worker, "_start", lambda: started.append(True))
+    monkeypatch.setattr(rr, "_worker_pressure_active", lambda: False)
+    worker._retire(terminate=force)
+
+    assert started == []
+    assert not worker.ready.is_set()
+    if exit_on == "never":
+        assert worker._process is child
+        worker.ensure_started()
+        assert started == []
+    else:
+        assert worker._process is None
+        assert not child.is_alive()
+    assert ("terminate" in events) == (force or exit_on != "join")
+    assert ("kill" in events) == (exit_on in {"kill", "never"})
