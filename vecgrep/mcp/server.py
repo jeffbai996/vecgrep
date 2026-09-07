@@ -547,10 +547,18 @@ def _doc_body(corpus: str, doc_id: str) -> str | None:
     body without the caller re-sending it. Reads from where the corpus's docs
     physically live (same resolver the edit existence-check uses)."""
     from ..backend.ingestion.adapters.markdown import parse_frontmatter
-    path = _corpus_doc_dir(corpus) / f"{doc_id}.md"
-    if not path.is_file():
+    from ..backend.write import proposal as _P
+
+    # Patch and metadata-only modes read before Proposal construction, so they
+    # must enforce the same ID and corpus boundary here. Reuse the direct-edit
+    # target resolver to reject traversal, absolute paths, and symlink aliases;
+    # the no-follow open closes the check-to-read race at the final component.
+    _P.validate_edit_id(doc_id)
+    try:
+        path = _direct_edit_target(_corpus_doc_dir(corpus), doc_id)
+        text = _read_nofollow(path)
+    except FileNotFoundError:
         return None
-    text = path.read_text(encoding="utf-8")
     # Strip a leading frontmatter block the same way parse_frontmatter detects
     # one, so the patch operates on body only (frontmatter is regenerated from
     # meta on render). No frontmatter → the whole file is body.
@@ -634,6 +642,8 @@ def _run_propose(corpus: str, content: str | None, edit_id: str | None = None,
             body = _doc_body(corpus, edit_id)
         except AdapterError as exc:
             return json.dumps({"error": f"invalid frontmatter: {exc}"})
+        except (OSError, ValueError) as exc:
+            return json.dumps({"error": str(exc)})
         if body is None:
             return json.dumps({"error": (
                 f"doc {edit_id!r} not found in corpus {corpus!r} — can't patch "
@@ -657,6 +667,8 @@ def _run_propose(corpus: str, content: str | None, edit_id: str | None = None,
             body = _doc_body(corpus, edit_id)
         except AdapterError as exc:
             return json.dumps({"error": f"invalid frontmatter: {exc}"})
+        except (OSError, ValueError) as exc:
+            return json.dumps({"error": str(exc)})
         if body is None:
             return json.dumps({"error": (
                 f"doc {edit_id!r} not found in corpus {corpus!r} — can't retag "

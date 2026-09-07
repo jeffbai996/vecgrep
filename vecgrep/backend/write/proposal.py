@@ -156,6 +156,16 @@ def _validate_meta(meta: dict) -> None:
         raise ProposalError(f"source_kind must be one of {SOURCE_KINDS}")
 
 
+def validate_edit_id(edit_id: str) -> None:
+    """Reject edit identifiers that cannot be one corpus-local filename."""
+    if not _ID_RE.fullmatch(edit_id):
+        raise ProposalError(
+            f"edit_id {edit_id!r} is not a valid doc id (expected "
+            f"prefix-NNN, e.g. note-007) — path separators and '..' are "
+            f"rejected so an edit can't escape the corpus directory."
+        )
+
+
 def propose(
     corpus: str,
     content: str,
@@ -198,12 +208,7 @@ def propose(
         # edit_id like "../outside" would resolve target_path outside
         # corpus_dir, letting confirm() read+overwrite an arbitrary file —
         # the corpus boundary is the whole point of the gate.
-        if not _ID_RE.match(edit_id):
-            raise ProposalError(
-                f"edit_id {edit_id!r} is not a valid doc id (expected "
-                f"prefix-NNN, e.g. note-007) — path separators and '..' are "
-                f"rejected so an edit can't escape the corpus directory."
-            )
+        validate_edit_id(edit_id)
         doc_id = edit_id
     else:
         doc_id = next_doc_id(corpus_dir, corpus)
