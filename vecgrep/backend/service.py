@@ -3163,15 +3163,21 @@ class VecgrepService:
         with tempfile.TemporaryDirectory() as tmp:
             staging = Path(tmp)
             with tarfile.open(archive, "r:gz") as tar:
-                # SECURITY: 'data' filter blocks path-traversal (../, absolute
-                # paths, device/symlink entries) from an attacker-authored tarball.
+                # SECURITY: 'data' blocks traversal, absolute paths, special
+                # files, and links that resolve outside the staging directory.
                 tar.extractall(staging, filter="data")
 
             meta_path = staging / "corpus.json"
             if not meta_path.is_file():
                 raise CorpusError(f"Archive missing corpus.json: {archive}")
             meta = json.loads(meta_path.read_text())
-            target_name = rename or meta["name"]
+            archive_name = meta.get("name") if isinstance(meta, dict) else None
+            self.registry.validate_user_name(archive_name)
+
+            target_name = rename or archive_name
+            # Names become filesystem components below. Validate both archive
+            # metadata and an explicit rename before closing or writing storage.
+            self.registry.validate_user_name(target_name)
 
             if self.registry.has(target_name):
                 raise CorpusError(
@@ -3185,7 +3191,7 @@ class VecgrepService:
             # Restore qdrant collection. If we're renaming, the stored
             # directory still has the old name; rename it on copy.
             src_qdrant = staging / "qdrant" / "collection"
-            old_collection = _collection_for(meta["name"])
+            old_collection = _collection_for(archive_name)
             new_collection = _collection_for(target_name)
             if src_qdrant.is_dir():
                 src_collection_dir = src_qdrant / old_collection

@@ -151,14 +151,19 @@ class CorpusRegistry:
             raise
 
     @staticmethod
-    def validate_name(name: str) -> None:
-        if name == EPHEMERAL_NAME or name.startswith(_INTERNAL_PREFIX):
-            return
-        if not _VALID_NAME.match(name):
+    def validate_user_name(name: object) -> None:
+        """Validate names accepted from CLI, HTTP, or imported metadata."""
+        if not isinstance(name, str) or not _VALID_NAME.fullmatch(name):
             raise CorpusError(
                 f"Invalid corpus name '{name}'. Use letters, digits, underscore, hyphen "
                 "(1-64 chars, must start with a letter or digit)."
             )
+
+    @staticmethod
+    def validate_name(name: str) -> None:
+        if name == EPHEMERAL_NAME or name.startswith(_INTERNAL_PREFIX):
+            return
+        CorpusRegistry.validate_user_name(name)
 
     def list(self) -> list[Corpus]:
         if self.in_memory:
