@@ -10,6 +10,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -354,6 +355,55 @@ def test_propose_edit_patch_missing_target_doc(home):
         "notes", None, edit_id="notes-404",
         old_str="x", new_str="y"))
     assert "error" in r
+    assert not glob.glob(f"{os.environ['VECGREP_HOME']}/write/_pending/*.json")
+
+
+@pytest.mark.parametrize("mode", ["patch", "meta_only"])
+def test_propose_edit_rejects_outside_targets_before_read(
+    home, tmp_path, monkeypatch, mode,
+):
+    from vecgrep.mcp import server as S
+
+    doc_dir = Path(os.environ["VECGREP_HOME"]) / "write" / "notes"
+    doc_dir.mkdir(parents=True)
+    traversed = doc_dir.parent / "outside.md"
+    absolute = tmp_path / "absolute.md"
+    symlink_target = tmp_path / "symlink-target.md"
+    for path in (traversed, absolute, symlink_target):
+        path.write_text("outside marker")
+    (doc_dir / "notes-999.md").symlink_to(symlink_target)
+
+    protected = {path.resolve() for path in (traversed, absolute, symlink_target)}
+    reads = []
+    original_read_text = Path.read_text
+    original_os_open = os.open
+
+    def tracked_read_text(path, *args, **kwargs):
+        if path.resolve() in protected:
+            reads.append(path)
+        return original_read_text(path, *args, **kwargs)
+
+    def tracked_os_open(path, *args, **kwargs):
+        if Path(path).resolve() in protected:
+            reads.append(Path(path))
+        return original_os_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", tracked_read_text)
+    monkeypatch.setattr(os, "open", tracked_os_open)
+    doc_ids = ["../outside", str(absolute.with_suffix("")), "notes-999"]
+    for doc_id in doc_ids:
+        if mode == "patch":
+            result = json.loads(S._run_propose(
+                "notes", None, edit_id=doc_id,
+                old_str="outside marker", new_str="replacement",
+            ))
+        else:
+            result = json.loads(S._run_propose(
+                "notes", None, edit_id=doc_id, tags=["reviewed"],
+            ))
+        assert "error" in result
+
+    assert reads == []
     assert not glob.glob(f"{os.environ['VECGREP_HOME']}/write/_pending/*.json")
 
 
