@@ -262,6 +262,7 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 | `VECGREP_TOP_K` | `5` | Default `--top` value |
 | `VECGREP_ALIASES_FILE` | `$VECGREP_HOME/aliases.json` | Entity alias map (personal data — keep it out of any repo). See `docs/aliases.example.json`. Missing = no expansion. |
 | `VECGREP_OAUTH_ENABLED` | unset | `1` enables OAuth 2.1 for untrusted `/mcp` traffic (embedded auth server: /authorize, /token, /.well-known). |
+| `VECGREP_OAUTH_PUBLIC_PORT` | `8766` | Separate loopback listener for every public MCP/OAuth proxy route. Private local/Serve clients stay on the API port. |
 | `VECGREP_OAUTH_ISSUER_URL` | unset | Public base URL the MCP endpoint is reachable at. Required when OAuth is on. |
 | `VECGREP_OAUTH_APPROVAL_TOKEN` | unset | Strong owner approval code entered in the browser before an OAuth client may receive a code. Required when OAuth is on. |
 | `VECGREP_OAUTH_LOOPBACK_BYPASS` | `true` | Preserve direct loopback MCP clients while OAuth is on. Set `false` to require OAuth for every MCP request and disable all trusted-network bypasses. |
@@ -492,8 +493,10 @@ export VECGREP_OAUTH_APPROVAL_TOKEN="$(python -c 'import secrets; print(secrets.
 vecgrep serve
 ```
 
-Keep vecgrep on its default loopback bind and expose only the MCP and OAuth
-routes through the TLS proxy. Then add that `/mcp` URL under Claude.ai
+Keep vecgrep on its default loopback bind. Point all public MCP and OAuth
+proxy routes at `127.0.0.1:8766`, including discovery and `/oauth/unlock`.
+Keep local clients and private Tailscale Serve on port `8765`. Existing public
+proxy upstreams must be migrated; never expose the private listener publicly. Then add that `/mcp` URL under Claude.ai
 → Settings → Connectors → Custom MCP server. The client dynamically
 registers and runs the authorization-code + PKCE flow; the browser asks for the
 owner approval code before granting it. Direct loopback MCP and authenticated

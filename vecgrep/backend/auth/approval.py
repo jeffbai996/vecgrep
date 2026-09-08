@@ -15,6 +15,8 @@ from starlette.datastructures import Headers
 from starlette.responses import RedirectResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from .ingress import PRIVATE_INGRESS
+
 
 APPROVAL_COOKIE = "__Host-vecgrep_oauth_approved"
 TAILNET_INTENT_COOKIE = "__Host-vecgrep_oauth_intent"
@@ -77,11 +79,11 @@ def oauth_callback_origin(authorize_target: str) -> str | None:
 def verified_tailnet_login(scope: Scope) -> str | None:
     """Return tailscaled's verified Serve identity, never Funnel input.
 
-    The service's loopback-only listener is what makes proxy-supplied identity
-    trustworthy. Tailscale strips incoming identity headers before supplying
+    Only the dedicated private ingress may use proxy-supplied identity.
+    Public ingress never reaches this trust decision, even on loopback. Tailscale strips incoming identity headers before supplying
     its own on Serve requests; Funnel does not receive an identity header.
     """
-    if scope.get("type") != "http":
+    if scope.get("type") != "http" or scope.get(PRIVATE_INGRESS) is not True:
         return None
     server = scope.get("server")
     if not server:
