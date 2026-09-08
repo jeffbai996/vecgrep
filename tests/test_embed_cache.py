@@ -350,3 +350,114 @@ def test_stats_bytes_reports_per_identity_size(tmp_path):
     cache.put_many("id", ["a", "b"], [[1.0] * 8] * 2)
     s = cache.stats_bytes()
     assert s["id"]["rows"] == 2 and s["id"]["bytes"] == 2 * 8 * 4
+
+
+# ── cap headroom warning ────────────────────────────────────────────────────
+# The cap comment documents the failure mode (a cap below the corpus size
+# turns a repair into a full overnight re-embed) but nothing watched for the
+# approach. Found 2026-09-08 with the cache at 83% of cap and growing.
+
+def _vecs(n: int) -> tuple[list[str], list[list[float]]]:
+    return [f"t{i}" for i in range(n)], [[1.0, 0.0, 0.0, 0.0]] * n
+
+
+def test_cap_warning_fires_near_cap(tmp_path, caplog, monkeypatch):
+    import logging
+
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "10")
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts, vecs = _vecs(9)  # 90% of cap
+    with caplog.at_level(logging.WARNING, logger="vecgrep.backend.embed.cache"):
+        cache.put_many("id", texts, vecs)
+    assert "VECGREP_EMBED_CACHE_MAX_ROWS" in caplog.text, (
+        "operator must be told which knob to raise before the cap binds"
+    )
+
+
+def test_cap_warning_silent_below_threshold(tmp_path, caplog, monkeypatch):
+    import logging
+
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "10")
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts, vecs = _vecs(8)  # below the 90% line
+    with caplog.at_level(logging.WARNING, logger="vecgrep.backend.embed.cache"):
+        cache.put_many("id", texts, vecs)
+    assert "VECGREP_EMBED_CACHE_MAX_ROWS" not in caplog.text
+
+
+def test_cap_warning_fires_once_not_per_put(tmp_path, caplog, monkeypatch):
+    import logging
+
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "10")
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts, vecs = _vecs(9)
+    with caplog.at_level(logging.WARNING, logger="vecgrep.backend.embed.cache"):
+        cache.put_many("id", texts, vecs)
+        cache.put_many("id", *_vecs(9))  # same rows again, still at 90%
+    warnings = [r for r in caplog.records if "VECGREP_EMBED_CACHE_MAX_ROWS" in r.message]
+    assert len(warnings) == 1
+
+
+def test_eviction_is_logged_when_cap_binds(tmp_path, caplog, monkeypatch):
+    import logging
+
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "5")
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts, vecs = _vecs(8)
+    with caplog.at_level(logging.WARNING, logger="vecgrep.backend.embed.cache"):
+        cache.put_many("id", texts, vecs)
+    assert cache.stats() == {"id": 5}
+    assert any("evict" in r.message.lower() for r in caplog.records), (
+        "the cap binding is the documented danger state; it must be visible"
+    )
+
+
+def test_cap_disabled_stays_silent(tmp_path, caplog, monkeypatch):
+    import logging
+
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "0")
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts, vecs = _vecs(50)
+    with caplog.at_level(logging.WARNING, logger="vecgrep.backend.embed.cache"):
+        cache.put_many("id", texts, vecs)
+    assert "VECGREP_EMBED_CACHE_MAX_ROWS" not in caplog.text
+
+
+# ── sweep delete-fraction guard ─────────────────────────────────────────────
+# An unattended sweep that runs while a corpus is empty or mid-rebuild would
+# delete exactly the vectors that make the rebuild cheap. The guard makes a
+# grossly lopsided sweep abort loudly instead of proceeding.
+
+def test_sweep_guard_aborts_on_excessive_deletion(tmp_path):
+    import pytest
+
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts, vecs = _vecs(10)
+    cache.put_many("id", texts, vecs)
+    keep = {"id": {EmbedCache._sha(t) for t in texts[:2]}}  # would delete 8/10
+
+    with pytest.raises(RuntimeError, match="fraction"):
+        cache.sweep(keep, max_delete_fraction=0.5)
+    assert cache.stats() == {"id": 10}, "an aborted sweep must delete nothing"
+
+
+def test_sweep_guard_allows_within_fraction(tmp_path):
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts, vecs = _vecs(10)
+    cache.put_many("id", texts, vecs)
+    keep = {"id": {EmbedCache._sha(t) for t in texts[:8]}}  # deletes 2/10
+
+    got = cache.sweep(keep, max_delete_fraction=0.5)
+    assert got == {"id": 2}
+    assert cache.stats() == {"id": 8}
+
+
+def test_sweep_guard_not_applied_to_dry_run(tmp_path):
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts, vecs = _vecs(10)
+    cache.put_many("id", texts, vecs)
+    keep = {"id": set()}  # would delete everything
+
+    got = cache.sweep(keep, dry_run=True, max_delete_fraction=0.5)
+    assert got == {"id": 10}, "dry run reports the damage instead of refusing"
+    assert cache.stats() == {"id": 10}
