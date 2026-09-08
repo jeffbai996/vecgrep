@@ -7,7 +7,7 @@ internet** — the main example being claude.ai's custom connectors. If your
 only clients are local (Claude Code over stdio, tools on your tailnet), you
 can leave it off and keep using network trust. When OAuth is enabled for a
 public connector, direct loopback clients and authenticated Tailscale Serve
-users retain network trust by default; anonymous Funnel clients do not.
+users retain network trust on the private listener; public ingress never does.
 
 ## TL;DR — enabling it
 
@@ -16,6 +16,7 @@ users retain network trust by default; anonymous Funnel clients do not.
 VECGREP_OAUTH_ENABLED=1
 VECGREP_OAUTH_ISSUER_URL=https://<your-public-host>/mcp   # the URL clients dial
 VECGREP_OAUTH_APPROVAL_TOKEN=<strong random owner approval code>
+VECGREP_OAUTH_PUBLIC_PORT=8766   # public proxy upstream; private clients stay on 8765
 # Optional master rollback: false requires OAuth for every MCP request.
 VECGREP_OAUTH_LOOPBACK_BYPASS=true
 # Optional: false also requires OAuth for authenticated Tailscale Serve users.
@@ -32,6 +33,25 @@ VECGREP_MCP_ALLOWED_ORIGINS=https://app.example
 #    Verified Tailscale Serve sessions get one-click approval; other sessions
 #    use the owner approval code. There is no client ID to pre-provision.
 ```
+
+Point every public TLS proxy route at `127.0.0.1:8766`, including
+authorization and unlock routes. Keep private Tailscale Serve and local
+clients on `VECGREP_API_PORT` (default `8765`). Public and private listeners
+share one process, token store, and MCP session manager. The public listener
+never trusts peer addresses or identity headers, and does not serve REST or
+the UI. `VECGREP_OAUTH_PUBLIC_PORT` can select another unused port.
+
+**Existing deployments must migrate their public upstreams from 8765 to 8766.**
+Updating the code alone does not secure a public proxy still aimed at the
+private listener. Preserve external URLs, paths, private upstreams, and issuer
+configuration; only the public upstream port changes. On Windows/WSL, also
+forward the new loopback port to the WSL listener before changing the proxy.
+Never publish the private listener, even through a path-prefixed public URL.
+
+`vecgrep serve` creates both sockets when OAuth is enabled, entering app
+lifespan once. Custom ASGI launchers must likewise supply distinct accepted
+socket ports matching the settings; unknown ingress gets no network bypass.
+If OAuth or the MCP app is unavailable, public ingress fails closed.
 
 The TLS proxy must expose the configured MCP path plus `/authorize`, `/token`,
 `/register`, `/oauth/unlock`, `/.well-known/oauth-authorization-server`, and
@@ -90,19 +110,19 @@ authenticated client still cannot commit writes by itself.
 
 ## What it does NOT change
 
-- OAuth applies only to `/mcp`. Keep the service loopback-bound and expose only
-  MCP and OAuth routes through the public proxy. A non-loopback vecgrep bind
+- OAuth gates `/mcp` on the public listener unconditionally. Keep that listener
+  loopback-bound and expose only MCP and OAuth routes through the public proxy. A non-loopback vecgrep bind
   separately requires a strong `VECGREP_API_TOKEN` and fails closed without it.
 - MCP validates Host and Origin before the trusted-loopback or OAuth boundary.
   Loopback and the configured issuer are admitted automatically; private proxy
   aliases and separate browser origins require the explicit allowlists above.
 - Local stdio MCP (`vecgrep mcp`) is untouched — no network, no auth.
-- Direct HTTP from a loopback peer bypasses OAuth only when both
+- On the private listener, direct HTTP from a loopback peer bypasses OAuth only when both
   `X-Forwarded-For` and `X-Forwarded-Proto` are absent. Any proxy marker makes
   the request untrusted unless the verified Tailscale Serve rule below applies.
-- Tailscale Serve strips client-supplied identity headers and adds the logged-in
+- Private Tailscale Serve strips client-supplied identity headers and adds the logged-in
   tailnet user's identity. That verified header plus proxy transit permits the
-  default tailnet bypass. Funnel supplies no identity header and remains OAuth
+  private tailnet bypass. Public listener requests always remain OAuth
   protected. Tagged nodes receive no user identity header and therefore need
   OAuth or an SSH tunnel to loopback.
 - `VECGREP_OAUTH_LOOPBACK_BYPASS=false` is the master kill switch: it restores
