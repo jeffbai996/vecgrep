@@ -36,6 +36,7 @@ ENV_MAP = {
     "VECGREP_BM25_BACKEND": "bm25_backend",
     "VECGREP_OAUTH_ENABLED": "oauth_enabled",
     "VECGREP_OAUTH_ISSUER_URL": "oauth_issuer_url",
+    "VECGREP_OAUTH_PUBLIC_PORT": "oauth_public_port",
     "VECGREP_OAUTH_LOOPBACK_BYPASS": "oauth_loopback_bypass",
     "VECGREP_OAUTH_TAILSCALE_IDENTITY_BYPASS": "oauth_tailscale_identity_bypass",
     "VECGREP_MCP_ALLOWED_HOSTS": "mcp_allowed_hosts",
@@ -56,6 +57,7 @@ EDITABLE_FIELDS = {
     "default_top_k",
     "oauth_enabled",
     "oauth_issuer_url",
+    "oauth_public_port",
     "oauth_loopback_bypass",
     "oauth_tailscale_identity_bypass",
     "mcp_allowed_hosts",
@@ -77,6 +79,7 @@ SECRET_FIELDS = {
 STRUCTURAL_FIELDS = {
     "api_host", "api_port", "rest_allowed_hosts", "qdrant_url", "bm25_backend", "oauth_enabled",
     "oauth_issuer_url", "oauth_loopback_bypass", "oauth_tailscale_identity_bypass",
+    "oauth_public_port",
     "mcp_allowed_hosts", "mcp_allowed_origins",
 }
 
@@ -125,6 +128,8 @@ class Settings:
     # tailnet with no token (network-trust); OAuth gates proxied /mcp traffic.
     oauth_enabled: bool = False
     oauth_issuer_url: str | None = None
+    # Public proxies use this separate loopback listener.
+    oauth_public_port: int = 8766
     # Preserve trusted direct-to-loopback MCP clients while OAuth protects
     # requests that traversed a proxy. The bypass is allowed only when the peer
     # socket is loopback and neither standard forwarding header is present.
@@ -221,7 +226,7 @@ def load_settings() -> Settings:
         if env_key in os.environ:
             val = os.environ[env_key]
             if attr in {"api_port", "default_top_k", "backup_weekday", "backup_retention",
-                        "thread_pool_size", "ollama_num_batch"}:
+                        "thread_pool_size", "ollama_num_batch", "oauth_public_port"}:
                 val = int(val)
             elif attr in {
                 "oauth_enabled", "oauth_loopback_bypass",
@@ -343,6 +348,10 @@ def validate_settings(settings: Settings) -> None:
     _validate_url("oauth_issuer_url", settings.oauth_issuer_url)
     if not 1 <= int(settings.api_port) <= 65535:
         raise ConfigError("api_port must be between 1 and 65535")
+    if not 1 <= int(settings.oauth_public_port) <= 65535:
+        raise ConfigError("oauth_public_port must be between 1 and 65535")
+    if settings.oauth_enabled and settings.oauth_public_port == settings.api_port:
+        raise ConfigError("OAuth public and private listeners must use different ports")
     if int(settings.default_top_k) <= 0:
         raise ConfigError("default_top_k must be positive")
     if settings.ollama_num_batch is not None and int(settings.ollama_num_batch) <= 0:
@@ -439,7 +448,7 @@ def update_config(
     for name, value in updates.items():
         if name in {
             "api_port", "default_top_k", "backup_weekday", "backup_retention",
-            "ollama_num_batch",
+            "ollama_num_batch", "oauth_public_port",
         } and not isinstance(value, bool):
             try:
                 value = int(value)

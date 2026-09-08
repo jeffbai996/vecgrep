@@ -2212,6 +2212,10 @@ def _is_direct_loopback_mcp(scope: dict) -> bool:
     bypass, never enable it. Missing/malformed peer data and any forwarding
     marker fail closed into OAuth.
     """
+    from ..backend.auth.ingress import PRIVATE_INGRESS
+
+    if scope.get(PRIVATE_INGRESS) is not True:
+        return False
     if scope.get("type") != "http" or scope.get("path") != "/":
         return False
     if not _has_loopback_peer(scope):

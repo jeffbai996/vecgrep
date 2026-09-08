@@ -1048,6 +1048,14 @@ def serve(host: str | None, port: int | None, reload: bool, open_browser: bool) 
     actual_host = host or s.api_host
     actual_port = port or s.api_port
     _require_safe_serve_bind(actual_host, s.api_token)
+    if s.oauth_enabled and actual_port == s.oauth_public_port:
+        raise click.ClickException("OAuth public and private listeners must use different ports")
+    # Keep the accepted socket and application ingress policy in agreement,
+    # including OAuth-off --port overrides and reload child processes.
+    os.environ["VECGREP_API_PORT"] = str(actual_port)
+    from ..backend.config import reset_settings
+
+    reset_settings()
     if open_browser:
         import threading
         import webbrowser
@@ -1059,6 +1067,12 @@ def serve(host: str | None, port: int | None, reload: bool, open_browser: bool) 
     # connection axed before the registry-write response is delivered.
     # The server side completes the work but the CLI sees httpx.ReadTimeout
     # and the registry never records the new corpus. Bump to 15 min.
+    if s.oauth_enabled:
+        from ..backend.http_server import serve_http
+
+        serve_http(host=actual_host, port=actual_port,
+                   public_port=s.oauth_public_port, reload=reload)
+        return
     uvicorn.run(
         "vecgrep.backend.main:app",
         host=actual_host,

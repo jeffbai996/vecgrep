@@ -510,6 +510,16 @@ footer {{ margin: 16px 4px 0; display: flex; justify-content: space-between; fon
             # matched earlier and never reach this.
             return no_frontend()
 
+    from .auth.ingress import OAuthIngressMiddleware
+    from .config import get_settings
+
+    settings = get_settings()
+    app.add_middleware(
+        OAuthIngressMiddleware,
+        private_port=settings.api_port,
+        public_port=settings.oauth_public_port,
+        oauth_ready=bool(settings.oauth_enabled and settings.oauth_issuer_url and mcp_http_app),
+    )
     return app
 
 
