@@ -1402,8 +1402,21 @@ def cache_clear(identity: str | None, yes: bool) -> None:
 @cache.command("sweep")
 @click.option("--dry-run", is_flag=True, help="Report what would be deleted; delete nothing.")
 @click.option("--identity", default=None, help="Only sweep this identity.")
+@click.option(
+    "--max-delete-fraction",
+    type=float,
+    default=None,
+    help="Abort (deleting nothing) if the sweep would remove more than this "
+    "fraction of rows. Rail for unattended runs; a keep-set built during a "
+    "corpus rebuild makes most of the cache look orphaned.",
+)
 @click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
-def cache_sweep(dry_run: bool, identity: str | None, json_out: bool) -> None:
+def cache_sweep(
+    dry_run: bool,
+    identity: str | None,
+    max_delete_fraction: float | None,
+    json_out: bool,
+) -> None:
     """Delete cached vectors that no registered corpus references.
 
     The keep-set is derived from qdrant (every chunk text every live corpus
@@ -1415,7 +1428,11 @@ def cache_sweep(dry_run: bool, identity: str | None, json_out: bool) -> None:
     from ..backend.service import VecgrepService
 
     svc = VecgrepService()
-    rep = svc.cache_sweep(dry_run=dry_run, identities=[identity] if identity else None)
+    rep = svc.cache_sweep(
+        dry_run=dry_run,
+        identities=[identity] if identity else None,
+        max_delete_fraction=max_delete_fraction,
+    )
     if json_out:
         click.echo(json.dumps(rep, indent=2))
         return

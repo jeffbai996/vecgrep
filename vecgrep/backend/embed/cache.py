@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -22,6 +23,14 @@ from array import array
 from pathlib import Path
 
 from .base import EmbedBackend
+
+logger = logging.getLogger(__name__)
+
+# Warn while there is still time to act. The cap comment below documents the
+# failure mode -- a cap below the corpus size turns a repair into a full
+# re-embed -- but until 2026-09-08 nothing watched the approach: the cache was
+# found at 83% of cap with the corpus still growing.
+_CAP_WARN_FRACTION = 0.9
 
 
 _SCHEMA = """
@@ -126,6 +135,7 @@ class EmbedCache:
         self._lock = threading.Lock()
         # Resolved once per instance so tests can set the env before construction.
         self._max_rows = _max_rows()
+        self._cap_warned = False
 
     def _migrate_last_used(self) -> None:
         """Add the LRU column to a cache created before it existed.
@@ -238,9 +248,30 @@ class EmbedCache:
         if self._max_rows <= 0:
             return
         (count,) = self._conn.execute("SELECT COUNT(*) FROM embed_cache").fetchone()
+        threshold = self._max_rows * _CAP_WARN_FRACTION
+        if count >= threshold:
+            if not self._cap_warned:
+                self._cap_warned = True
+                logger.warning(
+                    "embed cache at %d rows, %.0f%% of VECGREP_EMBED_CACHE_MAX_ROWS=%d; "
+                    "a cap below the corpus size turns a repair into a full re-embed -- "
+                    "raise it before it binds",
+                    count,
+                    100.0 * count / self._max_rows,
+                    self._max_rows,
+                )
+        else:
+            self._cap_warned = False
         overage = count - self._max_rows
         if overage <= 0:
             return
+        logger.warning(
+            "embed cache over cap: evicting %d coldest of %d rows "
+            "(VECGREP_EMBED_CACHE_MAX_ROWS=%d)",
+            overage,
+            count,
+            self._max_rows,
+        )
         self._conn.execute(
             "DELETE FROM embed_cache WHERE rowid IN "
             "(SELECT rowid FROM embed_cache ORDER BY last_used ASC, rowid ASC LIMIT ?)",
@@ -308,6 +339,7 @@ class EmbedCache:
         *,
         identities: list[str] | None = None,
         dry_run: bool = False,
+        max_delete_fraction: float | None = None,
     ) -> dict[str, int]:
         """Delete every row whose (identity, sha) is not in `keep`.
 
@@ -316,31 +348,59 @@ class EmbedCache:
         entirely orphaned. `identities` restricts the sweep to those
         identities; default is every identity present. Returns
         {identity: rows deleted (or would be, under dry_run)}.
+
+        `max_delete_fraction` is the rail for unattended runs: a keep-set built
+        while a corpus is empty or mid-rebuild makes most of the cache look
+        orphaned, and sweeping at that moment destroys exactly the vectors
+        that make the rebuild cheap. When the scoped deletion would exceed the
+        fraction, the sweep aborts loudly having deleted nothing. Dry runs are
+        exempt -- they are how the damage gets investigated.
         """
         if self._read_only and not dry_run:
             raise RuntimeError("embed cache is read-only")
         out: dict[str, int] = {}
+        victims_by_ident: dict[str, list[str]] = {}
         with self._lock:
             present = [r[0] for r in self._conn.execute(
                 "SELECT DISTINCT identity FROM embed_cache").fetchall()]
+            scoped_rows = 0
             for ident in present:
                 if identities is not None and ident not in identities:
                     continue
                 keep_shas = keep.get(ident, set())
                 cur = self._conn.execute(
                     "SELECT text_sha FROM embed_cache WHERE identity = ?", (ident,))
-                victims = [row[0] for row in cur.fetchall() if row[0] not in keep_shas]
+                shas = [row[0] for row in cur.fetchall()]
+                scoped_rows += len(shas)
+                victims = [s for s in shas if s not in keep_shas]
                 out[ident] = len(victims)
-                if dry_run or not victims:
-                    continue
-                for i in range(0, len(victims), 500):
-                    part = victims[i:i + 500]
-                    self._conn.execute(
-                        f"DELETE FROM embed_cache WHERE identity = ? AND text_sha IN "
-                        f"({','.join('?' * len(part))})",
-                        [ident, *part],
-                    )
-                self._conn.commit()
+                victims_by_ident[ident] = victims
+            total_victims = sum(len(v) for v in victims_by_ident.values())
+            if (
+                not dry_run
+                and max_delete_fraction is not None
+                and scoped_rows
+                and total_victims / scoped_rows > max_delete_fraction
+            ):
+                raise RuntimeError(
+                    f"sweep would delete {total_victims} of {scoped_rows} rows "
+                    f"({total_victims / scoped_rows:.0%}), over the "
+                    f"max delete fraction {max_delete_fraction:.0%}; refusing. "
+                    "If the corpora really did shrink this much, re-run without "
+                    "the limit after checking them."
+                )
+            if not dry_run:
+                for ident, victims in victims_by_ident.items():
+                    if not victims:
+                        continue
+                    for i in range(0, len(victims), 500):
+                        part = victims[i:i + 500]
+                        self._conn.execute(
+                            f"DELETE FROM embed_cache WHERE identity = ? AND text_sha IN "
+                            f"({','.join('?' * len(part))})",
+                            [ident, *part],
+                        )
+                    self._conn.commit()
         return {k: v for k, v in out.items() if v or dry_run}
 
     def clear(self, identity: str | None = None) -> int:

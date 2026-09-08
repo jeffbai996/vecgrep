@@ -2339,7 +2339,11 @@ class VecgrepService:
         return keep
 
     def cache_sweep(
-        self, *, dry_run: bool = False, identities: list[str] | None = None
+        self,
+        *,
+        dry_run: bool = False,
+        identities: list[str] | None = None,
+        max_delete_fraction: float | None = None,
     ) -> dict:
         """Delete cached vectors no registered corpus references.
 
@@ -2351,7 +2355,12 @@ class VecgrepService:
         if self._embed_cache is None:
             return {"kept": {}, "deleted": {}, "dry_run": dry_run}
         keep = self.cache_keep_set()
-        deleted = self._embed_cache.sweep(keep, identities=identities, dry_run=dry_run)
+        deleted = self._embed_cache.sweep(
+            keep,
+            identities=identities,
+            dry_run=dry_run,
+            max_delete_fraction=max_delete_fraction,
+        )
         return {
             "kept": {k: len(v) for k, v in keep.items()},
             "deleted": deleted,
