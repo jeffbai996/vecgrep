@@ -12,6 +12,7 @@ rather than block. These tests use a fake loader — no torch, no network.
 """
 import threading
 import time
+import types
 
 import pytest
 
@@ -106,6 +107,59 @@ def test_rerank_still_loads_synchronously_for_direct_callers(monkeypatch):
     monkeypatch.setattr(R, "_load", lambda name: _FakeModel())
     out = R.rerank("q", [("a", {"id": 1}), ("b", {"id": 2})], model_name="m")
     assert [p["id"] for _, p in out] == [2, 1]
+
+
+def test_cross_encoder_loads_in_float16_when_cuda_is_available(monkeypatch):
+    captured = {}
+    float16 = object()
+
+    class _FakeCrossEncoder:
+        def __init__(self, name, **kwargs):
+            captured["name"] = name
+            captured["kwargs"] = kwargs
+
+    fake_torch = types.SimpleNamespace(
+        float16=float16,
+        cuda=types.SimpleNamespace(is_available=lambda: True),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "sentence_transformers",
+        types.SimpleNamespace(CrossEncoder=_FakeCrossEncoder),
+    )
+    monkeypatch.setitem(__import__("sys").modules, "torch", fake_torch)
+
+    model = R._load("reranker")
+
+    assert isinstance(model, _FakeCrossEncoder)
+    assert captured == {
+        "name": "reranker",
+        "kwargs": {"model_kwargs": {"torch_dtype": float16}},
+    }
+
+
+def test_cross_encoder_keeps_default_dtype_without_cuda(monkeypatch):
+    captured = {}
+
+    class _FakeCrossEncoder:
+        def __init__(self, name, **kwargs):
+            captured["name"] = name
+            captured["kwargs"] = kwargs
+
+    fake_torch = types.SimpleNamespace(
+        float16=object(),
+        cuda=types.SimpleNamespace(is_available=lambda: False),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "sentence_transformers",
+        types.SimpleNamespace(CrossEncoder=_FakeCrossEncoder),
+    )
+    monkeypatch.setitem(__import__("sys").modules, "torch", fake_torch)
+
+    R._load("reranker")
+
+    assert captured == {"name": "reranker", "kwargs": {}}
 
 
 class _FakeModel:

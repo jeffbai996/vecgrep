@@ -25,6 +25,15 @@ def test_config_provenance_and_env_precedence(vg_home: Path, monkeypatch) -> Non
     assert config.config_provenance(settings)["embed_model"] == "default"
 
 
+def test_ollama_num_batch_loads_as_an_integer(vg_home: Path, monkeypatch) -> None:
+    monkeypatch.setenv("VECGREP_OLLAMA_NUM_BATCH", "2048")
+
+    settings = config.load_settings()
+
+    assert settings.ollama_num_batch == 2048
+    assert config.config_provenance(settings)["ollama_num_batch"] == "env"
+
+
 def test_update_config_is_atomic_and_preserves_unknown_keys(
     vg_home: Path, monkeypatch
 ) -> None:
@@ -47,6 +56,7 @@ def test_update_config_is_atomic_and_preserves_unknown_keys(
         ({"ollama_url": "ftp://host/model"}, "http or https"),
         ({"api_port": 70000}, "between 1 and 65535"),
         ({"default_top_k": 0}, "positive"),
+        ({"ollama_num_batch": 0}, "positive"),
         ({"embed_model": "  "}, "non-empty"),
         ({"oauth_enabled": True, "oauth_issuer_url": None}, "issuer"),
     ],
