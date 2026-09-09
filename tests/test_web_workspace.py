@@ -366,3 +366,13 @@ def test_health_detail_avoids_the_expensive_stats_walk() -> None:
     # it is avoided.
     assert ".corpus_stats(" not in body, "the health page walks every payload"
     assert "list_corpora" in body
+
+
+def test_the_view_lives_in_the_url() -> None:
+    """A tab you cannot link to is a tab you have to describe over Discord.
+    The view was component state, so /#health could not be sent, bookmarked or
+    reloaded into (Jeff 2026-09-09, asking for health at a glance)."""
+    app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
+    assert "viewFromHash" in app, "the view does not read the URL"
+    assert "hashchange" in app, "back/forward and a hand-edited hash do nothing"
+    assert "window.location.hash = view" in app, "the URL never follows the view"

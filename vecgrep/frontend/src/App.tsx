@@ -23,8 +23,20 @@ import {
   Tuning,
 } from "./tuning";
 
+const VIEWS = ["search", "timeline", "compare", "browse", "health"] as const;
+type View = (typeof VIEWS)[number];
+
+function viewFromHash(): View {
+  const raw = (typeof window === "undefined" ? "" : window.location.hash)
+    .replace(/^#\/?/, "");
+  return (VIEWS as readonly string[]).includes(raw) ? (raw as View) : "search";
+}
+
 export default function App() {
-  const [view, setView] = useState<"search" | "timeline" | "compare" | "browse" | "health">("search");
+  // The view lives in the URL hash so a tab can be linked, bookmarked and
+  // reopened where you left it. It was component state only, which meant
+  // /#health could not be sent to anyone or reloaded into.
+  const [view, setView] = useState<View>(viewFromHash);
   const [corpora, setCorpora] = useState<Corpus[]>([]);
   const [corporaLoading, setCorporaLoading] = useState(true);
   const [corporaError, setCorporaError] = useState<string | null>(null);
@@ -73,6 +85,17 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (viewFromHash() !== view) window.location.hash = view;
+  }, [view]);
+
+  // Back/forward, and a hash edited by hand.
+  useEffect(() => {
+    const sync = () => setView(viewFromHash());
+    window.addEventListener("hashchange", sync);
+    return () => window.removeEventListener("hashchange", sync);
+  }, []);
+
+  useEffect(() => {
     refresh();
   }, []);
 
@@ -114,7 +137,7 @@ export default function App() {
         </div>
         <div className="flex items-center gap-3 min-w-0">
           <nav className="flex border border-zinc-800 rounded-lg p-0.5 overflow-x-auto" aria-label="Primary">
-            {(["search", "timeline", "compare", "browse", "health"] as const).map((item) => (
+            {VIEWS.map((item) => (
               <button
                 key={item}
                 onClick={() => setView(item)}
