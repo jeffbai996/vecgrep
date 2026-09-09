@@ -451,7 +451,16 @@ class SearchResult:
     @property
     def relevance_label(self) -> str:
         """Qualitative bucket so callers don't have to interpret percentages:
-        exact >= 95, strong >= 75, related >= 40, else weak."""
+        exact >= 95, strong >= 75, related >= 40, else weak.
+
+        A hit the dense channel never corroborated is "lexical-only" instead
+        of a confidence bucket. Its percentage is rank-relative within one
+        corpus (see BM25_DISPLAY_FLOOR/TOP), so the top lexical hit reads ~90
+        whether its absolute BM25 score is 7.5 or 0.067 — a bucket derived
+        from that number reads as semantic confidence it does not have.
+        """
+        if "bm25" in self.matched_by and "vector" not in self.matched_by:
+            return "lexical-only"
         pct = self.similarity_pct
         if pct >= 95.0:
             return "exact"
@@ -2290,12 +2299,22 @@ class VecgrepService:
             matched_by = sources.get(cid, [])
             # similarity_pct: pick the most informative signal for display.
             # When vector saw it, the calibrated cosine pct (after sigmoid)
-            # already reflects semantic relevance. When only BM25 saw it,
-            # use rank-relative scaling so a strong keyword hit doesn't read
-            # as "1.6% noise" (the raw RRF score for a BM25-only hit).
-            # When BOTH retrievers fired, we take the higher of the two —
-            # confirmation across modalities should boost confidence, not
-            # average it down.
+            # already reflects semantic relevance, and it is ABSOLUTE — so it
+            # is the number we show, even when BM25 also fired. When only BM25
+            # saw it, fall back to rank-relative scaling so a strong keyword
+            # hit doesn't read as "1.6% noise" (the raw RRF score for a
+            # BM25-only hit).
+            #
+            # This used to be max(cos_pct, bm_pct) on the theory that
+            # cross-modal confirmation should boost confidence. It does the
+            # opposite: bm_pct is normalized against the best BM25 score in
+            # THIS corpus for THIS query, so the top lexical hit always reads
+            # ~BM25_DISPLAY_TOP regardless of absolute score, and max() let
+            # that overwrite a weak semantic verdict. Measured 2026-09-09: one
+            # chunk displayed 90.0 "strong" in hybrid and 25.8 "weak" in
+            # vector mode — same chunk, same query. matched_by already tells a
+            # caller both retrievers fired; it does not need to be smuggled
+            # into the percentage.
             cos_pct = (
                 _cosine_to_pct(vector_score_by_id[cid], model=corpus.embed_model)
                 if cid in vector_score_by_id
@@ -2305,9 +2324,7 @@ class VecgrepService:
             if max_bm25 > 0 and cid in bm25_score_by_id:
                 ratio = bm25_score_by_id[cid] / max_bm25
                 bm_pct = BM25_DISPLAY_FLOOR + (BM25_DISPLAY_TOP - BM25_DISPLAY_FLOOR) * ratio
-            if cos_pct is not None and bm_pct is not None:
-                pct = max(cos_pct, bm_pct)
-            elif cos_pct is not None:
+            if cos_pct is not None:
                 pct = cos_pct
             elif bm_pct is not None:
                 pct = bm_pct
