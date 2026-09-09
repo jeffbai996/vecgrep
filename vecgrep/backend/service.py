@@ -22,7 +22,7 @@ import weakref
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 from .config import Settings, get_settings
 from .embed import EmbedBackend, EmbedBackendError, get_embed_backend
@@ -107,6 +107,19 @@ CHUNKERS: dict[str, type[Chunker]] = {
 
 SearchMode = Literal["hybrid", "vector", "bm25"]
 DEFAULT_MODE: SearchMode = "hybrid"
+# Single source of truth for mode validation. An unrecognized mode used to
+# fall through every `if mode in (...)` branch in _search_one_locked and land
+# in the RRF block with two empty retriever dicts, returning [] — which a
+# caller cannot distinguish from "no results exist" and will report as a
+# confident absence. Unknown modes raise instead.
+SEARCH_MODES: frozenset[str] = frozenset(get_args(SearchMode))
+
+
+def _validate_search_mode(mode: str) -> None:
+    """Raise on an unrecognized search mode rather than returning []."""
+    if mode not in SEARCH_MODES:
+        known = ", ".join(sorted(SEARCH_MODES))
+        raise CorpusError(f"Unknown search mode: {mode!r} (known modes: {known})")
 
 
 @dataclass(frozen=True)
@@ -1112,6 +1125,7 @@ class VecgrepService:
         corpus_names: list[str] | None = None,
     ) -> SearchOutcome:
         started = time.monotonic()
+        _validate_search_mode(mode)
         top_k = top_k or self.settings.default_top_k
         if expand_aliases:
             # Entity alias expansion (user-supplied map, outside the repo;
