@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import math
 
+import os
+
 import httpx
 
 from .base import EmbedBackend, EmbedBackendError
@@ -56,6 +58,14 @@ class OllamaBackend(EmbedBackend):
         payload = {"model": self.model, "input": input_, "truncate": True}
         if self.num_batch is not None:
             payload["options"] = {"num_batch": self.num_batch}
+        # Ollama's default keep_alive is 5 minutes, so the first embed after
+        # any quiet gap paid a cold model load — measured 2.13s against a 2.0s
+        # caller budget, which read as an outage (2026-09-09). Pin the model;
+        # an explicit unload (the memory-relief watcher's job) still wins.
+        # Empty string opts out and leaves ollama's own default in force.
+        keep_alive = os.environ.get("VECGREP_OLLAMA_KEEP_ALIVE", "24h")
+        if keep_alive:
+            payload["keep_alive"] = keep_alive
         return payload
 
     @staticmethod

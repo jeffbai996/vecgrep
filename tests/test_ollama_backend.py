@@ -272,3 +272,42 @@ def test_batch_connect_error_still_hard_fails() -> None:
         assert "Could not reach Ollama" in str(e)
     else:
         raise AssertionError("an unreachable backend must not be swallowed")
+
+
+def test_keep_alive_sent_by_default(monkeypatch) -> None:
+    """Ollama's default keep_alive is 5 minutes, so the first embed after any
+    quiet gap paid a ~2s cold model load — measured 2.13s against the squad
+    recall hook's 2.0s budget, which logged it as vecgrep being down
+    (2026-09-09). The backend pins the model instead of losing that race."""
+    monkeypatch.delenv("VECGREP_OLLAMA_KEEP_ALIVE", raising=False)
+    seen: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        seen["body"] = _json.loads(req.content)
+        return httpx.Response(200, json={"embeddings": [[0.1] * 1024]})
+
+    b = _backend_with_handler(handler)
+    b.embed(["hello"])
+    assert seen["body"]["keep_alive"] == "24h"
+
+
+def test_keep_alive_env_override_and_disable(monkeypatch) -> None:
+    seen: list[dict] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        seen.append(_json.loads(req.content))
+        return httpx.Response(200, json={"embeddings": [[0.1] * 1024]})
+
+    monkeypatch.setenv("VECGREP_OLLAMA_KEEP_ALIVE", "45m")
+    _backend_with_handler(handler).embed(["a"])
+    assert seen[-1]["keep_alive"] == "45m"
+
+    # Empty string opts out entirely: the field is absent, ollama's own
+    # default applies.
+    monkeypatch.setenv("VECGREP_OLLAMA_KEEP_ALIVE", "")
+    _backend_with_handler(handler).embed(["b"])
+    assert "keep_alive" not in seen[-1]
