@@ -22,7 +22,7 @@ import weakref
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 from .config import Settings, get_settings
 from .embed import EmbedBackend, EmbedBackendError, get_embed_backend
@@ -107,6 +107,19 @@ CHUNKERS: dict[str, type[Chunker]] = {
 
 SearchMode = Literal["hybrid", "vector", "bm25"]
 DEFAULT_MODE: SearchMode = "hybrid"
+# Single source of truth for mode validation. An unrecognized mode used to
+# fall through every `if mode in (...)` branch in _search_one_locked and land
+# in the RRF block with two empty retriever dicts, returning [] — which a
+# caller cannot distinguish from "no results exist" and will report as a
+# confident absence. Unknown modes raise instead.
+SEARCH_MODES: frozenset[str] = frozenset(get_args(SearchMode))
+
+
+def _validate_search_mode(mode: str) -> None:
+    """Raise on an unrecognized search mode rather than returning []."""
+    if mode not in SEARCH_MODES:
+        known = ", ".join(sorted(SEARCH_MODES))
+        raise CorpusError(f"Unknown search mode: {mode!r} (known modes: {known})")
 
 
 @dataclass(frozen=True)
@@ -438,7 +451,16 @@ class SearchResult:
     @property
     def relevance_label(self) -> str:
         """Qualitative bucket so callers don't have to interpret percentages:
-        exact >= 95, strong >= 75, related >= 40, else weak."""
+        exact >= 95, strong >= 75, related >= 40, else weak.
+
+        A hit the dense channel never corroborated is "lexical-only" instead
+        of a confidence bucket. Its percentage is rank-relative within one
+        corpus (see BM25_DISPLAY_FLOOR/TOP), so the top lexical hit reads ~90
+        whether its absolute BM25 score is 7.5 or 0.067 — a bucket derived
+        from that number reads as semantic confidence it does not have.
+        """
+        if "bm25" in self.matched_by and "vector" not in self.matched_by:
+            return "lexical-only"
         pct = self.similarity_pct
         if pct >= 95.0:
             return "exact"
@@ -1112,6 +1134,7 @@ class VecgrepService:
         corpus_names: list[str] | None = None,
     ) -> SearchOutcome:
         started = time.monotonic()
+        _validate_search_mode(mode)
         top_k = top_k or self.settings.default_top_k
         if expand_aliases:
             # Entity alias expansion (user-supplied map, outside the repo;
@@ -2276,12 +2299,22 @@ class VecgrepService:
             matched_by = sources.get(cid, [])
             # similarity_pct: pick the most informative signal for display.
             # When vector saw it, the calibrated cosine pct (after sigmoid)
-            # already reflects semantic relevance. When only BM25 saw it,
-            # use rank-relative scaling so a strong keyword hit doesn't read
-            # as "1.6% noise" (the raw RRF score for a BM25-only hit).
-            # When BOTH retrievers fired, we take the higher of the two —
-            # confirmation across modalities should boost confidence, not
-            # average it down.
+            # already reflects semantic relevance, and it is ABSOLUTE — so it
+            # is the number we show, even when BM25 also fired. When only BM25
+            # saw it, fall back to rank-relative scaling so a strong keyword
+            # hit doesn't read as "1.6% noise" (the raw RRF score for a
+            # BM25-only hit).
+            #
+            # This used to be max(cos_pct, bm_pct) on the theory that
+            # cross-modal confirmation should boost confidence. It does the
+            # opposite: bm_pct is normalized against the best BM25 score in
+            # THIS corpus for THIS query, so the top lexical hit always reads
+            # ~BM25_DISPLAY_TOP regardless of absolute score, and max() let
+            # that overwrite a weak semantic verdict. Measured 2026-09-09: one
+            # chunk displayed 90.0 "strong" in hybrid and 25.8 "weak" in
+            # vector mode — same chunk, same query. matched_by already tells a
+            # caller both retrievers fired; it does not need to be smuggled
+            # into the percentage.
             cos_pct = (
                 _cosine_to_pct(vector_score_by_id[cid], model=corpus.embed_model)
                 if cid in vector_score_by_id
@@ -2291,9 +2324,7 @@ class VecgrepService:
             if max_bm25 > 0 and cid in bm25_score_by_id:
                 ratio = bm25_score_by_id[cid] / max_bm25
                 bm_pct = BM25_DISPLAY_FLOOR + (BM25_DISPLAY_TOP - BM25_DISPLAY_FLOOR) * ratio
-            if cos_pct is not None and bm_pct is not None:
-                pct = max(cos_pct, bm_pct)
-            elif cos_pct is not None:
+            if cos_pct is not None:
                 pct = cos_pct
             elif bm_pct is not None:
                 pct = bm_pct
@@ -3591,10 +3622,33 @@ _MODEL_CALIBRATION: dict[str, tuple[float, float]] = {
 }
 
 
+def _calibration_base_name(model: str) -> str:
+    """The calibration key for an embed model ref, tag stripped.
+
+    Ollama model refs carry a `:tag` suffix that selects runtime options, not
+    a different model — `bge-m3:batch4k` embeds identically to `bge-m3`. The
+    calibration table is keyed by model, so the tag must not participate in
+    the lookup.
+    """
+    return model.split(":", 1)[0]
+
+
 def _calibration_for(model: str | None) -> tuple[float, float]:
-    """(center, slope) for an embed model, falling back to module defaults."""
-    if model and model in _MODEL_CALIBRATION:
-        return _MODEL_CALIBRATION[model]
+    """(center, slope) for an embed model, falling back to module defaults.
+
+    Exact ref first (so a tagged ref can be pinned deliberately), then the
+    tag-stripped base name. An unmatched tag silently fell back to the
+    nomic-ish defaults, whose 0.66 center sits ABOVE almost every bge-m3
+    cosine — that pushed `_cosine_floor` to 0.56 and discarded nearly the
+    whole dense channel before fusion. Measured 2026-09-09 on a two-corpus
+    install: a plain-prose query returned 0 vector hits under the fallback.
+    """
+    if model:
+        if model in _MODEL_CALIBRATION:
+            return _MODEL_CALIBRATION[model]
+        base = _calibration_base_name(model)
+        if base in _MODEL_CALIBRATION:
+            return _MODEL_CALIBRATION[base]
     return CALIBRATION_CENTER, CALIBRATION_SLOPE
 
 
