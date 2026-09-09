@@ -67,6 +67,10 @@ export type SearchResponse = {
   hits: SearchHit[];
   stubs: SearchStub[];
   calibration?: Calibration;
+  /** Server-side wall time. A slow retrieval and a slow network look the same
+   *  from here; this is the server's own figure, so the difference between it
+   *  and how long the page felt is the round trip. */
+  took_ms?: number | null;
 };
 
 export type SearchOptions = {

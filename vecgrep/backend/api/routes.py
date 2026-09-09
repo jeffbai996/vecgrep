@@ -210,6 +210,13 @@ def _hit_out(r) -> SearchHit:
 
 @router.post("/search", response_model=SearchResponse)
 def search(req: SearchRequest) -> SearchResponse:
+    import time as _time
+
+    started = _time.monotonic()
+
+    def took() -> int:
+        return round((_time.monotonic() - started) * 1000)
+
     svc = _service()
     if req.mode not in ("hybrid", "vector", "bm25"):
         raise HTTPException(status_code=400, detail=f"Unknown search mode: {req.mode}")
@@ -248,6 +255,7 @@ def search(req: SearchRequest) -> SearchResponse:
                 )
                 warnings = []
             return SearchResponse(
+                took_ms=took(),
                 hits=[_hit_out(r) for r in full],
                 stubs=[
                     SearchStub(
@@ -281,6 +289,7 @@ def search(req: SearchRequest) -> SearchResponse:
     except RerankerError as e:
         raise HTTPException(status_code=503, detail=str(e))
     return SearchResponse(
+        took_ms=took(),
         hits=[_hit_out(r) for r in outcome.results],
         calibration=Calibration(**svc.calibration(req.corpus)),
         warnings=[SearchWarningOut(**asdict(w)) for w in outcome.warnings],

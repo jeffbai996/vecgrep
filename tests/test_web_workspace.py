@@ -376,3 +376,23 @@ def test_the_view_lives_in_the_url() -> None:
     assert "viewFromHash" in app, "the view does not read the URL"
     assert "hashchange" in app, "back/forward and a hand-edited hash do nothing"
     assert "window.location.hash = view" in app, "the URL never follows the view"
+
+
+def test_search_reports_its_own_wall_time() -> None:
+    """Jeff 2026-09-09: "it took like over a minute to load. we should include
+    load time in seconds on the vecgrep results tbh so i can debug a bit
+    better". Server-side, so a slow retrieval can be told apart from a slow
+    round trip — which from a browser look identical."""
+    schemas = (
+        FRONTEND.parent.parent / "backend" / "api" / "schemas.py"
+    ).read_text(encoding="utf-8")
+    routes = (
+        FRONTEND.parent.parent / "backend" / "api" / "routes.py"
+    ).read_text(encoding="utf-8")
+    client = (FRONTEND / "api.ts").read_text(encoding="utf-8")
+    results = (FRONTEND / "components" / "ResultList.tsx").read_text(encoding="utf-8")
+
+    assert "took_ms" in schemas, "the response cannot carry a time"
+    # Both return paths: budget mode and the ordinary one.
+    assert routes.count("took_ms=took()") >= 2, "a search path returns no time"
+    assert "took_ms" in client and "took_ms" in results, "the page never shows it"
