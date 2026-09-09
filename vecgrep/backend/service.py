@@ -3591,10 +3591,33 @@ _MODEL_CALIBRATION: dict[str, tuple[float, float]] = {
 }
 
 
+def _calibration_base_name(model: str) -> str:
+    """The calibration key for an embed model ref, tag stripped.
+
+    Ollama model refs carry a `:tag` suffix that selects runtime options, not
+    a different model — `bge-m3:batch4k` embeds identically to `bge-m3`. The
+    calibration table is keyed by model, so the tag must not participate in
+    the lookup.
+    """
+    return model.split(":", 1)[0]
+
+
 def _calibration_for(model: str | None) -> tuple[float, float]:
-    """(center, slope) for an embed model, falling back to module defaults."""
-    if model and model in _MODEL_CALIBRATION:
-        return _MODEL_CALIBRATION[model]
+    """(center, slope) for an embed model, falling back to module defaults.
+
+    Exact ref first (so a tagged ref can be pinned deliberately), then the
+    tag-stripped base name. An unmatched tag silently fell back to the
+    nomic-ish defaults, whose 0.66 center sits ABOVE almost every bge-m3
+    cosine — that pushed `_cosine_floor` to 0.56 and discarded nearly the
+    whole dense channel before fusion. Measured 2026-09-09 on a two-corpus
+    install: a plain-prose query returned 0 vector hits under the fallback.
+    """
+    if model:
+        if model in _MODEL_CALIBRATION:
+            return _MODEL_CALIBRATION[model]
+        base = _calibration_base_name(model)
+        if base in _MODEL_CALIBRATION:
+            return _MODEL_CALIBRATION[base]
     return CALIBRATION_CENTER, CALIBRATION_SLOPE
 
 
