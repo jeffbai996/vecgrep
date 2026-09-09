@@ -487,6 +487,14 @@ footer {{ margin: 16px 4px 0; display: flex; justify-content: space-between; fon
         def root() -> FileResponse:
             return FileResponse(FRONTEND_DIR / "index.html")
 
+        # Only /assets is mounted, so anything else at the root falls through
+        # to the SPA catch-all and comes back as index.html. The browser then
+        # asks for /favicon.svg and is handed a page (2026-09-09).
+        @app.get("/favicon.svg", include_in_schema=False)
+        def favicon() -> FileResponse:
+            return FileResponse(FRONTEND_DIR / "favicon.svg",
+                                media_type="image/svg+xml")
+
         @app.get("/{full_path:path}")
         def spa(full_path: str) -> FileResponse:
             # SPA fallback — any unknown path serves index.html so React

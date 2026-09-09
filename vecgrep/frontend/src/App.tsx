@@ -4,6 +4,7 @@ import SearchBar from "./components/SearchBar";
 import IndexPanel from "./components/IndexPanel";
 import CorpusList from "./components/CorpusList";
 import CorpusHealth from "./components/CorpusHealth";
+import InstanceHealth from "./components/InstanceHealth";
 import ResultList from "./components/ResultList";
 import Legend from "./components/Legend";
 import HowSearchWorks from "./components/HowSearchWorks";
@@ -23,7 +24,7 @@ import {
 } from "./tuning";
 
 export default function App() {
-  const [view, setView] = useState<"search" | "timeline" | "compare" | "browse">("search");
+  const [view, setView] = useState<"search" | "timeline" | "compare" | "browse" | "health">("search");
   const [corpora, setCorpora] = useState<Corpus[]>([]);
   const [corporaLoading, setCorporaLoading] = useState(true);
   const [corporaError, setCorporaError] = useState<string | null>(null);
@@ -113,7 +114,7 @@ export default function App() {
         </div>
         <div className="flex items-center gap-3 min-w-0">
           <nav className="flex border border-zinc-800 rounded-lg p-0.5 overflow-x-auto" aria-label="Primary">
-            {(["search", "timeline", "compare", "browse"] as const).map((item) => (
+            {(["search", "timeline", "compare", "browse", "health"] as const).map((item) => (
               <button
                 key={item}
                 onClick={() => setView(item)}
@@ -215,6 +216,7 @@ export default function App() {
           <section className="col-span-12 md:col-span-9 xl:col-span-10 space-y-4">
             {view === "timeline" && <TimelinePanel corpus={selectedCorpus} corpusCount={corpora.length} />}
             {view === "compare" && <ComparePanel corpus={selectedCorpus} />}
+            {view === "health" && <InstanceHealth />}
             {view === "browse" && (
               <BrowsePanel
                 corpus={selectedCorpus}

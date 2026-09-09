@@ -464,6 +464,136 @@ def compare(req: dict) -> dict:
     return out
 
 
+@router.get("/health/detail")
+def instance_health() -> dict:
+    """One snapshot of the whole instance, cheap enough to poll.
+
+    Deliberately NOT an extension of /api/health. That one is the public,
+    unauthenticated liveness probe and is exempt from api_token by design; this
+    reports corpus names, on-disk paths and process memory, so it belongs on
+    the authenticated router.
+
+    Deliberately NOT built on corpus_stats: that walks every payload in a
+    corpus, which is fine for one corpus on demand and hopeless for a page you
+    want to glance at. Everything here is a count the registry already holds, a
+    file size, a /proc read, or one trivial query we time ourselves.
+
+    Host-agnostic on purpose. This is an OSS project that happens to run on a
+    box with systemd and cgroups; it reports on ITS OWN process and its own
+    data, and says nothing about units, disks or hosts it cannot portably know.
+    """
+    import os
+    import sqlite3
+    import time
+    import urllib.error
+    import urllib.request
+    from pathlib import Path
+
+    settings = get_settings()
+    svc = _service()
+    checks: list[dict] = []
+
+    def check(name: str, ok: bool | None, detail: str) -> None:
+        checks.append({"name": name, "ok": ok, "detail": detail})
+
+    # ---- corpora -------------------------------------------------------
+    corpora = []
+    models: set[str] = set()
+    chunks = 0
+    for c in svc.list_corpora():
+        row = {"name": c.name, "documents": getattr(c, "doc_count", None),
+               "chunks": getattr(c, "chunk_count", None),
+               "embed_model": getattr(c, "embed_model", None),
+               "embed_backend": getattr(c, "embed_backend", None),
+               "dim": getattr(c, "dim", None)}
+        corpora.append(row)
+        chunks += row["chunks"] or 0
+        if row["embed_model"]:
+            models.add(str(row["embed_model"]))
+    # Mixed embedding models across corpora is the fault that silently degrades
+    # hybrid search for weeks and reads as "search got worse".
+    check("embedding model", len(models) <= 1,
+          next(iter(models)) if len(models) == 1
+          else (f"{len(models)} different models: {', '.join(sorted(models))}"
+                if models else "no corpora indexed"))
+    check("corpora", bool(corpora), f"{len(corpora)} corpora, {chunks:,} chunks")
+
+    # ---- embedding cache ----------------------------------------------
+    cache = {"path": None, "bytes": None, "rows": None, "coverage_pct": None}
+    # `home` is vecgrep's data root; the cache lives beside the vector store.
+    home = getattr(settings, "home", None)
+    cache_path = Path(home) / "embed_cache.db" if home else None
+    if cache_path and cache_path.is_file():
+        cache["path"] = str(cache_path)
+        cache["bytes"] = cache_path.stat().st_size
+        try:
+            con = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True, timeout=2)
+            cache["rows"] = con.execute("SELECT count(*) FROM embed_cache").fetchone()[0]
+            con.close()
+        except sqlite3.Error as exc:
+            check("embed cache", False, str(exc)[:80])
+        if cache["rows"] is not None and chunks:
+            cache["coverage_pct"] = round(100 * cache["rows"] / chunks, 1)
+            # Re-embedding is the expensive half of a rebuild; a cache that has
+            # fallen behind the index is the warning you want before, not after.
+            check("embed cache", cache["coverage_pct"] >= 80,
+                  f"{cache['rows']:,} embeddings, {cache['coverage_pct']}% of chunks")
+    else:
+        check("embed cache", None, "no cache file")
+
+    # ---- vector store ---------------------------------------------------
+    url = getattr(settings, "qdrant_url", "") or ""
+    if url:
+        started = time.monotonic()
+        try:
+            with urllib.request.urlopen(f"{url.rstrip('/')}/healthz", timeout=3):
+                check("vector store", True,
+                      f"reachable in {round((time.monotonic() - started) * 1000)} ms")
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            check("vector store", False, str(exc)[:80])
+
+    # ---- this process ---------------------------------------------------
+    process: dict = {}
+    try:
+        page = os.sysconf("SC_PAGE_SIZE")
+        fields = Path("/proc/self/statm").read_text().split()
+        process["rss_bytes"] = int(fields[1]) * page
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        with open("/proc/self/status", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("VmHWM:"):
+                    process["peak_rss_bytes"] = int(line.split()[1]) * 1024
+                    break
+    except OSError:
+        pass
+
+    # ---- one real query, timed -----------------------------------------
+    latency_ms = None
+    if corpora:
+        started = time.monotonic()
+        try:
+            svc.search("health check", corpus_name=corpora[0]["name"], top_k=1)
+            latency_ms = round((time.monotonic() - started) * 1000)
+            # A cold first query loads the model; this is a warm-path signal.
+            check("search", True, f"answered in {latency_ms} ms")
+        except Exception as exc:                       # noqa: BLE001
+            check("search", False, str(exc)[:80])
+
+    failing = [c["name"] for c in checks if c["ok"] is False]
+    return {
+        "ok": not failing,
+        "failing": failing,
+        "checks": checks,
+        "corpora": corpora,
+        "chunks": chunks,
+        "cache": cache,
+        "process": process,
+        "search_ms": latency_ms,
+    }
+
+
 @router.get("/stats/{corpus}")
 def corpus_stats(corpus: str) -> dict:
     """Corpus health snapshot (counts, date coverage, gaps, source sizes)."""

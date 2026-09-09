@@ -85,15 +85,12 @@ function SliderControl({
   onChange: (value: number) => void;
 }) {
   return (
-    <label className="block">
+    <label className="block" title={slider.help}>
       <span className="flex items-baseline justify-between gap-3">
         <span className="text-[11px] font-mono text-zinc-300">{slider.label}</span>
         <span className="text-[11px] font-mono text-zinc-100 tabular-nums">
           {slider.format(value)}
         </span>
-      </span>
-      <span className="mt-1 block text-[10px] leading-relaxed text-zinc-600">
-        {slider.help}
       </span>
       <input
         type="range"
@@ -149,10 +146,7 @@ export default function TuningPanel({
             <span className="font-mono text-xs text-zinc-600">{open ? "▾" : "▸"}</span>
             <span className="min-w-0">
               <span className="block text-[11px] font-mono uppercase tracking-wider text-zinc-300">
-                Score interpretation
-              </span>
-              <span className="mt-0.5 block truncate text-[10px] text-zinc-600">
-                How raw matches become percentages
+                Score tuning
               </span>
             </span>
           </span>
@@ -179,17 +173,6 @@ export default function TuningPanel({
 
       {open && (
         <div className="border-t border-zinc-800 p-3 sm:p-4 space-y-3">
-          <div className="rounded-lg border border-violet-900/50 bg-violet-950/15 p-3">
-            <p className="text-xs leading-relaxed text-zinc-400">
-              Search retrieval stays unchanged. This remaps raw signals into the
-              displayed percentages and result order, so the numbers match how
-              selective you want the result list to feel.
-            </p>
-            <p className="mt-1 text-[10px] font-mono text-zinc-600">
-              Deep rerank uses its own score while enabled.
-            </p>
-          </div>
-
           <section className="rounded-lg border border-sky-900/45 bg-sky-950/10 p-3">
             <div className="flex items-center justify-between gap-3">
               <h3 className="text-[10px] font-mono uppercase tracking-wider text-sky-400">
@@ -209,7 +192,7 @@ export default function TuningPanel({
                 </div>
               ))}
             </div>
-            <div className="mt-4 space-y-4">
+            <div className="mt-4 grid gap-x-5 gap-y-4 sm:grid-cols-2">
               {SEMANTIC_SLIDERS.map((slider) => (
                 <SliderControl
                   key={slider.key}
@@ -225,7 +208,7 @@ export default function TuningPanel({
             <h3 className="text-[10px] font-mono uppercase tracking-wider text-emerald-400">
               Keyword scoring
             </h3>
-            <div className="mt-3 space-y-4">
+            <div className="mt-3 grid gap-x-5 gap-y-4 sm:grid-cols-2">
               {KEYWORD_SLIDERS.map((slider) => (
                 <SliderControl
                   key={slider.key}
@@ -238,15 +221,15 @@ export default function TuningPanel({
           </section>
 
           <section className="rounded-lg border border-violet-900/45 bg-violet-950/10 p-3">
-            <div className="flex items-baseline justify-between gap-3">
+            <div
+              className="flex items-baseline justify-between gap-3"
+              title="Break close calls toward meaning or exact terms when both retrievers find a result."
+            >
               <h3 className="text-[10px] font-mono uppercase tracking-wider text-violet-400">
                 Hybrid balance
               </h3>
               <span className="text-[10px] font-mono text-zinc-400">{biasLabel}</span>
             </div>
-            <p className="mt-1 text-[10px] leading-relaxed text-zinc-600">
-              Break close calls toward meaning or exact terms when both retrievers find a result.
-            </p>
             <input
               type="range"
               min={-20}
@@ -264,14 +247,6 @@ export default function TuningPanel({
             </div>
           </section>
 
-          <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-[9px] font-mono text-zinc-700">
-            <span>
-              {customized
-                ? "Custom calibration is saved in this browser."
-                : "Automatic calibration follows the searched corpus model."}
-            </span>
-            <span>Changes apply instantly; no re-query.</span>
-          </div>
         </div>
       )}
     </div>

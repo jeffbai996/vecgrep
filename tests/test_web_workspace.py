@@ -265,20 +265,30 @@ def test_search_explainers_do_not_advertise_retired_models() -> None:
     assert "configured cross-encoder" in sidebar
 
 
-def test_score_tuning_explains_effect_and_automatic_mode() -> None:
+def test_score_tuning_names_its_controls_without_explaining_them() -> None:
     app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
     panel = (FRONTEND / "components" / "TuningPanel.tsx").read_text(
         encoding="utf-8"
     )
     tuning = (FRONTEND / "tuning.ts").read_text(encoding="utf-8")
 
-    assert "Score interpretation" in panel
-    assert "displayed percentages and result order" in panel
+    assert "Score tuning" in panel
     for section in ("Semantic scoring", "Keyword scoring", "Hybrid balance"):
         assert section in panel
     assert "Automatic" in panel and "Custom" in panel
     assert "onReset" in panel and "clearTuning" in app
     assert "localStorage.removeItem" in tuning
+    # The panel explains itself by working: a named control, a live number and
+    # the two words at each end of its track. The paragraphs that used to sit
+    # above and under the sliders are tooltips now (Jeff 2026-09-09, and the
+    # squad's no-explanatory-copy rule).
+    assert "title={slider.help}" in panel, "the help text lost its tooltip home"
+    for gone in ("Search retrieval stays unchanged",
+                 "How raw matches become percentages",
+                 "Changes apply instantly"):
+        assert gone not in panel, f"explanatory copy is back: {gone!r}"
+    # Two columns where there is room; the sliders used to stack one per row.
+    assert panel.count("sm:grid-cols-2") >= 2, "the slider rows do not pair up"
 
 
 def test_committed_web_bundle_has_no_private_companion_url() -> None:
@@ -290,3 +300,69 @@ def test_committed_web_bundle_has_no_private_companion_url() -> None:
     )
 
     assert ".ts.net" not in built
+
+
+def test_the_app_ships_a_favicon_and_serves_it() -> None:
+    """vecgrep had no icon at all — no link in the head, nothing on disk — so
+    every tab showed the browser's default globe. And only /assets is mounted,
+    so a file at the root falls through to the SPA catch-all and the browser
+    asking for /favicon.svg gets handed a page (Jeff 2026-09-09)."""
+    head = (FRONTEND.parent / "index.html").read_text(encoding="utf-8")
+    assert 'rel="icon"' in head and "favicon.svg" in head
+
+    icon = FRONTEND.parent / "public" / "favicon.svg"
+    assert icon.is_file(), "no favicon source"
+    svg = icon.read_text(encoding="utf-8")
+    assert svg.lstrip().startswith("<svg"), "favicon is not an svg"
+    assert 'viewBox="0 0 512 512"' in svg, "off the squad's 512 icon grid"
+
+    built = FRONTEND.parent / "dist" / "favicon.svg"
+    assert built.is_file(), "favicon did not make it into dist/"
+
+    main = (
+        FRONTEND.parent.parent / "backend" / "main.py"
+    ).read_text(encoding="utf-8")
+    assert '"/favicon.svg"' in main, (
+        "nothing serves /favicon.svg, so it falls through to the SPA catch-all "
+        "and the browser is handed index.html")
+
+
+def test_instance_health_is_a_page_not_a_question() -> None:
+    """Jeff 2026-09-09: "so that I can inspect vecgrep health at a glance
+    without having to ask yall". A Health view, backed by an endpoint that is
+    cheap enough to poll."""
+    app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
+    panel = (FRONTEND / "components" / "InstanceHealth.tsx").read_text(encoding="utf-8")
+    client = (FRONTEND / "api.ts").read_text(encoding="utf-8")
+    routes = (
+        FRONTEND.parent.parent / "backend" / "api" / "routes.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"health"' in app and "<InstanceHealth />" in app, "no Health view"
+    assert '"/api/health/detail"' in client
+    # NOT bolted onto /api/health: that one is the public, unauthenticated
+    # liveness probe and is exempt from api_token, while this reports corpus
+    # names, on-disk paths and process memory.
+    assert '@router.get("/health/detail")' in routes
+    assert '@public_router.get("/health")' in routes, "the public probe moved"
+
+    # The checks that matter, and the numbers behind them.
+    for signal in ("embedding model", "embed cache", "vector store", "search"):
+        assert signal in routes, f"health lost its {signal!r} check"
+    for shown in ("checks", "corpora", "cache", "process"):
+        assert shown in panel, f"the page does not render {shown}"
+
+
+def test_health_detail_avoids_the_expensive_stats_walk() -> None:
+    """corpus_stats iterates every payload in a corpus. Fine on demand for one
+    corpus, hopeless for a page you glance at, so the snapshot is built from
+    counts the registry already holds."""
+    routes = (
+        FRONTEND.parent.parent / "backend" / "api" / "routes.py"
+    ).read_text(encoding="utf-8")
+    body = routes[routes.index('@router.get("/health/detail")'):]
+    body = body[:body.index('@router.get("/stats/')]
+    # The call, not the word: the docstring names corpus_stats to explain why
+    # it is avoided.
+    assert ".corpus_stats(" not in body, "the health page walks every payload"
+    assert "list_corpora" in body
