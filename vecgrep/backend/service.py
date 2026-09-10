@@ -341,6 +341,21 @@ BM25_DISPLAY_TOP = 90.0
 # = better recall, marginal cost. 50 is a good default for small corpora.
 CANDIDATE_POOL = 50
 
+# How many candidates the cross-encoder is allowed to score in one search.
+#
+# Reranking only ever surfaces top_k, and a candidate sitting 200th on fusion
+# score is not a plausible winner -- scoring it is latency spent on an answer
+# nobody receives. Scoped to one corpus the fused pool IS CANDIDATE_POOL, so
+# this cap is inert; unscoped it is CANDIDATE_POOL per corpus, and a
+# seven-corpus fan-out sent ~350 pairs through the model (unscoped p50 873 ->
+# 2936 ms, round 4). Capping the head bounds that cost by the number of
+# corpora rather than scaling with it.
+#
+# The tail is NOT dropped -- it is returned below the reranked head in fusion
+# order. A latency cap must not shrink a result set. 0 or less disables the
+# cap (score everything), which is the pre-2026-09-10 behaviour.
+RERANK_POOL_MAX = int(os.environ.get("VECGREP_RERANK_POOL_MAX", CANDIDATE_POOL))
+
 # Vector noise floor. The vector retriever returns a full top-50 even when
 # nothing matches semantically -- those sub-noise hits then flood RRF. Drop any
 # vector hit whose cosine sits MARGIN below the model's calibration center,
@@ -2106,6 +2121,17 @@ class VecgrepService:
 
         if not candidates:
             return []
+        # Cap the cross-encoder's workload at the most plausible candidates.
+        # The pool arrives in fan-out order (corpus by corpus), NOT in global
+        # fusion order, so ranking by similarity_pct here is what makes "top
+        # N" mean anything -- slicing the arrival order would just hand the
+        # model the first corpora searched. similarity_pct is still the fused
+        # score at this point; _apply_rerank overwrites it below, which is
+        # precisely why the tail has to be split off BEFORE that happens.
+        tail: list[SearchResult] = []
+        if 0 < RERANK_POOL_MAX < len(candidates):
+            ordered = sorted(candidates, key=lambda r: r.similarity_pct, reverse=True)
+            candidates, tail = ordered[:RERANK_POOL_MAX], ordered[RERANK_POOL_MAX:]
         # rerank() takes (text, payload-ish) pairs. We pass each candidate's
         # chunk text + a dict that lets us reconstruct the SearchResult.
         pairs = [(c.chunk, c) for c in candidates]
@@ -2133,9 +2159,17 @@ class VecgrepService:
         # near-clones; selection order starts from the best hit, so the
         # reranked ordering survives for everything selected. Do NOT re-sort
         # by similarity_pct here (that would undo the rerank).
-        return mmr_select(
+        selected = mmr_select(
             out, top_k, key=lambda r: r.explain.get("rerank_score", 0.0)
         )
+        if tail and len(selected) < top_k:
+            # Backfill from the unscored tail, in fusion order. These carry no
+            # rerank_score and are NOT marked as reranked: the model never saw
+            # them, so claiming it did would misreport why they are here (and
+            # would let an unscored hit's calibrated-looking pct be compared
+            # against a real one). They sit strictly below the reranked head.
+            selected = selected + tail[:top_k - len(selected)]
+        return selected
 
     def _search_one(
         self,
