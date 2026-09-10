@@ -221,6 +221,7 @@ class RunConfig:
     decay_floor: float | None = None
     decay_half_life_days: float | None | str = "keep"    # per actual corpus, restored after
     bm25_weight_by_corpus: dict[str, float] = field(default_factory=dict)  # logical -> weight, restored after
+    unscoped: bool = False   # search with NO corpus argument (see run_config)
     notes: str = ""
 
 
@@ -265,13 +266,23 @@ def run_config(
     """Run every case under `cfg`. Returns {config, summary, cases, storage}."""
     results: list[CaseResult] = []
     actual_corpora = {c.corpus: cfg.corpora.get(c.corpus, c.corpus) for c in cases}
-    missing = [a for a in set(actual_corpora.values()) if not svc.registry.has(a)]
-    if missing:
-        raise ValueError(f"config {cfg.name}: corpora not found: {sorted(missing)}")
+    if cfg.unscoped:
+        # The default bot call names no corpus: the service fans out over every
+        # searchable corpus and reranks the FUSED pool. A gold case still says
+        # which corpus holds its answer, but that is now grading information
+        # only -- the search itself is not allowed to use it, or the run would
+        # measure a path no caller takes. Storage is reported over what the
+        # fan-out actually reads.
+        searched = [c.name for c in svc._searchable_corpora()]
+    else:
+        missing = [a for a in set(actual_corpora.values()) if not svc.registry.has(a)]
+        if missing:
+            raise ValueError(f"config {cfg.name}: corpora not found: {sorted(missing)}")
+        searched = sorted(set(actual_corpora.values()))
 
     saved_decay: dict[str, float | None] = {}
     if cfg.decay_half_life_days != "keep":
-        for a in set(actual_corpora.values()):
+        for a in set(searched):
             saved_decay[a] = svc.registry.get(a).decay_half_life_days
             svc.set_decay(a, cfg.decay_half_life_days)  # type: ignore[arg-type]
     saved_bm25w: dict[str, float | None] = {}
@@ -287,12 +298,14 @@ def run_config(
                 # first query pays model/connection warmup; keep it out of p50/p95
                 c0 = cases[0]
                 try:
-                    svc.search(c0.query, actual_corpora[c0.corpus], top_k=cfg.top_k,
-                               mode=cfg.mode, rerank=cfg.rerank, rerank_model=cfg.rerank_model)
+                    svc.search(c0.query,
+                               None if cfg.unscoped else actual_corpora[c0.corpus],
+                               top_k=cfg.top_k, mode=cfg.mode, rerank=cfg.rerank,
+                               rerank_model=cfg.rerank_model)
                 except Exception:
                     pass
             for case in cases:
-                actual = actual_corpora[case.corpus]
+                actual = None if cfg.unscoped else actual_corpora[case.corpus]
                 lats = []
                 hits: list[dict] = []
                 for _ in range(max(1, repeat)):
@@ -309,10 +322,11 @@ def run_config(
             svc.set_bm25_weight(a, w)
 
     storage = {}
-    for logical, actual in sorted(set(actual_corpora.items())):
+    logical_of = {actual: logical for logical, actual in actual_corpora.items()}
+    for actual in sorted(set(searched)):
         q, b = corpus_bytes(svc, actual)
         storage[actual] = {
-            "logical": logical,
+            "logical": logical_of.get(actual, actual),
             "points": svc.store.count(_collection_for(actual)),
             "qdrant_mb": round(q / 1e6, 1),
             "bm25_mb": round(b / 1e6, 1),

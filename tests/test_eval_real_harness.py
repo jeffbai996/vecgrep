@@ -183,3 +183,60 @@ def test_build_side_by_side_passes_datatype_through(svc, tmp_path: Path) -> None
     info = svc.store.client.get_collection("vecgrep__eval-chats-f16")
     assert info.config.params.vectors.datatype == qm.Datatype.FLOAT16
     assert rep.points > 0
+
+
+def test_unscoped_run_searches_every_corpus_not_the_mapped_one(svc, tmp_path: Path) -> None:
+    """`unscoped=True` measures the DEFAULT bot call: no corpus argument, so
+    the service fans out and fuses. Without it the harness can only ever score
+    a scoped search, which is not the path the MCP rerank gate governs."""
+    root = _seed(tmp_path)
+    svc.index(str(root), "chats")
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "note.md").write_text(
+        "---\nchannel: b\ndate: 2026-01-03\n---\n**carol** · 09:00\n"
+        "unrelated filler about garden mulch and compost turning.\n", encoding="utf-8")
+    svc.index(str(other), "notes")
+
+    cases = [GoldCase(id="relay", corpus="chats", query="ERR-0451 relay failure",
+                      want=("2026-01-01",))]
+    seen: list[dict] = []
+    real_search = svc.search
+
+    def spy(query, corpus_name=None, **kw):
+        seen.append({"corpus_name": corpus_name, "kw": kw})
+        return real_search(query, corpus_name, **kw)
+
+    svc.search = spy  # type: ignore[method-assign]
+    try:
+        cfg = harness.RunConfig(name="u", mode="hybrid", top_k=5, unscoped=True)
+        r = harness.run_config(svc, cfg, cases, warmup=False)
+    finally:
+        svc.search = real_search  # type: ignore[method-assign]
+
+    assert seen, "harness never called search"
+    assert all(s["corpus_name"] is None for s in seen), \
+        "unscoped run must pass corpus_name=None so the service fans out"
+    assert r["summary"]["n_graded"] == 1
+    # storage is still reported, keyed by the corpora actually searched
+    assert "chats" in r["storage"] and "notes" in r["storage"]
+
+
+def test_scoped_run_still_passes_the_mapped_corpus(svc, tmp_path: Path) -> None:
+    root = _seed(tmp_path)
+    svc.index(str(root), "chats")
+    cases = [GoldCase(id="relay", corpus="chats", query="ERR-0451 relay failure",
+                      want=("2026-01-01",))]
+    seen: list[str | None] = []
+    real_search = svc.search
+
+    def spy(query, corpus_name=None, **kw):
+        seen.append(corpus_name)
+        return real_search(query, corpus_name, **kw)
+
+    svc.search = spy  # type: ignore[method-assign]
+    try:
+        harness.run_config(svc, harness.RunConfig(name="s", top_k=5), cases, warmup=False)
+    finally:
+        svc.search = real_search  # type: ignore[method-assign]
+    assert seen == ["chats"]
