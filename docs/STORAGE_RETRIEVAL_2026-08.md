@@ -224,3 +224,84 @@ each other, not against the round-2 absolutes.
     sending a response` from qdrant mid-copy. Flush every 8th batch.
   `eval-chats-base` (741 MB) and `eval-chats-f16` (479 MB) have served their
   purpose and can be dropped to reclaim ~1.2 GB.
+
+## Round 4 (2026-09-10) — rerank on the cross-corpus fan-out
+
+The MCP `search` gate auto-enabled the cross-encoder on a corpus of >=10k
+chunks, but returned False whenever no corpus was named ("cross-corpus search:
+don't pay it blind"). That is the call the squad bots actually make, so the
+highest-traffic path in the deployment was the one path that never reranked.
+
+Measured on the LIVE corpora (the round-2/3 `eval-*` copies were dropped; a
+rebuild is ~70 min and >1 GB, so this round reads the live set instead — the
+numbers are therefore NOT comparable to the r3 table above, which used frozen
+copies of three corpora, not today's seven). 119 gold cases, source-level.
+The harness gained an `unscoped` run config to express the no-corpus call at
+all; before that it could only ever score a scoped search.
+
+| config | hit@1 | hit@3 | hit@5 | hit@10 | MRR | P@3 | neg FP | p50 ms | p95 ms |
+|---|---|---|---|---|---|---|---|---|---|
+| scoped + rerank (reference) | 45.2 | 60.2 | 67.7 | 74.2 | .547 | 25.1 | 7.7% | 543 | 3093 |
+| unscoped, no rerank (BEFORE) | 10.8 | 18.3 | 21.5 | 25.8 | .154 | 6.1 | **100%** | 873 | 1509 |
+| unscoped + rerank (AFTER) | 19.4 | 31.2 | 43.0 | 51.6 | .285 | 12.2 | 19.2% | 2936 | 5383 |
+
+- **Adopted.** hit@3 +12.9, hit@5 +21.5, MRR +.131, and negative FP 100% ->
+  19.2%. The calibration result from round 3 reproduces and then some: without
+  the reranker EVERY one of the 26 should-match-nothing queries returned a top
+  hit above the 60% recall floor. A bot asking an unscoped question was being
+  handed confident-looking junk for any off-topic query, every time.
+- **Unscoped is still much worse than scoped, and rerank does not close it.**
+  31.2 vs 60.2 hit@3. That is not a reranker failure — it is dilution: seven
+  corpora each contribute CANDIDATE_POOL=50 candidates and the right answer
+  competes against ~335k chunks instead of one corpus's worth. Naming a corpus
+  remains the single biggest retrieval lever a caller has. The gate makes the
+  lazy call less bad; it does not make it equivalent.
+- **The cost is real and it is latency, not memory.** p50 873 -> 2936 ms. The
+  cross-encoder scores the WHOLE fused pool (`_apply_rerank` does not truncate
+  before scoring), so an unscoped search is ~350 pairs where a scoped one is
+  ~50 — a 7x cross-encoder bill, which is exactly what "don't pay it blind"
+  was guarding. It is paid knowingly: 2.9 s for a calibrated answer beats
+  0.9 s for one that is confidently wrong on every off-topic query. If this
+  latency ever becomes the binding complaint, truncate the fused pool to the
+  top ~50 by fusion score BEFORE the cross-encoder rather than reverting the
+  gate — that is the cheap half of the trade and it is untested.
+- `_should_budget` deliberately did NOT get the same treatment. Rerank only
+  reorders a list the caller already receives; budget changes the response
+  SHAPE (full hits + a `stubs` tail), so auto-firing it unscoped would rewrite
+  what every existing consumer parses. Same arithmetic, different blast radius.
+
+### Deployment knobs changed the same day (drop-ins, not the base unit)
+
+The historic constraint on all three was VRAM shared with the local LLM
+runtime on a 20 GB box; the deployment now carries 38 GB.
+
+- `VECGREP_RERANK_BATCH` 8 -> 16 (`rerank-worker.conf`).
+- `VECGREP_RERANK_WORKER_IDLE_S` 2700 -> **0** (`rerank-idle.conf`). Zero is
+  the only value that warms the worker at boot: `rerank.warm_at_boot()`
+  refuses to pre-load a worker that idle-retirement would discard, so any
+  non-zero idle silently keeps the boot warm-up off. Measured on restart:
+  reranker ready 17 s after start, health 200 throughout.
+- `VECGREP_RERANK_WORKER_PRESSURE_LEVELS` pinned to **critical**
+  (`rerank-pressure.conf`), from the code default `protect,hard,critical`.
+  `protect` is the advisory rung the host spends much of a busy day in, and
+  shedding there now costs a cold load to recover since there is no idle
+  re-warm. The gate is not removed: `critical` still yields the card, and a
+  `"pressure": true` payload still bypasses the level list entirely.
+- `MemoryHigh` 8G -> 10G, `MemoryMax` 12G -> 14G (`memory-ceiling.conf`).
+  Most of the charge is page cache from the BM25 sqlite and qdrant index
+  files; 1.2M refaults were measured against the 8G mark, i.e. the cgroup
+  evicting index pages that the next query immediately faulted back in.
+  **Two stale `systemctl set-property` drop-ins under `~/.config/systemd/
+  user.control/` were shadowing this file** and had to be removed for the
+  edit to take effect — check there first if a ceiling change appears to do
+  nothing.
+
+### Weekly eval timer
+
+`vecgrep-eval.timer` (Sunday 05:00, `Persistent=true`, `Nice=10`,
+`IOSchedulingClass=idle`) runs `~/scripts/vecgrep-weekly-eval.py`, which
+writes `reports/<date>-weekly.json` and posts a one-line card to the fleet
+alerts channel ONLY when hit@3 moves >3 points or negative-FP moves >5 points
+against the previous weekly report. Silence is the expected weekly outcome;
+an alert that fires every week is furniture. The first run establishes the
+baseline and never alerts.
