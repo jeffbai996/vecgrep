@@ -19,21 +19,21 @@ const MODES: {
 }[] = [
   {
     value: "hybrid",
-    label: "Hybrid",
+    label: "hybrid",
     hint: "meaning + exact terms",
     active: "border-violet-700/80 bg-violet-950/70 text-violet-300",
     idle: "border-transparent text-violet-500/70 hover:bg-violet-950/35 hover:text-violet-300",
   },
   {
     value: "vector",
-    label: "Semantic",
+    label: "semantic",
     hint: "meaning only",
     active: "border-sky-700/80 bg-sky-950/70 text-sky-300",
     idle: "border-transparent text-sky-500/70 hover:bg-sky-950/35 hover:text-sky-300",
   },
   {
     value: "bm25",
-    label: "Keyword",
+    label: "keyword",
     hint: "exact terms only",
     active: "border-emerald-700/80 bg-emerald-950/70 text-emerald-300",
     idle: "border-transparent text-emerald-500/70 hover:bg-emerald-950/35 hover:text-emerald-300",
@@ -170,6 +170,7 @@ export default function SearchBar({
             className="bg-zinc-900 border border-zinc-800 rounded-md px-2 py-1 text-zinc-300 focus:outline-none focus:border-zinc-600"
             aria-label="Result count"
           >
+            <option value={10}>10</option>
             <option value={25}>25</option>
             <option value={40}>40</option>
             <option value={60}>60</option>
