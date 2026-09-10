@@ -3,15 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- ?v= is a cache buster, not a route: the query is not part of the path,
+         so the backend still serves these by plain name. It is here because a
+         browser that asked for an icon BEFORE there was one cached the miss
+         (the SPA catch-all answered with index.html) and went on serving that
+         miss after the real file shipped. A new URL is the only thing a stale
+         negative entry cannot answer for. Bump all three together. -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2" />
     <!-- Safari ignores an SVG apple-touch-icon, and a browser that falls back
          to /favicon.ico was being handed the SPA's index.html. Both need a
          raster. -->
-    <link rel="icon" sizes="48x48" href="/favicon.ico" />
-    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="icon" sizes="48x48" href="/favicon.ico?v=2" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=2" />
     <meta name="theme-color" content="#a78bfa" />
     <title>vecgrep</title>
-    <script type="module" crossorigin src="/assets/index-BGwybiIR.js"></script>
+    <script type="module" crossorigin src="/assets/index-CpDIeJZR.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-Bnfn-Cxs.css">
   </head>
   <body>

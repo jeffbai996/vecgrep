@@ -410,7 +410,9 @@ def test_every_icon_a_browser_asks_for_is_served() -> None:
         assert (dist / name).is_file(), f"{name} did not reach dist/"
 
     head = (FRONTEND.parent / "index.html").read_text(encoding="utf-8")
-    assert 'href="/favicon.ico"' in head
+    # The hrefs carry a cache-busting ?v= (see the versioning test below), so
+    # match the path and let the query float.
+    assert 'href="/favicon.ico' in head
     assert 'rel="apple-touch-icon"' in head and 'apple-touch-icon.png' in head, \
         "apple-touch-icon must point at a PNG; Safari ignores an SVG here"
 
@@ -449,3 +451,43 @@ def test_the_svg_carries_explicit_dimensions() -> None:
     """A viewBox alone is enough for most renderers and not all of them."""
     svg = (FRONTEND.parent / "public" / "favicon.svg").read_text(encoding="utf-8")
     assert 'width="512"' in svg and 'height="512"' in svg
+
+
+def test_the_result_count_offers_a_short_page() -> None:
+    """The shortest page was 25, which is a scroll when the question is "did
+    this ever come up". 10 fits on a screen (Jeff 2026-09-10)."""
+    search = (FRONTEND / "components" / "SearchBar.tsx").read_text(encoding="utf-8")
+    assert "<option value={10}>10</option>" in search
+    # ...without moving the default, which is a separate decision.
+    assert "useState(40)" in search
+
+
+def test_the_mode_selector_is_lowercase() -> None:
+    """The rest of that row is a mono, lowercase control strip — the labels
+    were Title Case and read as three proper nouns (Jeff 2026-09-10:
+    "all lowercaps, not Hybrid Semantic")."""
+    search = (FRONTEND / "components" / "SearchBar.tsx").read_text(encoding="utf-8")
+    for label in ("hybrid", "semantic", "keyword"):
+        assert f'label: "{label}"' in search, f"{label} is not lowercase"
+        assert f'label: "{label.capitalize()}"' not in search
+
+
+def test_the_icon_links_carry_a_version() -> None:
+    """A browser that once asked for /favicon.ico and was handed the SPA's
+    index.html caches that miss, and it keeps caching it after the file is
+    real: the icon shipped at 03:22 and the tab was still blank at 07:25
+    (Jeff 2026-09-10, "still no favicon ... even tho bots r claiming there
+    is" — the bots were right, the bytes were on the wire). A version on the
+    href is a different URL, so the stale entry cannot answer for it."""
+    import re
+
+    head = (FRONTEND.parent / "index.html").read_text(encoding="utf-8")
+    hrefs = re.findall(r'<link[^>]*rel="(?:icon|apple-touch-icon)"[^>]*'
+                       r'href="([^"]+)"', head)
+    assert len(hrefs) == 3, f"expected three icon links, found {hrefs}"
+    for href in hrefs:
+        assert re.search(r"\?v=\d+$", href), f"{href} is not versioned"
+    # The query is not part of the route, so the backend still serves these
+    # by plain name — bumping the version must never need a server change.
+    assert len({h.split("?")[1] for h in hrefs}) == 1, \
+        "bump every icon together or the browser refetches only some"
