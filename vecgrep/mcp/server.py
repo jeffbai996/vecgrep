@@ -181,33 +181,80 @@ def _result_payload(r) -> dict:
 RERANK_AUTO_MIN_POINTS = 10_000
 
 
+def _corpus_chunk_counts(svc) -> dict[str, int]:
+    """name -> chunk_count for every corpus, from whichever shape svc returns.
+
+    list_corpora() yields Corpus objects locally and dicts through the API
+    mirror. chunk_count is the field that actually exists — `points`/`chunks`
+    do not, and guessing them would make every size gate silently read zero.
+    """
+    out: dict[str, int] = {}
+    for c in svc.list_corpora():
+        if isinstance(c, dict):
+            cn, n = c.get("name"), c.get("chunk_count")
+        else:
+            cn, n = getattr(c, "name", None), getattr(c, "chunk_count", None)
+        if cn:
+            out[str(cn)] = int(n or 0)
+    return out
+
+
+def _fanout_chunk_count(svc, args: dict) -> int:
+    """Total chunks an unscoped/multi-corpus search will actually fan out over.
+
+    Mirrors service.search_with_diagnostics's scope resolution: an explicit
+    `corpora` list is searched as given, and an omitted scope resolves to
+    _searchable_corpora() — the registry minus cross_corpus_exclude, so an
+    eval-* build copy never inflates the estimate. Falls back to list_corpora()
+    for service objects that predate the helper (and for the API dict mirror).
+    """
+    names = args.get("corpora")
+    counts = _corpus_chunk_counts(svc)
+    if names:
+        return sum(counts.get(str(n), 0) for n in names)
+    searchable = getattr(svc, "_searchable_corpora", None)
+    if callable(searchable):
+        total = 0
+        for c in searchable():
+            name = c.get("name") if isinstance(c, dict) else getattr(c, "name", None)
+            if name:
+                total += counts.get(str(name), 0)
+        return total
+    return sum(counts.values())
+
+
 def _should_rerank(svc, args: dict) -> bool:
     """Explicit `rerank` in the call always wins; otherwise decide on size.
 
-    Never raises: if the corpus size can't be read for any reason, fall back to
+    Scoped to one corpus, size that corpus. Unscoped (the default squad-bot
+    call) or given a `corpora` list, size the SUM over the corpora the fan-out
+    will search: service.search_with_diagnostics merges every corpus into one
+    candidate list and only then filters, dedups and reranks, so a cross-corpus
+    rerank is a single cross-encoder pass over the fused top-50 — the same unit
+    of work the single-corpus rule was priced against, not one pass per corpus.
+    The old rule skipped it here ("don't pay it blind"), which left the highest
+    -traffic call path unreranked and therefore uncalibrated: the eval measured
+    unreranked hybrid returning a confident top hit for 92% of negatives vs 4%
+    with the reranker on.
+
+    An explicit empty `corpora` list is a caller error the service raises on;
+    it is not "search everything", so it must not opt into rerank here.
+
+    Never raises: if corpus sizes can't be read for any reason, fall back to
     the old default (off) rather than failing the search.
     """
     explicit = args.get("rerank")
     if explicit is not None:
         return bool(explicit)
     try:
+        if args.get("corpora") == []:
+            return False
         name = args.get("corpus")
         if not name:
-            return False          # cross-corpus search: don't pay it blind
-        for c in svc.list_corpora():
-            # list_corpora returns Corpus objects; the API mirror is a dict.
-            # Handle both, and read chunk_count — the field that actually
-            # exists (points/chunks do not, and guessing them would make this
-            # silently return False forever).
-            if isinstance(c, dict):
-                cn, n = c.get("name"), c.get("chunk_count")
-            else:
-                cn, n = getattr(c, "name", None), getattr(c, "chunk_count", None)
-            if cn == name:
-                return bool(n and int(n) >= RERANK_AUTO_MIN_POINTS)
+            return _fanout_chunk_count(svc, args) >= RERANK_AUTO_MIN_POINTS
+        return _corpus_chunk_counts(svc).get(name, 0) >= RERANK_AUTO_MIN_POINTS
     except Exception:
         return False
-    return False
 
 
 def _should_budget(svc, args: dict) -> bool:
@@ -216,8 +263,17 @@ def _should_budget(svc, args: dict) -> bool:
     Same size rule as rerank, for the same reason: on a small corpus the
     candidate pool IS the haystack, so a stub tail adds nothing. On a big one
     the head fills with near-duplicates and the tail is where the distinct
-    sources are. Never raises — an unreadable corpus size falls back to the
-    old default (off) rather than failing the search.
+    sources are.
+
+    Deliberately NOT extended to unscoped/multi-corpus search the way rerank
+    was. Rerank only reorders a result list the caller already receives; budget
+    changes the response SHAPE (full hits plus a `stubs` tail), so auto-firing
+    it on every unscoped call would silently rewrite what every existing
+    consumer parses. Same arithmetic, very different blast radius — an unscoped
+    caller who wants breadth passes `budget=true`.
+
+    Never raises — an unreadable corpus size falls back to the old default
+    (off) rather than failing the search.
     """
     explicit = args.get("budget")
     if explicit is not None:
@@ -226,16 +282,9 @@ def _should_budget(svc, args: dict) -> bool:
         name = args.get("corpus")
         if not name:
             return False
-        for c in svc.list_corpora():
-            if isinstance(c, dict):
-                cn, n = c.get("name"), c.get("chunk_count")
-            else:
-                cn, n = getattr(c, "name", None), getattr(c, "chunk_count", None)
-            if cn == name:
-                return bool(n and int(n) >= RERANK_AUTO_MIN_POINTS)
+        return _corpus_chunk_counts(svc).get(name, 0) >= RERANK_AUTO_MIN_POINTS
     except Exception:
         return False
-    return False
 
 
 def _run_search(args: dict) -> str:
@@ -246,6 +295,10 @@ def _run_search(args: dict) -> str:
         mode=args.get("mode", "hybrid"),
         rerank=_should_rerank(svc, args),
         filters=args.get("filters") or None,
+        # Superseded versions are hidden by default (a stale revision is not
+        # current truth). Reading history is the one legitimate reason to want
+        # them, and it was the only search flag the MCP layer never exposed.
+        include_superseded=bool(args.get("include_superseded") or False),
         # Bots use the raw retriever breakdown to interpret a blended display
         # score. It is assembled from scores already in hand; no extra search.
         explain=True,
@@ -2364,6 +2417,7 @@ def build_http_app(
         mode: str = "hybrid",
         rerank: bool | None = None,
         filters: list[str] | None = None,
+        include_superseded: bool = False,
         budget: bool | None = None,
         full_k: int = 8,
         token_ceiling: int = 4000,
@@ -2371,8 +2425,10 @@ def build_http_app(
         """Natural-language query. corpus: limit to one corpus (omit = all).
         top_k: max results. mode: hybrid|vector|bm25.
         rerank: cross-encoder rerank — markedly better on long, fuzzy
-        queries. Omit to auto-enable on large corpora (>=10k chunks)
-        and skip it on small ones; pass true/false to force.
+        queries. Omit to auto-enable when the corpora being searched hold
+        >=10k chunks in total (a scoped corpus by its own size, an unscoped
+        or multi-corpus search by the sum over what it fans out across) and
+        skip it below that; pass true/false to force.
         filters: hard constraints — 'source:<glob>', 'source_path:<glob>',
         'corpus:<name>', 'meta.<k>=<v>', 'date:YYYY-MM-DD|today|yesterday',
         'after:<iso>|7d|24h|2w', 'before:<iso>|today', 'channel:<name>',
@@ -2380,6 +2436,9 @@ def build_http_app(
         'has:code|table|link'; prefix with '-' to EXCLUDE. Use time filters
         for 'today'-style questions so old lore can't leak in; speaker: for
         'what did X say'.
+        include_superseded: also return versions a later write replaced.
+        Default false — a superseded revision is history, not current truth.
+        Turn it on to read how a document changed, not to answer with it.
         budget: breadth mode — top full_k results WITH context plus a
         one-line stub tail capped at ~token_ceiling tokens. ON BY DEFAULT for
         large corpora (omit to let it decide). The stubs are real results:
@@ -2393,6 +2452,7 @@ def build_http_app(
             "mode": mode,
             "rerank": rerank,
             "filters": filters,
+            "include_superseded": include_superseded,
             "budget": budget,
             "full_k": full_k,
             "token_ceiling": token_ceiling,
