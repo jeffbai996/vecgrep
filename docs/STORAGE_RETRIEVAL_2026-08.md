@@ -264,7 +264,8 @@ all; before that it could only ever score a scoped search.
   0.9 s for one that is confidently wrong on every off-topic query. If this
   latency ever becomes the binding complaint, truncate the fused pool to the
   top ~50 by fusion score BEFORE the cross-encoder rather than reverting the
-  gate — that is the cheap half of the trade and it is untested.
+  gate — that is the cheap half of the trade. **Done the same day; see below.
+  It was not a trade at all.**
 - `_should_budget` deliberately did NOT get the same treatment. Rerank only
   reorders a list the caller already receives; budget changes the response
   SHAPE (full hits + a `stubs` tail), so auto-firing it unscoped would rewrite
@@ -305,3 +306,31 @@ alerts channel ONLY when hit@3 moves >3 points or negative-FP moves >5 points
 against the previous weekly report. Silence is the expected weekly outcome;
 an alert that fires every week is furniture. The first run establishes the
 baseline and never alerts.
+
+### Cross-encoder pool cap — the cheap half, and it was free
+
+`_apply_rerank` scored every fused candidate. `RERANK_POOL_MAX`
+(`VECGREP_RERANK_POOL_MAX`, default `CANDIDATE_POOL` = 50) now caps that: the
+top 50 by FUSION score are reranked, the rest stay below the reranked head in
+fusion order. The tail is returned, never dropped — a latency cap must not
+shrink a result set — and is deliberately not marked `rerank`, so an unscored
+hit's pct can never be mistaken for a calibrated one. Scoped search is
+unaffected (its fused pool already IS 50); 0 disables the cap.
+
+| unscoped + rerank | hit@1 | hit@3 | hit@5 | hit@10 | MRR | P@3 | neg FP | p50 ms | p95 ms |
+|---|---|---|---|---|---|---|---|---|---|
+| whole pool (~350 pairs) | 19.4 | 31.2 | 43.0 | 51.6 | .285 | 12.2 | 19.2% | 2936 | 5383 |
+| **top 50 by fusion** | **21.5** | **36.6** | **46.2** | **53.8** | **.310** | **14.0** | **11.5%** | **1342** | **2923** |
+
+Latency more than halved (p50 -54%, p95 -46%) and every quality number went
+UP — hit@3 +5.4, negative FP 19.2% -> 11.5%. The expected outcome was "within
+2 points for half the latency"; the actual outcome is better on both axes, so
+N=100 was never tried.
+
+Why quality improved rather than merely surviving: `bge-reranker-v2-m3` is
+weak on long technical chunks (round 2 said so), and scoring 300 extra
+low-fusion candidates gives 300 extra chances for one of them to be
+overconfidently scored above a good hit. Fusion score is a real prior and
+throwing it away for the whole tail was costing accuracy, not buying it. The
+cross-encoder is a re-ranker; it works best re-ranking a shortlist rather
+than ranking a haystack from scratch.
