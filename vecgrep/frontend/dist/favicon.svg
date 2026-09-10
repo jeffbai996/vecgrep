@@ -1,22 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <!-- vecgrep: a lens over a neighbourhood. The three dots are the nearest
-       matches; the lens is the query.
-
-       Drawn for 16px first. A favicon gets about six distinguishable blobs, so
-       this spends them on a thick ring, a handle and three dots with real
-       clearance between them — an earlier version had a centre dot and four
-       satellites and turned to mush below 32px.
-
+  <!-- vecgrep: a vector. One diagonal and a head, nothing else.
+       Drawn for 16px first, which is where the old lens-and-dots mark
+       collapsed into a blob. The shaft runs corner to corner of a 220-unit
+       box centred in the 512 grid, so the margins are an even 120 on every
+       side once the round caps are counted.
        House style follows babylog: 512 box, rx=120 ground, flat accent, one
-       dark glyph, round caps. -->
+       dark glyph, round caps and joins. -->
   <rect width="512" height="512" rx="120" fill="#a78bfa"/>
-  <g fill="none" stroke="#1c1033" stroke-linecap="round">
-    <circle cx="222" cy="222" r="140" stroke-width="40"/>
-    <path d="M330 330l108 108" stroke-width="46"/>
-  </g>
-  <g fill="#1c1033">
-    <circle cx="222" cy="152" r="30"/>
-    <circle cx="162" cy="258" r="30"/>
-    <circle cx="282" cy="258" r="30"/>
+  <g fill="none" stroke="#1c1033" stroke-width="52" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M146 366L366 146"/>
+    <path d="M256 146h110v110"/>
   </g>
 </svg>
