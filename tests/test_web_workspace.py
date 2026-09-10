@@ -423,6 +423,17 @@ def test_every_icon_a_browser_asks_for_is_served() -> None:
     assert '@app.get("/{icon:path}"' not in main
 
 
+def test_the_ico_really_carries_more_than_one_size() -> None:
+    """PIL derives each ICO entry from the base image, so building the file
+    from a 16px render clamped every entry to 16x16 and a 32px tab bar got an
+    upscaled blur (found 2026-09-09). Render large once, let PIL step down."""
+    from PIL import Image
+    im = Image.open(FRONTEND.parent / "public" / "favicon.ico")
+    sizes = sorted(im.info.get("sizes", []))
+    assert (32, 32) in sizes, f"only {sizes} in the ico"
+    assert len(sizes) >= 2
+
+
 def test_the_svg_carries_explicit_dimensions() -> None:
     """A viewBox alone is enough for most renderers and not all of them."""
     svg = (FRONTEND.parent / "public" / "favicon.svg").read_text(encoding="utf-8")
