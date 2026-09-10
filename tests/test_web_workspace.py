@@ -293,10 +293,11 @@ def test_score_tuning_names_its_controls_without_explaining_them() -> None:
 
 def test_committed_web_bundle_has_no_private_companion_url() -> None:
     dist = FRONTEND.parent / "dist"
+    # Text only: dist also carries the raster icons, and a PNG is not UTF-8.
     built = "\n".join(
-        path.read_text(encoding="utf-8")
+        path.read_text(encoding="utf-8", errors="ignore")
         for path in dist.rglob("*")
-        if path.is_file()
+        if path.is_file() and path.suffix not in {".png", ".ico", ".woff", ".woff2"}
     )
 
     assert ".ts.net" not in built
@@ -322,7 +323,7 @@ def test_the_app_ships_a_favicon_and_serves_it() -> None:
     main = (
         FRONTEND.parent.parent / "backend" / "main.py"
     ).read_text(encoding="utf-8")
-    assert '"/favicon.svg"' in main, (
+    assert '"favicon.svg"' in main, (
         "nothing serves /favicon.svg, so it falls through to the SPA catch-all "
         "and the browser is handed index.html")
 
@@ -396,3 +397,33 @@ def test_search_reports_its_own_wall_time() -> None:
     # Both return paths: budget mode and the ordinary one.
     assert routes.count("took_ms=took()") >= 2, "a search path returns no time"
     assert "took_ms" in client and "took_ms" in results, "the page never shows it"
+
+
+def test_every_icon_a_browser_asks_for_is_served() -> None:
+    """One SVG was not enough. Safari ignores an SVG apple-touch-icon, and a
+    browser falling back to /favicon.ico was being handed the SPA's index.html
+    — so Jeff saw no icon at all (2026-09-09)."""
+    public = FRONTEND.parent / "public"
+    dist = FRONTEND.parent / "dist"
+    for name in ("favicon.svg", "favicon.ico", "apple-touch-icon.png"):
+        assert (public / name).is_file(), f"{name} missing from public/"
+        assert (dist / name).is_file(), f"{name} did not reach dist/"
+
+    head = (FRONTEND.parent / "index.html").read_text(encoding="utf-8")
+    assert 'href="/favicon.ico"' in head
+    assert 'rel="apple-touch-icon"' in head and 'apple-touch-icon.png' in head, \
+        "apple-touch-icon must point at a PNG; Safari ignores an SVG here"
+
+    main = (
+        FRONTEND.parent.parent / "backend" / "main.py"
+    ).read_text(encoding="utf-8")
+    for name in ("favicon.svg", "favicon.ico", "apple-touch-icon.png"):
+        assert f'"{name}"' in main, f"nothing serves /{name}"
+    # A /{path} catch-all would swallow every unmatched GET in the app.
+    assert '@app.get("/{icon:path}"' not in main
+
+
+def test_the_svg_carries_explicit_dimensions() -> None:
+    """A viewBox alone is enough for most renderers and not all of them."""
+    svg = (FRONTEND.parent / "public" / "favicon.svg").read_text(encoding="utf-8")
+    assert 'width="512"' in svg and 'height="512"' in svg
