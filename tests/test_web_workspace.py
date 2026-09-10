@@ -424,12 +424,23 @@ def test_every_icon_a_browser_asks_for_is_served() -> None:
 
 
 def test_the_ico_really_carries_more_than_one_size() -> None:
-    """PIL derives each ICO entry from the base image, so building the file
-    from a 16px render clamped every entry to 16x16 and a 32px tab bar got an
-    upscaled blur (found 2026-09-09). Render large once, let PIL step down."""
-    from PIL import Image
-    im = Image.open(FRONTEND.parent / "public" / "favicon.ico")
-    sizes = sorted(im.info.get("sizes", []))
+    """PIL derives each ICO entry from the base image it is handed, so building
+    the file from a 16px render clamped all three entries to 16x16 and a 32px
+    tab bar got an upscaled blur (found 2026-09-09). Render large once, then
+    let it step down.
+
+    The header is read directly rather than through PIL: this suite must not
+    grow an image dependency to check a 674-byte file. An ICO is a 6-byte
+    header, then one 16-byte directory entry per image whose first two bytes
+    are width and height, with 0 meaning 256.
+    """
+    import struct
+
+    raw = (FRONTEND.parent / "public" / "favicon.ico").read_bytes()
+    reserved, kind, count = struct.unpack_from("<HHH", raw, 0)
+    assert (reserved, kind) == (0, 1), "not an icon file"
+    sizes = sorted((raw[6 + i * 16] or 256, raw[7 + i * 16] or 256)
+                   for i in range(count))
     assert (32, 32) in sizes, f"only {sizes} in the ico"
     assert len(sizes) >= 2
 
