@@ -93,3 +93,56 @@ def test_special_token_text_is_evidence_not_a_tokenizer_error():
 def test_diagnostics_are_not_silently_dropped_to_fit():
     with pytest.raises(ValueError, match='diagnostics'):
         bounded_payload({'hits': [], 'warnings': ['failure ' * 2000]}, 512, {})
+
+
+def _evidence(full_count=6, stub_count=90, words=250):
+    return {
+        'full': [{'chunk_id': f'full-{i}', 'corpus': 'notes',
+                  'source_id': f'example-{i}.txt',
+                  'chunk': ('important evidence ' * words),
+                  'context_before': '', 'context_after': ''}
+                 for i in range(full_count)],
+        'stubs': [{'chunk_id': f'stub-{i}', 'snippet': 'preview ' * 40}
+                  for i in range(stub_count)],
+        'warnings': [],
+    }
+
+
+def test_preview_tail_cannot_crowd_out_top_passages():
+    original = _evidence()
+    text = bounded_payload(original, 4000, {})
+    data = json.loads(text)
+    assert [r['chunk_id'] for r in data['full']][:3] == ['full-0', 'full-1', 'full-2']
+    assert data['stubs']
+    assert data['full'][0]['chunk'] == original['full'][0]['chunk']
+    assert len(tiktoken.get_encoding('cl100k_base').encode(text)) <= 4000
+
+
+def test_top_passage_can_borrow_preview_share_when_it_fits_total():
+    original = _evidence(full_count=1, words=1250)
+    data = json.loads(bounded_payload(original, 3000, {}))
+    assert data['full'][0]['chunk_id'] == 'full-0'
+    assert data['full'][0]['chunk'] == original['full'][0]['chunk']
+
+
+def test_roomy_response_is_not_trimmed_to_enforce_artificial_split():
+    original = _evidence(full_count=1, stub_count=0, words=1250)
+    data = json.loads(bounded_payload(original, 3000, {}))
+    assert data['full'] == original['full']
+    assert not data['search_info']['truncated']
+
+
+def test_larger_budget_preserves_at_least_as_many_full_passages():
+    original = _evidence()
+    counts = [len(json.loads(bounded_payload(original, size, {}))['full'])
+              for size in (2000, 4000, 8000)]
+    assert counts == sorted(counts)
+    assert counts[0] > 0
+
+
+def test_oversized_top_hit_does_not_displace_next_fitting_passage():
+    original = _evidence(full_count=2, words=200)
+    original['full'][0]['chunk'] = 'oversized ' * 5000
+    data = json.loads(bounded_payload(original, 2000, {}))
+    assert [r['chunk_id'] for r in data['full']] == ['full-1']
+    assert data['stubs'][0]['chunk_id'] == 'full-0'

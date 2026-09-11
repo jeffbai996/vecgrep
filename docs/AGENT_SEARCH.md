@@ -25,9 +25,13 @@ reports an explicitly supplied `top_k` in `search_info.ignored_parameters`.
 metadata, using the existing cl100k_base tokenizer. It defaults to 12,000 for
 budget mode; non-budget legacy calls retain their existing output contract unless
 this parameter or a profile is provided. Minimum 512. This is not a universal
-model token count and excludes MCP transport wrapping. Surrounding context is
-trimmed first, then full chunks become expandable stubs, then lowest-ranked
-stubs are removed. Check `search_info.truncated`; an empty truncated result is
+model token count and excludes MCP transport wrapping. Responses that already
+fit are unchanged. Otherwise, about 70% of the total is allocated to the full
+passage head (including diagnostics); context is trimmed before demoting its
+lowest-ranked passages. The strongest fitting passage may borrow the preview
+share. A passage too large for the entire response becomes an expandable stub
+without displacing later passages that fit. Remaining space goes to previews in
+rank order; trailing previews are removed before sacrificing the protected head. Check `search_info.truncated`; an empty truncated result is
 not evidence that nothing matched. Diagnostics that cannot fit produce an error.
 
 ## Search playbook
@@ -49,3 +53,11 @@ Tune future defaults using the existing evaluation harness and permitted gold
 sets: source-level recall, negative queries, response tokens, latency, and
 follow-up expansion cost. Do not claim that larger outputs improve answers
 without measuring it.
+
+## Allocation comparison
+
+A three-query replay retained six full passages at 8,000 tokens and ten at
+16,000, where the previous policy usually returned only previews. Defaults stay
+at 8,000 for explore and 16,000 for deep; larger overrides remain available.
+This measures evidence allocation, not answer accuracy or an optimal budget.
+See [the comparison](RESPONSE_BUDGET_2026-09.md).

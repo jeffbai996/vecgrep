@@ -19,6 +19,8 @@ patch = fixes). The version is a single source of truth in
   and corpus exploration views.
 
 ### Fixed
+- MCP response trimming protects top passages from preview-heavy tails and
+  preserves fitting passages when a higher-ranked chunk exceeds the budget.
 - Test settings are isolated by default; production paths and symlink escapes
   fail before settings can open persistent state.
 - Reranker failures preserve hybrid ranking, model warming stays outside search,

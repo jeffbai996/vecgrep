@@ -18,6 +18,7 @@ PRESETS = {
                  rerank=True, response_token_ceiling=16000),
 }
 DEFAULT_RESPONSE_TOKEN_CEILING = 12000
+FULL_BUDGET_FRACTION = 0.7
 
 
 def resolve_search(args: dict) -> dict:
@@ -40,8 +41,9 @@ def resolve_search(args: dict) -> dict:
 def bounded_payload(payload: dict, ceiling: int, info: dict) -> str:
     """Bound the complete JSON text in cl100k_base tokens, not transport wrappers.
 
-    Context is removed before chunks; oversized chunks become expandable stubs.
-    Lowest-ranked stubs are the final sacrifice. Warnings are never hidden.
+    When trimming is necessary, protect a full-passage head before allocating
+    preview space. The strongest passage may borrow the preview share if it
+    fits the total. Warnings and expansion pointers survive normal trimming.
     """
     data = deepcopy(payload)
     full_key = 'full' if 'full' in data else 'hits'
@@ -53,26 +55,56 @@ def bounded_payload(payload: dict, ceiling: int, info: dict) -> str:
         'available_results': count, 'returned_results': count, 'truncated': False,
     }
     encoding = tiktoken.get_encoding('cl100k_base')
-    while True:
+
+    def render(include_stubs: bool = True) -> tuple[str, int]:
         metadata['returned_results'] = len(full) + len(stubs)
-        text = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
-        if len(encoding.encode(text, disallowed_special=())) <= ceiling:
-            return text
-        metadata['truncated'] = True
+        view = data if include_stubs else {**data, 'stubs': []}
+        text = json.dumps(view, ensure_ascii=False, separators=(',', ':'))
+        return text, len(encoding.encode(text, disallowed_special=()))
+
+    text, tokens = render()
+    if tokens <= ceiling:
+        return text
+    metadata['truncated'] = True
+    original_tail = list(stubs)
+    rank = {id(result): i for i, result in enumerate(full)}
+    demoted: dict[int, dict] = {}
+
+    def demote(result: dict) -> None:
+        stub = {k: result[k] for k in (
+            'chunk_id', 'corpus', 'source_id', 'doc_timestamp', 'matched_by',
+            'relevance_pct', 'relevance_label') if k in result}
+        stub['snippet'] = ' '.join(result.get('chunk', '').split())[:160]
+        demoted[rank[id(result)]] = stub
+        stubs[:] = [demoted[i] for i in sorted(demoted)] + original_tail
+
+    # An unfit first hit must not cause every smaller later passage to be
+    # demoted as well. Keep its pointer, and consider the next fitting hit.
+    for result in list(full):
+        bare = {**result, 'context_before': '', 'context_after': ''}
+        one = {**data, full_key: [bare], 'stubs': []}
+        text = json.dumps(one, ensure_ascii=False, separators=(',', ':'))
+        if len(encoding.encode(text, disallowed_special=())) > ceiling:
+            full.remove(result)
+            demote(result)
+
+    # A preview-heavy response must not consume the passage allowance. When
+    # there was no preview tail, use the whole allowance for the full head.
+    head_ceiling = int(ceiling * FULL_BUDGET_FRACTION) if stubs else ceiling
+    while full and render(include_stubs=False)[1] > head_ceiling:
         contextual = [r for r in full if r.get('context_before') or r.get('context_after')]
         if contextual:
             result = contextual[-1]
             result['context_before'] = result['context_after'] = ''
-        elif full:
-            result = full.pop()
-            stub = {k: result[k] for k in (
-                'chunk_id', 'corpus', 'source_id', 'doc_timestamp', 'matched_by',
-                'relevance_pct', 'relevance_label') if k in result}
-            stub['snippet'] = ' '.join(result.get('chunk', '').split())[:160]
-            stubs.insert(0, stub)
-        elif stubs:
+            continue
+        if len(full) == 1 and render(include_stubs=False)[1] <= ceiling:
+            break
+        demote(full.pop())
+    while True:
+        text, tokens = render()
+        if tokens <= ceiling:
+            return text
+        if stubs:
             stubs.pop()
         else:
-            # An unusually large diagnostic must fail visibly, not masquerade
-            # as a successful search with its failure warnings stripped.
             raise ValueError('response_token_ceiling cannot fit search diagnostics; increase it')
