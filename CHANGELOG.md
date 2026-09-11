@@ -19,6 +19,8 @@ patch = fixes). The version is a single source of truth in
   and corpus exploration views.
 
 ### Fixed
+- Unchanged-source indexing checks its content hash before chunk construction;
+  recovery still verifies chunk counts and force-indexing still rebuilds.
 - MCP response trimming protects top passages from preview-heavy tails and
   preserves fitting passages when a higher-ranked chunk exceeds the budget.
 - Test settings are isolated by default; production paths and symlink escapes

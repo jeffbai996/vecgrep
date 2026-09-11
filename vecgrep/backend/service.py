@@ -937,6 +937,14 @@ class VecgrepService:
             _bulk.enter_context(self.bm25.bulk(corpus_name))
         with _bulk:
             for doc in docs:
+                doc_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
+                matches_recorded_source = corpus.source_hashes.get(doc.source_id) == doc_hash
+                # Recovery still needs the chunk count below to verify that a
+                # partially restored source is complete. Ordinary unchanged
+                # sources do not need chunk construction a second time.
+                if not force and resume_source_counts is None and matches_recorded_source:
+                    skipped += 1
+                    continue
                 # doc-aware chunkers (code_symbol) see the source path for
                 # language detection; text-only chunkers keep the old contract
                 chunks = (chunker.chunk_doc(doc)
@@ -944,8 +952,6 @@ class VecgrepService:
                 if not chunks:
                     continue
 
-                doc_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
-                matches_recorded_source = corpus.source_hashes.get(doc.source_id) == doc_hash
                 if (
                     resume_source_counts is not None
                     and matches_recorded_source
@@ -955,11 +961,6 @@ class VecgrepService:
                     # exact content recorded in the registry. Leave it alone.
                     skipped += 1
                     continue
-                if not force and corpus.source_hashes.get(doc.source_id) == doc_hash:
-                    # Already indexed at this exact content — skip embed call.
-                    skipped += 1
-                    continue
-
                 # Normal re-indexing removes a prior version so a source that
                 # shrank cannot leave old tail chunks behind. A partial Qdrant
                 # recovery can skip that scan: point IDs are deterministic for the
