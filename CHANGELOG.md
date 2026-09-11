@@ -8,6 +8,8 @@ patch = fixes). The version is a single source of truth in
 ## [Unreleased]
 
 ### Added
+- MCP search intent presets, explicit ignored-parameter reporting, and complete
+  JSON response budgets measured with cl100k_base. See [agent search](docs/AGENT_SEARCH.md).
 - Push/PR validation reuses the release gate: Python tests, frontend build,
   package build, and clean-environment wheel install/import smoke.
 - SQLite/FTS5 BM25 store, persisted backend selection, and explicit pickle

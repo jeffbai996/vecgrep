@@ -39,7 +39,7 @@ import base64
 import ipaddress
 import json
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Literal
 
 
 # --- MCP server icon (SEP-973) ------------------------------------------
@@ -288,6 +288,10 @@ def _should_budget(svc, args: dict) -> bool:
 
 
 def _run_search(args: dict) -> str:
+    from .search_policy import resolve_search, bounded_payload, DEFAULT_RESPONSE_TOKEN_CEILING
+
+    explicit_top_k = args.get("top_k") is not None
+    args = resolve_search(args)
     svc = _svc()
     common = dict(
         corpus_name=args.get("corpus"),
@@ -331,11 +335,29 @@ def _run_search(args: dict) -> str:
             ],
             "warnings": [asdict(w) for w in warnings],
         }
-        return json.dumps(payload, indent=2)
+        return bounded_payload(
+            payload, args.get("response_token_ceiling", DEFAULT_RESPONSE_TOKEN_CEILING),
+            {"profile": args.get("profile"),
+             "ignored_parameters": ["top_k"] if explicit_top_k else [],
+             "rerank_requested": common["rerank"],
+             "reranked_results": sum("rerank" in r.matched_by for r in [*full, *stubs]),
+             "scope": {"corpus": common["corpus_name"], "corpora": common["corpus_names"],
+                       "filters": common["filters"]}},
+        )
     outcome = svc.search_with_diagnostics(
         args["query"], top_k=args.get("top_k"), **common
     )
     hits = [_result_payload(r) for r in outcome.results]
+    if args.get("response_token_ceiling") is not None:
+        return bounded_payload(
+            {"hits": hits, "warnings": [asdict(w) for w in outcome.warnings]},
+            args["response_token_ceiling"],
+            {"profile": args.get("profile"), "ignored_parameters": [],
+             "rerank_requested": common["rerank"],
+             "reranked_results": sum("rerank" in r.matched_by for r in outcome.results),
+             "scope": {"corpus": common["corpus_name"], "corpora": common["corpus_names"],
+                       "filters": common["filters"]}},
+        )
     if outcome.warnings:
         return json.dumps({
             "hits": hits,
@@ -1285,7 +1307,7 @@ def build_mcp_server() -> Any:
                         },
                         "top_k": {
                             "type": "integer",
-                            "description": "Max results (default 5).",
+                            "description": "Max results outside budget mode (default 5); ignored in budget mode, which retrieves up to 100.",
                             "default": 5,
                         },
                         "mode": {
@@ -1335,6 +1357,15 @@ def build_mcp_server() -> Any:
                                 "stubs — they are real results, and get_chunk "
                                 "expands any of them in full."
                             ),
+                        },
+                        "profile": {
+                            "type": "string",
+                            "enum": ["lookup", "explore", "deep"],
+                            "description": "Optional intent preset; explicit knobs override it. Scope is never broadened. Presets are starting policies, not measured optima.",
+                        },
+                        "response_token_ceiling": {
+                            "type": "integer", "minimum": 512,
+                            "description": "Whole JSON text cap in cl100k_base tokens, including metadata. Budget-mode default 12000; presets choose 4000/8000/16000. Excludes MCP transport wrappers; other model tokenizers differ.",
                         },
                         "full_k": {
                             "type": "integer",
@@ -2413,17 +2444,30 @@ def build_http_app(
         query: str,
         corpus: str | None = None,
         corpora: list[str] | None = None,
-        top_k: int = 5,
+        top_k: int | None = None,
         mode: str = "hybrid",
         rerank: bool | None = None,
         filters: list[str] | None = None,
         include_superseded: bool = False,
         budget: bool | None = None,
-        full_k: int = 8,
-        token_ceiling: int = 4000,
+        full_k: int | None = None,
+        token_ceiling: int | None = None,
+        profile: Literal["lookup", "explore", "deep"] | None = None,
+        response_token_ceiling: int | None = None,
     ) -> str:
         """Natural-language query. corpus: limit to one corpus (omit = all).
-        top_k: max results. mode: hybrid|vector|bm25.
+        top_k: max results outside budget mode (default 5); ignored in budget
+        mode, which retrieves up to 100. mode: hybrid|vector|bm25.
+        profile: lookup (5 hits, 4000 tokens), explore (6 full + previews,
+        8000 tokens), deep (10 full + previews, 16000 tokens). All request
+        reranking. Explicit knobs override presets; scope never broadens.
+        Presets are starting policies, not benchmarked optima.
+        response_token_ceiling: whole JSON text cap in cl100k_base tokens;
+        minimum 512, default 12000 in budget mode. Includes metadata, excludes
+        transport wrappers. Other model tokenizers differ. search_info reports
+        truncation, scope, ignored knobs and pre-budget reranked result count.
+        full_k defaults to 8; token_ceiling defaults to 4000 and still applies
+        only to the approximate preview-tail budget.
         rerank: cross-encoder rerank — markedly better on long, fuzzy
         queries. Omit to auto-enable when the corpora being searched hold
         >=10k chunks in total (a scoped corpus by its own size, an unscoped
@@ -2456,6 +2500,8 @@ def build_http_app(
             "budget": budget,
             "full_k": full_k,
             "token_ceiling": token_ceiling,
+            "profile": profile,
+            "response_token_ceiling": response_token_ceiling,
         })
 
     @fmcp.tool(

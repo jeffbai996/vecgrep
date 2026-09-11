@@ -380,6 +380,9 @@ The sidebar carries a legend mapping V / K / VK and confidence colors, plus a co
 
 ## MCP server
 
+See [Agent search](docs/AGENT_SEARCH.md) for intent presets, response budgets,
+and an evidence-expansion playbook.
+
 `vecgrep` ships the same MCP tool surface over local stdio and streamable HTTP.
 Install the extra and run the local transport:
 

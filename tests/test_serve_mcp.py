@@ -118,3 +118,32 @@ def test_explicit_private_proxy_host_and_browser_origin_remain_supported(
             },
         )
     assert response.status_code == 200
+
+
+def test_search_policy_over_http(client_with_token, monkeypatch):
+    from vecgrep.mcp import server
+    calls = []
+
+    class Service:
+        def search_budgeted_with_diagnostics(self, query, **kwargs):
+            calls.append(kwargs)
+            return [], [], []
+
+    monkeypatch.setattr(server, '_svc', lambda: Service())
+    headers = {'Accept': 'application/json, text/event-stream'}
+    response = client_with_token.post('/mcp', headers=headers, json={
+        'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}})
+    search = next(t for t in response.json()['result']['tools'] if t['name'] == 'search')
+    assert 'profile' in search['inputSchema']['properties']
+    assert 'response_token_ceiling' in search['inputSchema']['properties']
+    response = client_with_token.post('/mcp', headers=headers, json={
+        'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call', 'params': {
+            'name': 'search', 'arguments': {'query': 'example', 'corpus': 'notes',
+                                           'profile': 'explore'}}})
+    result = response.json()['result']
+    assert not result.get('isError'), result
+    payload = json.loads(result['content'][0]['text'])
+    assert calls[0]['full_k'] == 6  # wrapper defaults must not override preset
+    assert calls[0]['corpus_name'] == 'notes'
+    assert payload['search_info']['ignored_parameters'] == []
+    assert payload['search_info']['response_token_ceiling'] == 8000
