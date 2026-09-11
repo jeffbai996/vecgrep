@@ -106,6 +106,8 @@ vecgrep index https://example.com/article --corpus web
 
 # Watch a folder and re-index on change
 vecgrep watch ./my-docs --corpus papers
+# Keep separate producers in one corpus without moving their files.
+vecgrep watch ./local-sessions --also-watch ./desktop-sessions --corpus cli
 
 # Hybrid search (default — BM25 + vector fused via RRF), top 10
 vecgrep search "missile guidance systems" --corpus papers --top 10

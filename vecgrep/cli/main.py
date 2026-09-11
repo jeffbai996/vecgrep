@@ -1084,6 +1084,7 @@ def serve(host: str | None, port: int | None, reload: bool, open_browser: bool) 
 
 @cli.command()
 @click.argument("path")
+@click.option("--also-watch", multiple=True, help="Additional directory feeding the same corpus; repeatable.")
 @click.option("--corpus", required=True, help="Named corpus to keep current.")
 @click.option(
     "--chunker",
@@ -1114,8 +1115,8 @@ def serve(host: str | None, port: int | None, reload: bool, open_browser: bool) 
     "re-embedded in full on every append, forever. 0 disables.",
 )
 def watch(path: str, corpus: str, chunker: str, debounce: float,
-          include: str | None, quiet_period: float) -> None:
-    """Watch a directory and re-index on change.
+          include: str | None, quiet_period: float, also_watch: tuple[str, ...] = ()) -> None:
+    """Watch directories and re-index on change.
 
     Re-indexes incrementally — only sources whose content hash changed get
     re-embedded. Press Ctrl+C to stop.
@@ -1131,26 +1132,24 @@ def watch(path: str, corpus: str, chunker: str, debounce: float,
             "watch requires `watchfiles`. Install with `pip install \"vecgrep[watch]\"`."
         )
 
-    target = Path(path).resolve()
-    if not target.is_dir():
-        raise click.ClickException(f"watch target must be a directory: {target}")
+    targets = list(dict.fromkeys(Path(p).resolve() for p in (path, *also_watch)))
+    for target in targets:
+        if not target.is_dir():
+            raise click.ClickException(f"watch target must be a directory: {target}")
 
     filt = f" (include: {include})" if include else ""
-    click.echo(f"watching {target} -> corpus '{corpus}'{filt} (Ctrl+C to stop)")
-    # Initial pass picks up everything currently on disk. It must not be
-    # fatal: an embed backend timing out under load killed the process here,
-    # systemd restarted it, and the pass began again from zero under the
-    # same load — a restart treadmill (NRestarts=90 on one unit,
-    # 2026-07-27). Files the pass missed are healed by later events and the
-    # pending sweep; a dead watcher heals nothing.
-    try:
-        _do_index(str(target), corpus, chunker, force=False, include=include)
-    except KeyboardInterrupt:
-        raise
-    except Exception as e:
-        click.echo(
-            f"  error: initial pass incomplete ({type(e).__name__}: {e}) — "
-            "watching anyway", err=True)
+    click.echo(f"watching {', '.join(map(str, targets))} -> corpus '{corpus}'{filt} (Ctrl+C to stop)")
+    # Keep each root independent: a transient failure in one initial pass
+    # must not prevent the other producers from being indexed or watched.
+    for target in targets:
+        try:
+            _do_index(str(target), corpus, chunker, force=False, include=include)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            click.echo(
+                f"  error: initial pass incomplete for {target} "
+                f"({type(e).__name__}: {e}) — watching anyway", err=True)
 
     def _index_one(p: str) -> None:
         _watch_index_resilient(p, corpus, chunker, include)
@@ -1160,7 +1159,7 @@ def watch(path: str, corpus: str, chunker: str, debounce: float,
     # whether deferred files have gone quiet.
     sweep_ms = int(min(quiet_period or 60, 60) * 1000)
     try:
-        for changes in _watch(str(target), step=int(debounce * 1000),
+        for changes in _watch(*map(str, targets), step=int(debounce * 1000),
                               rust_timeout=sweep_ms, yield_on_timeout=True):
             # Respect the include glob on per-file events too, so a sibling
             # raw file changing doesn't get indexed into a markdown-only
