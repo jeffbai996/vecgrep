@@ -225,6 +225,15 @@ def load_settings() -> Settings:
     for env_key, attr in ENV_MAP.items():
         if env_key in os.environ:
             val = os.environ[env_key]
+            # `VECGREP_FOO=` means unset, the way it does everywhere else. It
+            # used to arrive as "", which is not None and not a URL, so
+            # _validate_url refused it and the process exited before it could
+            # serve: VECGREP_OLLAMA_FALLBACK_URL was left empty in
+            # ~/.config/vecgrep/env on 2026-09-11 and vecgrep-serve crash-looped
+            # 203 times, taking its uptime monitor with it all night.
+            if isinstance(val, str) and not val.strip():
+                setattr(s, attr, None)
+                continue
             if attr in {"api_port", "default_top_k", "backup_weekday", "backup_retention",
                         "thread_pool_size", "ollama_num_batch", "oauth_public_port"}:
                 val = int(val)
