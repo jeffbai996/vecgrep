@@ -1770,6 +1770,65 @@ def build_mcp_server() -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Tool dispatch — off the event loop
+# ---------------------------------------------------------------------------
+
+def _offload_sync_tools(fmcp: Any) -> None:
+    """Make `@fmcp.tool` register synchronous bodies as coroutines.
+
+    The MCP SDK runs a tool that is not a coroutine INLINE on the asyncio
+    event loop (mcp/server/fastmcp/utilities/func_metadata.py:
+    `if fn_is_async: await fn(...) else: return fn(...)`). Every tool here has
+    a synchronous body, and a search is seconds of embed + qdrant + sqlite +
+    cross-encoder, so for that whole time uvicorn could not accept a
+    connection or answer anything -- including /api/health, whose entire body
+    is `return {"status": "ok"}`.
+
+    Measured against the live server on 2026-09-12: one MCP search took
+    17.90s and /api/health was blocked for 17.89s of it, against a 2ms
+    baseline. The squad watchdog probes that endpoint with a 5s timeout and
+    restarts after three strikes, so a few slow searches in a row bounced the
+    service and everything in flight got a 504.
+
+    Why it started biting on 2026-09-11 and not before: the blocking call had
+    always been there, but cf21ce9 (2026-09-10) turned cross-encoder rerank on
+    by default for cross-corpus fan-out, which pushed a routine search past
+    the 5s probe budget.
+
+    Calls stay SERIALIZED. They were already, by virtue of running on the
+    loop; the gate keeps that property so nothing in the search path meets
+    concurrency it was never written for. What changes is only that the loop
+    is free to answer while a tool works.
+    """
+    import functools
+    import inspect as _inspect
+
+    import anyio
+
+    register = fmcp.tool
+    gate = anyio.Semaphore(1)
+
+    def tool(*args: Any, **kwargs: Any):
+        decorate = register(*args, **kwargs)
+
+        def apply(fn):
+            if _inspect.iscoroutinefunction(fn):
+                return decorate(fn)
+
+            @functools.wraps(fn)          # keeps __wrapped__, so the schema
+            async def offloaded(**call):  # FastMCP derives from the signature
+                async with gate:          # is the original function's
+                    return await anyio.to_thread.run_sync(
+                        functools.partial(fn, **call))
+
+            return decorate(offloaded)
+
+        return apply
+
+    fmcp.tool = tool
+
+
+# ---------------------------------------------------------------------------
 # HTTP transport — FastMCP with json_response + stateless_http
 # ---------------------------------------------------------------------------
 
@@ -2413,6 +2472,7 @@ def build_http_app(
 
     fmcp_kwargs["icons"] = _server_icons()
     fmcp = FastMCP("vecgrep", **fmcp_kwargs)
+    _offload_sync_tools(fmcp)
     fmcp.settings.json_response = True
     fmcp.settings.stateless_http = True
     # Register at '/' so the parent app's prefix-stripping (_BearerGatedASGI
