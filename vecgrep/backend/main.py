@@ -159,6 +159,15 @@ def create_app() -> FastAPI:
         finally:
             stop.set()
             backup_thread.join(timeout=2)
+            # Cache hits buffer their LRU stamps in memory to keep reads off
+            # the disk; land them now so a restart does not reset the whole
+            # cache to "equally cold".
+            try:
+                from .api.routes import flush_embed_cache_if_started
+
+                flush_embed_cache_if_started()
+            except Exception as exc:
+                logger.warning("embed cache flush on shutdown failed: %s", exc)
 
     app = FastAPI(title="vecgrep", version=__version__, lifespan=lifespan)
     # Covers both the root SDK authorize route and the duplicate mounted route

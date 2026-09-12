@@ -461,3 +461,83 @@ def test_sweep_guard_not_applied_to_dry_run(tmp_path):
     got = cache.sweep(keep, dry_run=True, max_delete_fraction=0.5)
     assert got == {"id": 10}, "dry run reports the damage instead of refusing"
     assert cache.stats() == {"id": 10}
+
+
+# --- steady-state write churn -------------------------------------------------
+#
+# The LRU bookkeeping turned every cache HIT into an UPDATE + COMMIT. With an
+# index on last_used each touched row dirties a table page and an index page,
+# measured at ~12 KB of WAL for a single-text lookup and 2.1 MB for a 500-text
+# batch -- write amplification on a pure read path, on the SSD, forever. The
+# fix buffers the timestamps in memory and flushes them on a timer, at
+# shutdown, and before eviction needs them to pick a victim.
+
+def _wal_size(cache) -> int:
+    from pathlib import Path
+    p = Path(cache._conn.execute("PRAGMA database_list").fetchone()[2] + "-wal")
+    return p.stat().st_size if p.exists() else 0
+
+
+def test_cache_hit_writes_nothing_to_disk(tmp_path):
+    """A read must not cost a write. This is the whole point of the change."""
+    cache = EmbedCache(tmp_path / "embed.db")
+    cache.put_many("id", [f"t{i}" for i in range(200)], [[1.0]] * 200)
+    cache._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    before = _wal_size(cache)
+
+    for _ in range(5):
+        cache.get_many("id", [f"t{i}" for i in range(200)])
+
+    assert _wal_size(cache) == before
+
+
+def test_buffered_touches_flush_on_close(tmp_path):
+    """Deferred is not discarded: a clean shutdown persists the LRU order."""
+    db = tmp_path / "embed.db"
+    cache = EmbedCache(db)
+    cache.put_many("id", ["warm"], [[1.0]])
+    sha = EmbedCache._sha("warm")
+    cache._conn.execute("UPDATE embed_cache SET last_used = 0")
+    cache._conn.commit()
+
+    cache.get_many("id", ["warm"])
+    cache.close()
+
+    conn = sqlite3.connect(str(db))
+    (stored,) = conn.execute(
+        "SELECT last_used FROM embed_cache WHERE text_sha = ?", (sha,)
+    ).fetchone()
+    assert stored > 0
+
+
+def test_eviction_sees_pending_touches(tmp_path, monkeypatch):
+    """A buffered read must still protect its row from being evicted."""
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "3")
+    cache = EmbedCache(tmp_path / "embed.db")
+    cache.put_many("id", ["a", "b", "c"], [[1.0], [2.0], [3.0]])
+    cache._conn.execute("UPDATE embed_cache SET last_used = 0")
+    cache._conn.commit()
+
+    # "a" is read (hot, buffered only), then a new row pushes us over the cap.
+    cache.get_many("id", ["a"])
+    cache.put_many("id", ["d"], [[4.0]])
+
+    assert cache.get_many("id", ["a"]) == {EmbedCache._sha("a"): [1.0]}
+
+
+def test_touches_flush_once_the_interval_elapses(tmp_path, monkeypatch):
+    """The buffer is bounded in time, so a crash loses minutes, not months."""
+    cache = EmbedCache(tmp_path / "embed.db")
+    cache.put_many("id", ["warm"], [[1.0]])
+    cache._conn.execute("UPDATE embed_cache SET last_used = 0")
+    cache._conn.commit()
+
+    cache.get_many("id", ["warm"])
+    (stored,) = cache._conn.execute("SELECT last_used FROM embed_cache").fetchone()
+    assert stored == 0  # still buffered
+
+    cache._last_flush = 0.0  # pretend the interval has elapsed
+    cache.get_many("id", ["warm"])
+
+    (stored,) = cache._conn.execute("SELECT last_used FROM embed_cache").fetchone()
+    assert stored > 0

@@ -2404,6 +2404,21 @@ class VecgrepService:
                     shas.add(EmbedCache._sha(text))
         return keep
 
+
+    def flush_embed_cache(self) -> None:
+        """Land buffered LRU stamps. Called on server shutdown.
+
+        Cache hits defer their last_used write (see cache._TOUCH_FLUSH_SECONDS);
+        without this, every restart would discard up to one interval of reads
+        and leave the whole cache looking equally cold to eviction.
+        """
+        if self._embed_cache is None:
+            return
+        try:
+            self._embed_cache.flush_touches()
+        except Exception as exc:  # bookkeeping only -- never block shutdown
+            logger.warning("embed cache flush on shutdown failed: %s", exc)
+
     def cache_sweep(
         self,
         *,

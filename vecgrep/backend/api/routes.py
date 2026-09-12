@@ -69,6 +69,12 @@ def _service() -> VecgrepService:
     return _SERVICE
 
 
+def flush_embed_cache_if_started() -> None:
+    """Shutdown hook. Never constructs a service just to flush nothing."""
+    if _SERVICE is not None:
+        _SERVICE.flush_embed_cache()
+
+
 @public_router.get("/health")
 def health() -> dict:
     return {"status": "ok"}

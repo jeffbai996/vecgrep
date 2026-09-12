@@ -32,6 +32,16 @@ logger = logging.getLogger(__name__)
 # found at 83% of cap with the corpus still growing.
 _CAP_WARN_FRACTION = 0.9
 
+# How long a cache hit's last_used stamp may live in memory before reaching
+# sqlite. The LRU column made every READ a write: an UPDATE plus COMMIT per
+# lookup, and because last_used is indexed, each touched row dirties a table
+# page AND an index page -- ~12 KB of WAL for a one-text lookup, 2.1 MB for a
+# 500-text batch. On an always-on server that is gigabytes a day of SSD wear to
+# maintain an eviction order that is only consulted when the cache is over cap.
+# Buffering bounds the loss from an unclean exit to this interval's reads, which
+# costs nothing worse than a slightly stale victim choice.
+_TOUCH_FLUSH_SECONDS = float(os.environ.get("VECGREP_EMBED_CACHE_TOUCH_FLUSH_SECONDS", "300"))
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS embed_cache (
@@ -136,6 +146,10 @@ class EmbedCache:
         # Resolved once per instance so tests can set the env before construction.
         self._max_rows = _max_rows()
         self._cap_warned = False
+        # Deferred LRU bookkeeping. See _TOUCH_FLUSH_SECONDS: hits accumulate
+        # here and reach sqlite on a timer instead of one COMMIT per lookup.
+        self._pending_touch: dict[tuple[str, str], int] = {}
+        self._last_flush = time.monotonic()
 
     def _migrate_last_used(self) -> None:
         """Add the LRU column to a cache created before it existed.
@@ -181,28 +195,60 @@ class EmbedCache:
                 for sha, raw in cur.fetchall():
                     out[sha] = _decode(raw)
             if out and not self._read_only:
-                # A read is what makes an entry worth keeping. One UPDATE per
-                # batch, not per row, so this stays cheap on the hot path.
-                #
-                # BEST EFFORT, always. This is bookkeeping for the eviction
-                # order -- losing it costs nothing but a slightly worse choice
-                # of victim later. Letting it raise costs a whole reindex, which
-                # is exactly what happened when contention on the shared cache
-                # first surfaced. A cache lookup must never be able to fail the
-                # embed it was supposed to make cheaper.
-                try:
-                    self._touch_locked(identity, list(out))
-                    self._conn.commit()
-                except sqlite3.Error:
-                    try:
-                        self._conn.rollback()
-                    except sqlite3.Error:
-                        pass
+                # A read is what makes an entry worth keeping -- but recording
+                # that must not cost a disk write. Buffer in memory and let the
+                # timer below flush; see _TOUCH_FLUSH_SECONDS.
+                now = self._now()
+                for sha in out:
+                    self._pending_touch[(identity, sha)] = now
+                if time.monotonic() - self._last_flush >= _TOUCH_FLUSH_SECONDS:
+                    self._flush_touches_locked()
         return out
 
-    def _touch_locked(self, identity: str, shas: list[str]) -> None:
+    def _flush_touches_locked(self) -> None:
+        """Persist buffered last_used stamps. Caller must hold self._lock.
+
+        BEST EFFORT, always. This is bookkeeping for the eviction order --
+        losing it costs nothing but a slightly worse choice of victim later.
+        Letting it raise costs a whole reindex, which is exactly what happened
+        when contention on the shared cache first surfaced. A cache lookup must
+        never be able to fail the embed it was supposed to make cheaper.
+        """
+        self._last_flush = time.monotonic()
+        if not self._pending_touch or self._read_only:
+            self._pending_touch.clear()
+            return
+        pending, self._pending_touch = self._pending_touch, {}
+        try:
+            by_stamp: dict[tuple[str, int], list[str]] = {}
+            for (identity, sha), stamp in pending.items():
+                by_stamp.setdefault((identity, stamp), []).append(sha)
+            for (identity, stamp), shas in by_stamp.items():
+                self._touch_locked(identity, shas, now=stamp)
+            self._conn.commit()
+        except sqlite3.Error:
+            try:
+                self._conn.rollback()
+            except sqlite3.Error:
+                pass
+
+    def flush_touches(self) -> None:
+        """Persist buffered LRU stamps now (shutdown, or before a snapshot)."""
+        with self._lock:
+            self._flush_touches_locked()
+
+    def close(self) -> None:
+        """Flush deferred bookkeeping, then drop the connection."""
+        with self._lock:
+            self._flush_touches_locked()
+            try:
+                self._conn.close()
+            except sqlite3.Error:
+                pass
+
+    def _touch_locked(self, identity: str, shas: list[str], *, now: int | None = None) -> None:
         """Mark rows as freshly used. Caller must hold self._lock."""
-        now = self._now()
+        now = self._now() if now is None else now
         for i in range(0, len(shas), 500):
             batch = shas[i : i + 500]
             placeholders = ",".join("?" * len(batch))
@@ -247,6 +293,10 @@ class EmbedCache:
         """
         if self._max_rows <= 0:
             return
+        # Buffered reads are what protect a hot row. Land them before choosing
+        # a victim, or eviction ranks by a stale last_used and drops exactly
+        # the entries the deferral was meant to keep.
+        self._flush_touches_locked()
         (count,) = self._conn.execute("SELECT COUNT(*) FROM embed_cache").fetchone()
         threshold = self._max_rows * _CAP_WARN_FRACTION
         if count >= threshold:
