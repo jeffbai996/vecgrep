@@ -118,6 +118,17 @@ class CorpusRegistry:
         self._corpora = {}
         self._load()
 
+    def _on_disk_text(self) -> str | None:
+        """Current file contents, or None if unreadable for any reason.
+
+        None always means "write it": a missing, truncated or permission-denied
+        file must never be mistaken for "already up to date".
+        """
+        try:
+            return self.path.read_text()
+        except OSError:
+            return None
+
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {name: asdict(c) for name, c in self._corpora.items()}
@@ -127,6 +138,14 @@ class CorpusRegistry:
         # — the root of the recurring "corpora vanished" losses. Mirrors
         # config._atomic_write_json, which this used to lack.
         text = json.dumps(payload, indent=2, sort_keys=True)
+        # Skip a byte-identical rewrite. The registry is saved once per indexed
+        # source so each journal record has a full recovery boundary, and a
+        # no-op re-ingest walks every source without changing any of them --
+        # which used to cost the whole file (2.2 MB on a real install) plus two
+        # fsyncs per source, for zero new information. Comparing first is one
+        # read of a file the OS already has cached.
+        if self._on_disk_text() == text:
+            return
         fd, tmp_name = tempfile.mkstemp(
             dir=str(self.path.parent), prefix=self.path.name + ".", suffix=".tmp"
         )
