@@ -87,6 +87,18 @@ RERANK_WORKER_MAX_BYTES = max(
 RERANK_WORKER_MAX_JOBS = max(
     0, int(os.environ.get("VECGREP_RERANK_WORKER_MAX_JOBS", "64"))
 )
+
+# How much of a chunk the cross-encoder reads. bge-reranker-v2-m3 accepts 8192
+# tokens; the chunks it is actually fed measure ~620 tokens median and ~1730
+# at the tail (measured 2026-09-12 over the repos corpus), so the ceiling never
+# binds and costs nothing. A LOWER cap does not remove waste, it removes
+# content: 512 made a scoped reranked search 2.83s -> 0.91s and changed the
+# top-8 on every query tried, because it truncates the median chunk to 40%.
+# That is a retrieval-quality decision, not a tuning knob, so it ships OFF.
+# 0 keeps the model's own default.
+RERANK_MAX_LENGTH = max(
+    0, int(os.environ.get("VECGREP_RERANK_MAX_LENGTH", "0"))
+)
 RERANK_WORKER_START_TIMEOUT_S = float(
     os.environ.get("VECGREP_RERANK_WORKER_START_TIMEOUT_S", "600")
 )
@@ -236,11 +248,13 @@ def _construct_model(model_name: str):
         import torch
 
         kwargs = {}
+        if RERANK_MAX_LENGTH:
+            kwargs["max_length"] = RERANK_MAX_LENGTH
         if torch.cuda.is_available():
             # The v2-m3 checkpoint is stored as 2.2 GB of FP32 weights. Loading
             # directly in FP16 halves the steady-state model allocation and is
             # the native fast path on CUDA. CPU keeps the upstream default.
-            kwargs = {"model_kwargs": {"torch_dtype": torch.float16}}
+            kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
         return CrossEncoder(model_name, **kwargs)
     except Exception as e:
         raise RerankerError(
