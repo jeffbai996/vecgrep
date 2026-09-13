@@ -935,6 +935,11 @@ class VecgrepService:
         # Qdrant writes and journal removals have already committed.
         if update_bm25 and len(docs) > 1 and not isinstance(self.bm25, BM25SqliteStore):
             _bulk.enter_context(self.bm25.bulk(corpus_name))
+        # corpora.json lands once per run, not once per source (see
+        # CorpusRegistry.deferred_saves). The journal record per source is the
+        # crash boundary; the registry is derived state recovery can rebuild.
+        if update_registry and not self.ephemeral:
+            _bulk.enter_context(self.registry.deferred_saves(corpus_name))
         with _bulk:
             for doc in docs:
                 doc_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
@@ -985,8 +990,8 @@ class VecgrepService:
                         "operation": "index_source",
                         "phase": "prepared",
                         "source_id": doc.source_id,
-                        "corpus_before": asdict(corpus) if self.registry.has(corpus_name) else None,
-                        "corpus_target": asdict(target),
+                        "corpus_before": _journal_corpus(corpus) if self.registry.has(corpus_name) else None,
+                        "corpus_target": _journal_corpus(target),
                         "old_points": old_records,
                     })
 
@@ -2458,7 +2463,7 @@ class VecgrepService:
                 "corpus": name,
                 "operation": "delete_corpus",
                 "phase": "prepared",
-                "corpus_before": asdict(corpus),
+                "corpus_before": _journal_corpus(corpus),
             })
             self.store.drop_collection(_collection_for(corpus.name))
             record = self.mutations.read(name) or {}
@@ -2602,8 +2607,8 @@ class VecgrepService:
                 "operation": "delete_source",
                 "phase": "prepared",
                 "source_id": source_id,
-                "corpus_before": asdict(corpus),
-                "corpus_target": asdict(target),
+                "corpus_before": _journal_corpus(corpus),
+                "corpus_target": _journal_corpus(target),
             })
             self.store.delete_by_source(collection, source_id)
             record = self.mutations.read(corpus_name) or {}
@@ -3372,6 +3377,25 @@ _COLLECTION_PREFIX = "vecgrep__"
 
 def _collection_for(corpus_name: str) -> str:
     return f"{_COLLECTION_PREFIX}{corpus_name}"
+
+
+def _journal_corpus(corpus: "Corpus | None") -> dict | None:
+    """The corpus as the crash journal should remember it: metadata only.
+
+    Recovery rebuilds `sources` and `source_hashes` from the live Qdrant
+    payloads and never reads them from the record, yet the record used to
+    carry both. On a 5,791-source corpus that made every journal write a
+    4.4 MB fsync'd file, rewritten four times per indexed source: 76% of all
+    bytes an index run put on disk, ~6 GB for one reindex of a large repo corpus
+    (2026-09-13). Keep the fields so old readers still see a full Corpus,
+    just empty.
+    """
+    if corpus is None:
+        return None
+    data = asdict(corpus)
+    data["sources"] = []
+    data["source_hashes"] = {}
+    return data
 
 
 def _corpus_from_collection(collection: str) -> str | None:

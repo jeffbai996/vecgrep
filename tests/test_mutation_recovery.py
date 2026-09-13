@@ -124,3 +124,51 @@ def test_recovery_completes_interrupted_delete(svc, make_doc, monkeypatch):
     assert svc.store.count(_collection_for("notes")) == 0
     assert svc.registry.get("notes").chunk_count == 0
     assert not svc.bm25.search("notes", "delete", 10)
+
+
+def test_journal_records_carry_metadata_not_the_whole_source_map(svc, make_doc, monkeypatch):
+    """Recovery rebuilds sources/hashes from Qdrant, so the journal must not
+    carry them: on a 5,791-source corpus that was a 4.4 MB fsync'd write, four
+    times per source, 76% of an index run's bytes (2026-09-13)."""
+    import json as _json
+    for i in range(3):
+        svc.index(str(make_doc(f"d{i}.md", f"marker {i}")), "notes")
+    source = make_doc("d0.md", "changed marker")
+    monkeypatch.setattr(svc.bm25, "upsert", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("fault")))
+    with pytest.raises(RuntimeError):
+        svc.index(str(source), "notes", force=True)
+    record = svc.mutations.read("notes")
+    assert record and record["operation"] == "index_source"
+    for key in ("corpus_before", "corpus_target"):
+        assert record[key]["sources"] == [] and record[key]["source_hashes"] == {}
+        assert record[key]["dim"] and record[key]["embed_model"]
+    assert len(_json.dumps(record)) < 4000
+    monkeypatch.undo()
+    assert svc.recover_pending_mutations() == ["notes"]
+    corpus = svc.registry.get("notes")
+    assert len(corpus.sources) == 3 and len(corpus.source_hashes) == 3
+    assert svc.search("changed marker", "notes")
+
+
+def test_registry_is_saved_once_per_index_run_not_once_per_source(svc, make_doc, monkeypatch):
+    """corpora.json was rewritten (2.4 MB, two fsyncs) after every source."""
+    folder = make_doc("a.md", "alpha marker").parent
+    for i in range(4):
+        make_doc(f"b{i}.md", f"beta marker {i}")
+    saves = {"n": 0}
+    real_save = svc.registry._save
+
+    def counted():
+        saves["n"] += 1
+        real_save()
+
+    monkeypatch.setattr(svc.registry, "_save", counted)
+    docs, chunks, skipped = svc.index(str(folder), "notes")
+    assert docs >= 5
+    assert saves["n"] == 1, f"registry saved {saves['n']}x for a {docs}-source run"
+    corpus = svc.registry.get("notes")
+    assert len(corpus.sources) == docs and len(corpus.source_hashes) == docs
+    # a second run finds everything unchanged and saves at most once more
+    # (updated_at moves); it must not go back to once per source
+    _, _, skipped = svc.index(str(folder), "notes")
+    assert skipped == docs and saves["n"] <= 2
