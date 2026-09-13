@@ -25,6 +25,16 @@ _KNOWN_DIMS = {
 # dominating, small enough that one poison chunk only costs a re-embed of its
 # own window on the fallback path rather than the whole document.
 _MAX_BATCH = 64
+# How many times one chunk may be halved when Ollama says it is too long for
+# the batch, and the floor below which we stop trying and treat it as a real
+# 4xx. 8 halvings take a 1 MB chunk under 4 KB.
+_MAX_CLIPS = 8
+_MIN_CLIP_CHARS = 64
+
+
+def _is_too_long(body: str) -> bool:
+    b = (body or "").lower()
+    return "exceeds the context length" in b or "input length" in b
 
 
 def _is_finite_vector(vec: list[float]) -> bool:
@@ -157,7 +167,17 @@ class OllamaBackend(EmbedBackend):
         whole-backend problems the user must fix, not per-chunk noise.
         """
         last_reason = ""
-        for attempt in range(2):
+        # llama.cpp cannot embed a non-causal input longer than n_batch, and
+        # Ollama reports that as "the input length exceeds the context length"
+        # (a 400) even when the input fits num_ctx. One 2.5k-token symbol at
+        # ollama_num_batch=2048 therefore 503'd a whole /api/index, and the
+        # repo indexer retried it every six hours at ~2.7 GB of writes per
+        # failed attempt (2026-09-13). Clip and retry: the head of a chunk is
+        # a real vector; a zero vector or an aborted corpus is not.
+        clips = 0
+        attempt = 0
+        while attempt < 2:
+            attempt += 1
             try:
                 # /api/embed, NOT the legacy /api/embeddings: the legacy
                 # endpoint IGNORES `truncate` and returns HTTP 500 ("the input
@@ -189,6 +209,12 @@ class OllamaBackend(EmbedBackend):
             # (and any other 5xx) as a transient per-chunk fault: retry, then
             # fall back. Non-NaN 4xx (bad request) is a real error — raise it.
             if 400 <= r.status_code < 500:
+                if _is_too_long(r.text) and clips < _MAX_CLIPS and len(text) > _MIN_CLIP_CHARS:
+                    clips += 1
+                    attempt -= 1            # a clip is not a retry
+                    text = text[: len(text) // 2]
+                    logger.info("Ollama rejected a chunk as too long for its batch; retrying with %d chars", len(text))
+                    continue
                 raise EmbedBackendError(f"Ollama returned {r.status_code}: {r.text[:200]}")
             if r.status_code >= 500:
                 last_reason = f"HTTP {r.status_code}: {r.text[:120]}"

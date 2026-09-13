@@ -311,3 +311,51 @@ def test_keep_alive_env_override_and_disable(monkeypatch) -> None:
     monkeypatch.setenv("VECGREP_OLLAMA_KEEP_ALIVE", "")
     _backend_with_handler(handler).embed(["b"])
     assert "keep_alive" not in seen[-1]
+
+
+# ─────────────── over-long input vs num_batch (added 2026-09-13) ───────────────
+# llama.cpp cannot embed a non-causal input longer than n_batch, and Ollama
+# reports that as "the input length exceeds the context length" even when the
+# input fits num_ctx. With ollama_num_batch=2048 a single 2.5k-token symbol
+# 400'd, the whole /api/index 503'd, and three repos retried every six hours
+# at ~2.7 GB of writes per failed attempt.
+
+_TOO_LONG = "the input length exceeds the context length"
+
+
+def _length_limited(limit: int):
+    """Handler that 400s any single input longer than `limit` chars."""
+    seen: list[int] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        import json as _json
+        inputs = _json.loads(req.content)["input"]
+        if isinstance(inputs, str):
+            inputs = [inputs]
+        seen.append(max(len(t) for t in inputs))
+        if any(len(t) > limit for t in inputs):
+            return httpx.Response(400, json={"error": _TOO_LONG})
+        return _rows([[0.5] * 1024 for _ in inputs])
+
+    handler.seen = seen  # type: ignore[attr-defined]
+    return handler
+
+
+def test_input_longer_than_the_batch_is_clipped_until_it_embeds() -> None:
+    handler = _length_limited(1000)
+    b = _backend_with_handler(handler)
+    out = b.embed(["short", "x" * 5000, "short too"])
+    assert len(out) == 3
+    assert out[1] == [0.5] * 1024, "must get a REAL vector, not zero, not raise"
+    assert min(handler.seen) <= 1000 and max(handler.seen) == 5000
+
+
+def test_clipping_is_bounded_then_raises_like_any_other_4xx() -> None:
+    """A backend that rejects everything must not loop forever."""
+    b = _backend_with_handler(lambda req: httpx.Response(400, json={"error": _TOO_LONG}))
+    try:
+        b.embed(["y" * 5000])
+    except EmbedBackendError as e:
+        assert "context length" in str(e)
+    else:
+        raise AssertionError("expected EmbedBackendError once clipping is exhausted")
