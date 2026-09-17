@@ -496,6 +496,7 @@ class VecgrepService:
         settings: Settings | None = None,
         ephemeral: bool = False,
         embed_cache_read_only: bool = False,
+        recover_pending: bool = True,
     ) -> None:
         self.settings = settings or get_settings()
         self.ephemeral = ephemeral
@@ -541,7 +542,8 @@ class VecgrepService:
                 read_only=embed_cache_read_only,
             )
         )
-        self.recover_pending_mutations()
+        if recover_pending:
+            self.recover_pending_mutations()
 
     # ----- mutation recovery --------------------------------------------------
     def recover_pending_mutations(self) -> list[str]:

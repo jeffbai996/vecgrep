@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hmac
+import logging
+import threading
 from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -37,6 +39,7 @@ from .schemas import (
 # from being abused to dump entire huge sources via repeated calls.
 _DEFAULT_CHUNK_WINDOW = 2000
 _MAX_CHUNK_WINDOW = 20000
+logger = logging.getLogger(__name__)
 
 def require_token(authorization: str | None = Header(default=None)) -> None:
     """Bearer-token gate. No-op when settings.api_token is unset."""
@@ -62,10 +65,37 @@ router = APIRouter(prefix="/api", dependencies=[Depends(require_token)])
 
 
 _SERVICE: VecgrepService | None = None
+_SERVICE_LOCK = threading.Lock()
+
+
+def _recover_service(service: VecgrepService) -> None:
+    try:
+        recovered = service.recover_pending_mutations()
+        if recovered:
+            logger.info("background corpus recovery completed: %s", recovered)
+    except Exception:
+        logger.exception("background corpus recovery failed")
+
+
 def _service() -> VecgrepService:
     global _SERVICE
     if _SERVICE is None:
-        _SERVICE = VecgrepService()
+        with _SERVICE_LOCK:
+            if _SERVICE is None:
+                # Recovery takes per-corpus write locks and can legitimately
+                # spend minutes rebuilding a large lexical sidecar. Running it
+                # in the first request made every unrelated corpus unavailable
+                # behind a health endpoint that still reported OK. Construct
+                # the service now; corpus locks keep affected searches safe
+                # while recovery proceeds in the background.
+                service = VecgrepService(recover_pending=False)
+                _SERVICE = service
+                threading.Thread(
+                    target=_recover_service,
+                    args=(service,),
+                    name="vecgrep-recovery",
+                    daemon=True,
+                ).start()
     return _SERVICE
 
 
