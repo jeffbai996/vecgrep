@@ -341,6 +341,10 @@ BM25_DISPLAY_TOP = 90.0
 # = better recall, marginal cost. 50 is a good default for small corpora.
 CANDIDATE_POOL = 50
 
+# Admission this slow is worth a line in the journal: the silent version
+# of this wait is what made a wedged corpus invisible until a restart.
+SLOW_ADMISSION_S = 1.0
+
 # How many candidates the cross-encoder is allowed to score in one search.
 #
 # Reranking only ever surfaces top_k, and a candidate sitting 200th on fusion
@@ -2177,6 +2181,15 @@ class VecgrepService:
             selected = selected + tail[:top_k - len(selected)]
         return selected
 
+    def _search_admission_timeout(self) -> float | None:
+        """Seconds one corpus gets to admit a search; None waits."""
+        timeout = getattr(self.settings, "search_lock_timeout_s", 10.0)
+        try:
+            timeout = float(timeout)
+        except (TypeError, ValueError):
+            return 10.0
+        return timeout if timeout > 0 else None
+
     def _search_one(
         self,
         corpus: Corpus,
@@ -2187,7 +2200,16 @@ class VecgrepService:
         query_vectors: _QueryVectorMemo | None = None,
     ) -> list[SearchResult]:
         self._recover_if_pending(corpus.name)
-        with self.locks.read(corpus.name):
+        # LockTimeout leaves this corpus in search()'s failures list, which an
+        # unscoped search reports as a warning beside the corpora that did
+        # answer. The alternative is the whole call hanging on one busy corpus.
+        queued = time.monotonic()
+        with self.locks.read(corpus.name, timeout=self._search_admission_timeout()):
+            waited = time.monotonic() - queued
+            if waited >= SLOW_ADMISSION_S:
+                logger.warning(
+                    "corpus %s took %.1fs to admit a search", corpus.name, waited
+                )
             # A migration/delete may have completed while query assembly was
             # selecting corpora. Re-resolve metadata inside admission.
             corpus = self.registry.get(corpus.name)

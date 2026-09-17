@@ -43,6 +43,7 @@ ENV_MAP = {
     "VECGREP_MCP_ALLOWED_ORIGINS": "mcp_allowed_origins",
     OAUTH_APPROVAL_ENV: "oauth_approval_token",
     "VECGREP_THREAD_POOL_SIZE": "thread_pool_size",
+    "VECGREP_SEARCH_LOCK_TIMEOUT_S": "search_lock_timeout_s",
 }
 
 EDITABLE_FIELDS = {
@@ -182,6 +183,13 @@ class Settings:
     # SUM of per-corpus cost: measured 16.3s across 8 corpora where the slowest
     # single corpus was 5.3s. 1 restores serial behavior.
     search_fanout_workers: int = 8
+    # How long one corpus gets to admit a search before it is skipped. Search
+    # is the one caller that can degrade: an unscoped search drops the busy
+    # corpus to a warning and answers from the rest, and a named one reports
+    # instead of hanging. Admission used to be unbounded, so a reader stalled
+    # on a saturated disk plus one queued writer took that corpus offline for
+    # every client until vecgrep-serve was restarted. 0 restores the wait.
+    search_lock_timeout_s: float = 10.0
 
     @property
     def qdrant_path(self) -> Path:
@@ -237,6 +245,8 @@ def load_settings() -> Settings:
             if attr in {"api_port", "default_top_k", "backup_weekday", "backup_retention",
                         "thread_pool_size", "ollama_num_batch", "oauth_public_port"}:
                 val = int(val)
+            elif attr in {"search_lock_timeout_s"}:
+                val = float(val)
             elif attr in {
                 "oauth_enabled", "oauth_loopback_bypass",
                 "oauth_tailscale_identity_bypass", "backup_enabled",

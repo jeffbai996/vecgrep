@@ -19,6 +19,11 @@ patch = fixes). The version is a single source of truth in
   and corpus exploration views.
 
 ### Fixed
+- Corpus search admission is bounded by `search_lock_timeout_s`. A corpus that
+  cannot admit a search in time is reported rather than waited on, so an
+  unscoped search answers from the corpora it can reach and a scoped one
+  raises. A thread that already holds a corpus read lock now re-enters it
+  instead of queueing behind a waiting writer, which never resolved.
 - Unchanged-source indexing checks its content hash before chunk construction;
   recovery still verifies chunk counts and force-indexing still rebuilds.
 - MCP response trimming protects top passages from preview-heavy tails and
