@@ -246,6 +246,30 @@ def test_touch_failure_never_breaks_a_lookup(tmp_path, monkeypatch):
     assert cache.get_many("id", ["a"]) == {EmbedCache._sha("a"): [9.0]}
 
 
+def test_cache_write_contention_never_discards_fresh_vectors(tmp_path, monkeypatch):
+    """Persistence is optional; a computed embedding is the real result."""
+    cache = EmbedCache(tmp_path / "embed.db")
+    inner = _Counting()
+    backend = CachedBackend(inner, cache)
+
+    class LockedConnection:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def execute(self, *args, **kwargs):
+            return self.inner.execute(*args, **kwargs)
+
+        def executemany(self, *_a, **_k):
+            raise sqlite3.OperationalError("database is locked")
+
+        def rollback(self):
+            return self.inner.rollback()
+
+    monkeypatch.setattr(cache, "_conn", LockedConnection(cache._conn))
+    assert backend.embed(["fresh"]) == [[5.0, 0.0, 0.0, 0.0]]
+    assert inner.calls == 1
+
+
 def test_read_only_cache_serves_hits_without_any_mutation(tmp_path):
     """Recovery may read a shared warm cache but must never contend on it."""
     db = tmp_path / "embed.db"

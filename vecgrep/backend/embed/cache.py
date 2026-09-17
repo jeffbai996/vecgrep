@@ -269,13 +269,24 @@ class EmbedCache:
             for t, v in zip(texts, vectors)
         ]
         with self._lock:
-            self._conn.executemany(
-                "INSERT OR REPLACE INTO embed_cache "
-                "(identity, text_sha, vector, last_used) VALUES (?, ?, ?, ?)",
-                rows,
-            )
-            self._evict_over_cap_locked()
-            self._conn.commit()
+            try:
+                self._conn.executemany(
+                    "INSERT OR REPLACE INTO embed_cache "
+                    "(identity, text_sha, vector, last_used) VALUES (?, ?, ?, ?)",
+                    rows,
+                )
+                self._evict_over_cap_locked()
+                self._conn.commit()
+            except sqlite3.OperationalError as exc:
+                # The cache is shared by the API server and every indexer. A
+                # long writer can outlive busy_timeout; the freshly computed
+                # vectors are still valid, so cache persistence must remain a
+                # best-effort optimisation rather than fail the search/index.
+                try:
+                    self._conn.rollback()
+                except sqlite3.Error:
+                    pass
+                logger.warning("embed cache write skipped: %s", exc)
 
     def _evict_over_cap_locked(self) -> None:
         """Drop the coldest rows if over the cap. Caller must hold self._lock.
