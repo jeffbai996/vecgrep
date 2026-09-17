@@ -19,6 +19,10 @@ patch = fixes). The version is a single source of truth in
   and corpus exploration views.
 
 ### Fixed
+- MCP tool calls wait a bounded `VECGREP_MCP_GATE_WAIT_S` for the single tool
+  slot and report `ToolBusyError` instead of queueing behind a stuck call.
+  One tool body blocked on a saturated disk used to hold that slot with no
+  ceiling, so every later MCP call hung while REST kept answering.
 - Corpus search admission is bounded by `search_lock_timeout_s`. A corpus that
   cannot admit a search in time is reported rather than waited on, so an
   unscoped search answers from the corpora it can reach and a scoped one

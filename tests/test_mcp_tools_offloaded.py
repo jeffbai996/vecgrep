@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 import time
 
 import pytest
@@ -33,6 +34,7 @@ pytest.importorskip("mcp")
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from vecgrep.mcp import server as mcp_server  # noqa: E402
+from vecgrep.mcp.server import ToolBusyError  # noqa: E402
 
 
 def _patched() -> FastMCP:
@@ -135,3 +137,91 @@ def test_the_real_server_applies_it_before_registering_anything():
         "build_http_app does not offload its tools"
     assert src.index("_offload_sync_tools(fmcp)") < src.index("@fmcp.tool("), \
         "tools are registered before the offload patch is applied"
+
+
+# --------------------------------------------------------------------------
+# One stuck tool must not blackhole every other MCP call.
+#
+# Tool bodies share a single-slot gate so the search path never meets the
+# concurrency it was not written for. The wait on that gate had no ceiling:
+# on 2026-09-16 a search parked on a saturated disk held it, and every MCP
+# call after it -- list_corpora included, whose body does almost nothing --
+# queued behind it until the service was restarted. REST was unaffected the
+# whole time, which is why the server looked healthy from curl and dead from
+# every agent.
+# --------------------------------------------------------------------------
+
+
+def _call(fmcp, name, **kwargs):
+    return fmcp._tool_manager.get_tool(name).fn(**kwargs)
+
+
+def test_a_stuck_tool_does_not_blackhole_the_next_call(monkeypatch):
+    monkeypatch.setattr(mcp_server, "MCP_GATE_WAIT_S", 0.3)
+    fmcp = _patched()
+    stuck = threading.Event()
+    entered = threading.Event()
+
+    @fmcp.tool(description="never returns on its own")
+    def hold() -> str:
+        entered.set()
+        stuck.wait(30)
+        return "done"
+
+    @fmcp.tool(description="cheap")
+    def cheap() -> str:
+        return "ok"
+
+    async def scenario():
+        held = asyncio.create_task(_call(fmcp, "hold"))
+        await asyncio.to_thread(entered.wait, 5)
+        started = time.monotonic()
+        with pytest.raises(ToolBusyError):
+            await _call(fmcp, "cheap")
+        assert time.monotonic() - started < 3
+        stuck.set()
+        await held
+
+    asyncio.run(scenario())
+
+
+def test_the_gate_still_serializes_tool_bodies(monkeypatch):
+    monkeypatch.setattr(mcp_server, "MCP_GATE_WAIT_S", 10)
+    fmcp = _patched()
+    overlap = []
+    inside = []
+
+    @fmcp.tool(description="records overlap")
+    def slow(tag: str) -> str:
+        inside.append(tag)
+        overlap.append(len(inside))
+        time.sleep(0.1)
+        inside.remove(tag)
+        return tag
+
+    async def scenario():
+        await asyncio.gather(_call(fmcp, "slow", tag="a"),
+                             _call(fmcp, "slow", tag="b"))
+
+    asyncio.run(scenario())
+    assert overlap == [1, 1], "tool bodies ran concurrently"
+
+
+def test_a_raising_tool_hands_the_gate_back(monkeypatch):
+    monkeypatch.setattr(mcp_server, "MCP_GATE_WAIT_S", 0.3)
+    fmcp = _patched()
+
+    @fmcp.tool(description="raises")
+    def boom() -> str:
+        raise ValueError("nope")
+
+    @fmcp.tool(description="cheap")
+    def cheap() -> str:
+        return "ok"
+
+    async def scenario():
+        with pytest.raises(ValueError):
+            await _call(fmcp, "boom")
+        assert await _call(fmcp, "cheap") == "ok"
+
+    asyncio.run(scenario())

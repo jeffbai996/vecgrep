@@ -1773,6 +1773,22 @@ def build_mcp_server() -> Any:
 # Tool dispatch — off the event loop
 # ---------------------------------------------------------------------------
 
+class ToolBusyError(RuntimeError):
+    """Raised when a tool call cannot get the single tool slot in time.
+
+    An agent can read this and retry or narrow its query. The alternative --
+    what this replaces -- was queueing behind the stuck call until the client
+    gave up, which every MCP caller experienced as a dead server while REST
+    kept answering normally.
+    """
+
+
+# How long a tool call waits for the slot before saying so. Long enough that
+# an ordinary search ahead of it finishes, short enough to stay inside a
+# client's tool timeout.
+MCP_GATE_WAIT_S = float(_os.environ.get("VECGREP_MCP_GATE_WAIT_S", "20"))
+
+
 def _offload_sync_tools(fmcp: Any) -> None:
     """Make `@fmcp.tool` register synchronous bodies as coroutines.
 
@@ -1817,9 +1833,23 @@ def _offload_sync_tools(fmcp: Any) -> None:
 
             @functools.wraps(fn)          # keeps __wrapped__, so the schema
             async def offloaded(**call):  # FastMCP derives from the signature
-                async with gate:          # is the original function's
+                                          # is the original function's
+                # Bounded: one tool body stuck on a saturated disk used to
+                # hold this slot indefinitely, and every later call -- even
+                # ones whose body does nothing -- waited behind it forever.
+                with anyio.move_on_after(MCP_GATE_WAIT_S) as scope:
+                    await gate.acquire()
+                if scope.cancelled_caught:
+                    raise ToolBusyError(
+                        f"vecgrep is busy: no tool slot within "
+                        f"{MCP_GATE_WAIT_S:.0f}s. Retry, or scope the call to "
+                        f"one corpus."
+                    )
+                try:
                     return await anyio.to_thread.run_sync(
                         functools.partial(fn, **call))
+                finally:
+                    gate.release()
 
             return decorate(offloaded)
 
