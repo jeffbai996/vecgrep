@@ -1969,9 +1969,29 @@ def build_oauth_root_routes(oauth_issuer_url: str) -> list:
         scopes_supported=list(VALID_SCOPES),
     )
     return [
-        _guard_oauth_registration(_trace_oauth(advertise_public_clients(r)))
+        _guard_oauth_registration(_trace_oauth(advertise_loopback_resource(advertise_public_clients(r))))
         for r in routes
     ]
+
+
+def advertise_loopback_resource(route):
+    """A direct loopback caller never needs OAuth to use /mcp -- but this
+    metadata route is built once at startup with the public Funnel URL baked
+    in as `resource`, since that's the correct identity for the claude.ai/
+    ChatGPT connectors this same route also serves.
+    An SDK client that dials the loopback URL directly then fetches this
+    metadata sees a `resource` that doesn't match the origin it connected to
+    and refuses to proceed as a spec-compliance check (2026-09-18) -- even
+    though that peer was never going to be challenged for a token anyway.
+    Rewrite `resource` to the literal loopback origin for a request that
+    passes the same trust check used to bypass bearer-token enforcement
+    elsewhere in this file (peer is loopback, no proxy/Tailscale headers);
+    every other caller keeps seeing the public identity unchanged."""
+    from starlette.routing import Route
+    if not isinstance(route, Route) or not route.path.startswith("/.well-known/oauth-protected-resource"):
+        return route
+    return Route(route.path, endpoint=_LoopbackResourceMetadata(route.endpoint),
+                 methods=list(route.methods or ["GET", "OPTIONS"]))
 
 
 def advertise_public_clients(route):
@@ -2184,6 +2204,53 @@ class _OAuthTraceASGI:
         _trace_log(scope.get("method"), self._path, scope.get("query_string", b"").decode("latin-1"), hdrs,
                    b"".join(body_in).decode("utf-8", "replace"), start["status"] if start else "?", loc,
                    b"".join(out).decode("utf-8", "replace"))
+
+
+class _LoopbackResourceMetadata:
+    """Rewrite the `resource` field of RFC 9728 protected-resource metadata to
+    the literal loopback origin, but only for a request that passes the same
+    unproxied-loopback-peer check the bearer-token bypass uses elsewhere in
+    this file. See advertise_loopback_resource() for why."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    async def __call__(self, scope, receive, send):
+        import json as _json
+
+        start = None
+        chunks: list[bytes] = []
+
+        async def capture(message):
+            nonlocal start
+            if message["type"] == "http.response.start":
+                start = message
+            elif message["type"] == "http.response.body":
+                chunks.append(message.get("body", b""))
+
+        await self._inner(scope, receive, capture)
+        if start is None:
+            return
+        body = b"".join(chunks)
+        if (
+            _has_loopback_peer(scope)
+            and _has_loopback_server(scope)
+            and not (_mcp_request_headers(scope).keys() & _PROXY_TRANSIT_HEADERS)
+        ):
+            try:
+                meta = _json.loads(body)
+                server_host, server_port = scope.get("server", (None, None))
+                if server_host:
+                    resource_path = str(meta.get("resource", "")).split("://", 1)[-1]
+                    resource_path = "/" + resource_path.split("/", 1)[1] if "/" in resource_path else "/mcp"
+                    meta["resource"] = f"http://{server_host}:{server_port}{resource_path}"
+                    body = _json.dumps(meta).encode()
+            except Exception:
+                pass
+        headers = [(k, v) for k, v in start.get("headers", []) if k.lower() != b"content-length"]
+        headers.append((b"content-length", str(len(body)).encode()))
+        await send({"type": "http.response.start", "status": start["status"], "headers": headers})
+        await send({"type": "http.response.body", "body": body})
 
 
 class _PublicClientMetadata:
