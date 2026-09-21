@@ -288,6 +288,14 @@ service environment can split the daemon and an interactive CLI across two
 different stores. `vecgrep doctor` detects registry/store drift, but naturally
 it can only inspect the backend selected by its own effective config.
 
+`vecgrep doctor` also reports multiple registered file IDs that resolve to the
+same path after a directory move or symlink change. JSON output includes each
+group, its resolved path, and whether that path is registered.
+`--require-healthy` exits nonzero while aliases remain. `--fix` does not choose
+which source to delete: first normalize the ingestion path and verify canonical
+coverage, then remove legacy IDs through `VecgrepService.delete_source` so both
+vector and keyword indexes are updated together.
+
 ## Backup and recovery
 
 Whole-instance backups contain per-corpus Qdrant snapshots, the corpus

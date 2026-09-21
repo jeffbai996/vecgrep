@@ -1625,7 +1625,9 @@ def doctor(
     Catches vector-store drift plus a missing BM25 sidecar: a corpus a Qdrant
     restart wiped (registry says N chunks, store has 0), a chunk_count that
     drifted, an orphan collection with no registry entry, a missing keyword
-    index, or a registered source whose file is gone. Read-only by default —
+    index, a registered source whose file is gone, or duplicate path aliases.
+    Path aliases require manual repair even with --fix: confirm canonical
+    coverage before removing legacy source IDs. Read-only by default —
     pass --fix to recount drift, re-index any wiped corpus from its recorded
     sources, rebuild a missing BM25 index from existing Qdrant payloads without
     embedding again, and PURGE sources that no longer exist from both the
@@ -1674,6 +1676,11 @@ def doctor(
     for i in issues:
         mark = "○" if i["fixable"] else "●"
         click.echo(f"  {mark} [{i['kind']}] {i['corpus']}: {i['detail']}")
+    if any(i["kind"] == "source_path_aliases" for i in issues):
+        click.echo("")
+        click.echo("path aliases require manual repair: normalize ingestion paths, "
+                   "confirm canonical coverage, then delete legacy source IDs "
+                   "through VecgrepService.delete_source. Use --json for alias groups.")
     if fix:
         click.echo("")
         click.echo("actions:")
@@ -1687,7 +1694,10 @@ def doctor(
                 click.echo(f"  vecgrep index <source> --corpus {a['corpus']}")
     else:
         click.echo("")
-        click.echo("run `vecgrep doctor --fix` to repair (○ = auto-fixable).")
+        if any(i["fixable"] for i in issues):
+            click.echo("run `vecgrep doctor --fix` to repair (○ = auto-fixable).")
+        elif not any(i["kind"] == "source_path_aliases" for i in issues):
+            click.echo("These issues require manual repair; use --json for details.")
 
     if require_healthy and remaining_issues:
         click.echo("")

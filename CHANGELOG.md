@@ -19,6 +19,9 @@ patch = fixes). The version is a single source of truth in
   and corpus exploration views.
 
 ### Fixed
+- `doctor` reports duplicate source path aliases after directory moves or
+  symlink changes, with exact groups in JSON and a failing health gate. Alias
+  repair remains manual so canonical coverage is verified before deletion.
 - MCP tool calls wait a bounded `VECGREP_MCP_GATE_WAIT_S` for the single tool
   slot and report `ToolBusyError` instead of queueing behind a stuck call.
   One tool body blocked on a saturated disk used to hold that slot with no

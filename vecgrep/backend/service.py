@@ -2719,6 +2719,9 @@ class VecgrepService:
             Its chunks are still indexed, so a deleted document keeps being
             returned as a live answer. Always fixable — the fix is to purge it
             from both backends. Carries an extra "source_id" key.
+          - "source_path_aliases": multiple registered IDs resolve to the same
+            existing file. Carries "groups" and "extra_sources". Requires manual
+            canonical-coverage verification before deleting legacy IDs.
           - "embed_model_split": corpora on the same backend disagree about
             which embedding model to use. Not corruption — everything still
             answers — which is exactly why it hides. Ollama treats each model
@@ -2797,6 +2800,21 @@ class VecgrepService:
                         "detail": f"source no longer exists: {src_id}",
                         "fixable": True,
                     })
+
+            groups = _source_path_aliases(
+                list(set(c.sources or []) | set(c.source_hashes or {}))
+            )
+            if groups:
+                extra = sum(len(group["source_ids"]) - 1 for group in groups)
+                issues.append({
+                    "corpus": name,
+                    "kind": "source_path_aliases",
+                    "detail": f"{len(groups)} file(s) registered under multiple "
+                              f"path spellings ({extra} extra source IDs)",
+                    "fixable": False,
+                    "extra_sources": extra,
+                    "groups": groups,
+                })
 
             if c.chunk_count > 0:
                 if not self.bm25.exists(name):
@@ -2942,6 +2960,11 @@ class VecgrepService:
                     "kind": kind,
                     "source_id": issue["source_id"],
                     "action": "purged",
+                })
+            elif kind == "source_path_aliases":
+                actions.append({
+                    "corpus": name, "kind": kind,
+                    "action": "needs_source_deduplication",
                 })
             else:  # orphan_collection
                 actions.append({"corpus": name, "kind": kind, "action": "needs_manual_index"})
@@ -3427,6 +3450,34 @@ def _corpus_from_collection(collection: str) -> str | None:
     if collection.startswith(_COLLECTION_PREFIX):
         return collection[len(_COLLECTION_PREFIX):]
     return None
+
+
+def _source_path_aliases(sources: list[str]) -> list[dict]:
+    """Group existing file IDs by resolved path, without comparing content.
+
+    Distinct hard-link names remain distinct identities because adapters keep
+    those names after resolving symlinks. Missing files are diagnosed separately.
+    """
+    by_path: dict[str, list[str]] = {}
+    for source in sorted(set(sources)):
+        if source.startswith(("http://", "https://")):
+            continue
+        try:
+            path = Path(source).resolve(strict=True)
+            if not path.is_file():
+                continue
+        except (OSError, RuntimeError, ValueError):
+            continue
+        by_path.setdefault(str(path), []).append(source)
+    return [
+        {
+            "canonical_source_id": canonical,
+            "source_ids": aliases,
+            "canonical_registered": canonical in aliases,
+        }
+        for canonical, aliases in sorted(by_path.items())
+        if len(aliases) > 1
+    ]
 
 
 def _source_exists(source_id: str) -> bool:
