@@ -1317,13 +1317,20 @@ class VecgrepService:
             # distinct evidence, not five slices of one exchange. On corpora
             # with no near-dups this degrades to plain score order.
             results = mmr_select(results, top_k)
-            # Display order follows similarity_pct scaled by the corpus rank
-            # weight — identical to raw pct order when weights are neutral;
-            # where they differ, a curated corpus deliberately edges out a
-            # transcript hit of comparable %, which is the point of weighting.
-            weights = {c.name: (getattr(c, "rank_weight", 1.0) or 1.0) for c in corpora}
-            results.sort(key=lambda r: r.similarity_pct * weights.get(r.corpus, 1.0),
-                         reverse=True)
+            # Final order follows `score`: the fused RRF score already
+            # multiplied by recency decay and the corpus rank weight in
+            # _search_one — the one number the pipeline claims ranked a hit.
+            #
+            # This used to sort by similarity_pct * rank_weight so the list
+            # read monotonic in the displayed %. That silently erased decay:
+            # similarity_pct carries no decay term, and since 2026-09-09 it is
+            # not even one scale (calibrated cosine for dense hits, a
+            # rank-relative rescale that always reads ~90 for the top
+            # BM25-only hit), so a 400-day-old lexical-only hit sat above a
+            # fresh dense hit on a corpus with a 30-day half-life. The
+            # lexical-only label and `explain` are how a consumer reconciles
+            # a lower % ranked higher; the ordering itself must be the score.
+            results.sort(key=lambda r: r.score, reverse=True)
         if corpus_name is None or plural_scope:
             counts = {name: 0 for name in successful}
             for result in results:
