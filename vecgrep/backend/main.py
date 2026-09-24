@@ -311,8 +311,7 @@ def create_app() -> FastAPI:
             # chain and otherwise leaves the owner staring at this page. No web
             # fonts either — default-src 'none' would block the
             # fetch anyway, and the system stack renders instantly with no FOUC.
-            # Palette is the ticker-tape board: near-black, amber accent, quiet
-            # greys — this page is part of the same product, not a vendor form.
+            # Palette follows vecgrep's violet vector mark and dark search UI.
             body = f"""<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
