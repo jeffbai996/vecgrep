@@ -321,21 +321,11 @@ RRF_K = 60
 # Override via env var VECGREP_BM25_WEIGHT.
 BM25_WEIGHT = float(os.environ.get("VECGREP_BM25_WEIGHT", "1.5"))
 
-# Floor + headroom for displaying BM25-only hit pct.
-#
-# BM25 scores are unbounded positive numbers and corpus-relative, so the raw
-# value can't map directly to a meaningful percentage. We rescale within the
-# result set: the strongest BM25 hit for this query reads at BM25_DISPLAY_TOP,
-# weaker hits taper toward BM25_DISPLAY_FLOOR. The display is "rank-relative
-# confidence", not absolute. Underlying ranking uses raw RRF scores and is
-# unaffected.
-#
-# Calibration matches the cosine sigmoid: floor at 25% (visible but clearly
-# weak), top at 90% (strong but not "certain"). Anything below 25% gets
-# clipped — if BM25 didn't find it strongly, vector probably should be the
-# voice that speaks.
+# Lexical-only confidence stays below the related/strong semantic bands.
+# Within that band the rank-relative scale preserves lexical ordering, while
+# raw BM25/RRF scores and corpus rank weights retain their existing meaning.
 BM25_DISPLAY_FLOOR = 25.0
-BM25_DISPLAY_TOP = 90.0
+BM25_DISPLAY_TOP = 39.0
 
 # How many candidates each retriever returns before fusion. Larger pool
 # = better recall, marginal cost. 50 is a good default for small corpora.
@@ -474,7 +464,7 @@ class SearchResult:
 
         A hit the dense channel never corroborated is "lexical-only" instead
         of a confidence bucket. Its percentage is rank-relative within one
-        corpus (see BM25_DISPLAY_FLOOR/TOP), so the top lexical hit reads ~90
+        corpus (see BM25_DISPLAY_FLOOR/TOP), so the top lexical hit stays below 40
         whether its absolute BM25 score is 7.5 or 0.067 — a bucket derived
         from that number reads as semantic confidence it does not have.
         """
@@ -2356,7 +2346,7 @@ class VecgrepService:
         ]
         hydrated = self.store.get_many_by_id(collection, missing)
         # For BM25-only display: rescale per-query so the top BM25 hit reads
-        # at BM25_DISPLAY_TOP (~90%) and weaker BM25 hits taper toward
+        # at BM25_DISPLAY_TOP (below 40%) and weaker BM25 hits taper toward
         # BM25_DISPLAY_FLOOR. The raw fused RRF score is unchanged for ranking.
         max_bm25 = max(bm25_score_by_id.values()) if bm25_score_by_id else 0.0
 
