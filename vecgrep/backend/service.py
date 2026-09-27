@@ -937,6 +937,7 @@ class VecgrepService:
         if update_registry and not self.ephemeral:
             _bulk.enter_context(self.registry.deferred_saves(corpus_name))
         with _bulk:
+            explorer_pending: list[dict] = []
             for doc in docs:
                 doc_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
                 matches_recorded_source = corpus.source_hashes.get(doc.source_id) == doc_hash
@@ -1036,25 +1037,15 @@ class VecgrepService:
                     self.mutations.write(record)
                 if update_bm25:
                     self.bm25.upsert(corpus_name, ids, [c.text for c in chunks], payloads)
-                    try:
-                        self.explorer_store.upsert(
-                            corpus_name,
-                            {
-                                "source_id": doc.source_id,
-                                "metadata": payloads[0].get("metadata") or {},
-                                "doc_timestamp": doc.timestamp,
-                                "chunk_count": len(chunks),
-                            },
-                        )
-                    except Exception as exc:
-                        # Browse metadata is disposable. Never fail canonical
-                        # indexing because its derived cache needs a rebuild.
-                        catalog_sync_ok = False
-                        logger.warning(
-                            "explorer catalog update failed for %s: %s",
-                            corpus_name,
-                            exc,
-                        )
+                    # Browse metadata lands once per pass (see the flush after
+                    # the loop): a commit per source rewrote the catalog for
+                    # every document of every incremental pass.
+                    explorer_pending.append({
+                        "source_id": doc.source_id,
+                        "metadata": payloads[0].get("metadata") or {},
+                        "doc_timestamp": doc.timestamp,
+                        "chunk_count": len(chunks),
+                    })
                     if journaled:
                         record = self.mutations.read(corpus_name) or {}
                         record["phase"] = "bm25_done"
@@ -1074,18 +1065,6 @@ class VecgrepService:
                         self.registry._corpora[corpus.name] = corpus
                     else:
                         self.registry.upsert(corpus)
-                    if catalog_sync_ok:
-                        try:
-                            self.explorer_store.set_generation(
-                                corpus.name, self._explorer_generation(corpus)
-                            )
-                        except Exception as exc:
-                            catalog_sync_ok = False
-                            logger.warning(
-                                "explorer catalog commit failed for %s: %s",
-                                corpus_name,
-                                exc,
-                            )
                     if journaled:
                         record = self.mutations.read(corpus_name) or {}
                         record["phase"] = "registry_done"
@@ -1095,6 +1074,24 @@ class VecgrepService:
         # During recovery, do not persist an intermediate point count as the
         # corpus's expected total. If interrupted, diagnose() must retain count
         # drift instead of accepting a partial collection as healthy.
+        if update_bm25 and explorer_pending:
+            # Browse metadata is disposable. Never fail canonical indexing
+            # because its derived cache needs a rebuild; a stale generation
+            # marker is caught at read time and the catalog rebuilt from BM25.
+            try:
+                self.explorer_store.upsert_many(corpus_name, explorer_pending)
+                # Stamp the generation only when the catalog was complete going
+                # in; a partial legacy catalog stays unstamped so the explorer
+                # rebuilds it from BM25 instead of trusting a short list.
+                if update_registry and catalog_sync_ok:
+                    self.explorer_store.set_generation(
+                        corpus.name, self._explorer_generation(corpus)
+                    )
+            except Exception as exc:
+                catalog_sync_ok = False
+                logger.warning(
+                    "explorer catalog update failed for %s: %s", corpus_name, exc,
+                )
         if not update_registry:
             if prev_bypass is not None and hasattr(backend, "bypass"):
                 backend.bypass = prev_bypass
