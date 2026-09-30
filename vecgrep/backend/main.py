@@ -159,6 +159,15 @@ def create_app() -> FastAPI:
         finally:
             stop.set()
             backup_thread.join(timeout=2)
+            # Cache hits buffer their LRU stamps in memory to keep reads off
+            # the disk; land them now so a restart does not reset the whole
+            # cache to "equally cold".
+            try:
+                from .api.routes import flush_embed_cache_if_started
+
+                flush_embed_cache_if_started()
+            except Exception as exc:
+                logger.warning("embed cache flush on shutdown failed: %s", exc)
 
     app = FastAPI(title="vecgrep", version=__version__, lifespan=lifespan)
     # Covers both the root SDK authorize route and the duplicate mounted route
@@ -302,8 +311,7 @@ def create_app() -> FastAPI:
             # chain and otherwise leaves the owner staring at this page. No web
             # fonts either — default-src 'none' would block the
             # fetch anyway, and the system stack renders instantly with no FOUC.
-            # Palette is the ticker-tape board: near-black, amber accent, quiet
-            # greys — this page is part of the same product, not a vendor form.
+            # Palette follows vecgrep's violet vector mark and dark search UI.
             body = f"""<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
@@ -312,9 +320,9 @@ def create_app() -> FastAPI:
 <title>{html.escape(heading)}</title>
 <style>
 :root {{
-  --bg: #07080a; --bg-2: #0e1013; --bg-3: #15181d;
-  --fg: #e6e8eb; --fg-2: #9aa2ad; --muted: #6b7480; --line: #1f242b;
-  --accent: #f59e0b; --accent-hi: #fbbf24; --accent-ring: rgba(245,158,11,0.28); --accent-wash: rgba(245,158,11,0.10);
+  --bg: #0b0d10; --bg-2: #121019; --bg-3: #1b1726;
+  --fg: #e6e8eb; --fg-2: #9aa2ad; --muted: #9690a5; --line: #30283e;
+  --accent: #a78bfa; --accent-hi: #c4b5fd; --accent-ring: rgba(167,139,250,0.28); --accent-wash: rgba(167,139,250,0.10);
   --bad: #f85149; --bad-soft: rgba(248,81,73,0.10); --bad-border: rgba(248,81,73,0.35);
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -351,7 +359,7 @@ input[type="password"]::placeholder {{ color: var(--muted); letter-spacing: 0.2e
 input[type="password"]:focus-visible {{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }}
 button {{
   width: 100%; margin-top: 14px; padding: 13px 16px; border-radius: 10px; border: none;
-  background: var(--accent); color: #0b0804; font: inherit; font-weight: 650; font-size: 0.92rem; letter-spacing: 0.01em;
+  background: var(--accent); color: #1c1033; font: inherit; font-weight: 650; font-size: 0.92rem; letter-spacing: 0.01em;
   cursor: pointer; transition: background-color 120ms ease, transform 60ms ease;
 }}
 button:hover {{ background: var(--accent-hi); }}
@@ -360,11 +368,15 @@ button:focus-visible {{ outline: 2px solid var(--accent); outline-offset: 3px; }
 .err {{ display: flex; gap: 8px; align-items: center; margin: 0 0 16px; background: var(--bad-soft); border: 1px solid var(--bad-border); color: var(--bad); border-radius: 10px; padding: 10px 12px; font-size: 0.8rem; }}
 .err svg {{ flex: none; }}
 footer {{ margin: 16px 4px 0; display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--muted); letter-spacing: 0.04em; }}
+.brand {{ flex-wrap: wrap; }} .brand b {{ font-family: var(--mono); }}
+.brand span:last-child {{ overflow-wrap: anywhere; text-transform: none; letter-spacing: 0; }}
+h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16px; }}
+@media(max-width:440px) {{ body {{ padding:20px 16px; }} .card {{ padding:24px 20px; }} footer {{ gap:12px; flex-wrap:wrap; }} }}
 </style>
 <body>
 <main>
 <div class="brand">
-<span class="mark"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="13" cy="13" r="5" stroke="currentColor" stroke-width="2.4"/><path d="M17 17l4 4" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><circle cx="5" cy="6" r="1.6" fill="currentColor" opacity=".6"/><circle cx="11" cy="4" r="1.6" fill="currentColor" opacity=".6"/><circle cx="6" cy="15" r="1.6" fill="currentColor" opacity=".6"/></svg></span>
+<span class="mark"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 19L19 5M10 5h9v9"/></svg></span>
 <b>vecgrep</b><span>{host}</span>
 </div>
 <div class="card">
@@ -487,6 +499,27 @@ footer {{ margin: 16px 4px 0; display: flex; justify-content: space-between; fon
         def root() -> FileResponse:
             return FileResponse(FRONTEND_DIR / "index.html")
 
+        # Only /assets is mounted, so anything else at the root falls through
+        # to the SPA catch-all and comes back as index.html. The browser then
+        # asks for /favicon.svg and is handed a page (2026-09-09).
+        # One route per icon, named explicitly rather than a /{path} catch-all,
+        # which would swallow every unmatched GET in the app. Only /assets is
+        # mounted, so a file at the root otherwise falls through to the SPA
+        # catch-all and the browser is handed a page where it wanted an image.
+        #
+        # Three of them because one is not enough: Safari ignores an SVG
+        # apple-touch-icon, and a browser that falls back to /favicon.ico was
+        # being served index.html (2026-09-09).
+        def _icon_route(name: str, media: str) -> None:
+            @app.get(f"/{name}", include_in_schema=False, name=f"icon_{name}")
+            def _serve() -> FileResponse:
+                return FileResponse(FRONTEND_DIR / name, media_type=media)
+
+        for _name, _media in (("favicon.svg", "image/svg+xml"),
+                              ("favicon.ico", "image/x-icon"),
+                              ("apple-touch-icon.png", "image/png")):
+            _icon_route(_name, _media)
+
         @app.get("/{full_path:path}")
         def spa(full_path: str) -> FileResponse:
             # SPA fallback — any unknown path serves index.html so React
@@ -510,6 +543,16 @@ footer {{ margin: 16px 4px 0; display: flex; justify-content: space-between; fon
             # matched earlier and never reach this.
             return no_frontend()
 
+    from .auth.ingress import OAuthIngressMiddleware
+    from .config import get_settings
+
+    settings = get_settings()
+    app.add_middleware(
+        OAuthIngressMiddleware,
+        private_port=settings.api_port,
+        public_port=settings.oauth_public_port,
+        oauth_ready=bool(settings.oauth_enabled and settings.oauth_issuer_url and mcp_http_app),
+    )
     return app
 
 

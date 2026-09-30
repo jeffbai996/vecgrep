@@ -523,3 +523,23 @@ def test_get_chunk_window_missing_chunk_returns_none(svc, make_doc):
     svc.index(str(p), "test")
     result = svc.get_chunk_window("test", "nonexistent-chunk-id", window=500)
     assert result is None
+
+
+def test_unchanged_source_skips_chunker(svc, make_doc, monkeypatch):
+    p = make_doc('unchanged.md', 'Existing evidence. Another sentence.')
+    svc.index(str(p), 'test')
+
+    class UnreachableChunker:
+        def chunk_doc(self, doc):
+            raise AssertionError('unchanged source reached chunker')
+
+    monkeypatch.setattr(svc, 'chunker', lambda name: UnreachableChunker())
+    assert svc.index(str(p), 'test') == (0, 0, 1)
+
+
+def test_recovery_count_mismatch_is_not_skipped_by_matching_hash(svc, make_doc):
+    p = make_doc('incomplete.md', 'Existing evidence. Another sentence.')
+    _, count, _ = svc.index(str(p), 'test')
+    docs, chunks, skipped = svc.index(str(p), 'test',
+        resume_source_counts={str(p.resolve()): max(0, count - 1)})
+    assert docs == 1 and chunks == count and skipped == 0

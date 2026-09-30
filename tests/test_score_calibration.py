@@ -143,3 +143,56 @@ def test_service_calibration_handles_none_corpus() -> None:
     cal = VecgrepService.calibration(fake, None)
     center, slope = _calibration_for(None)
     assert cal["cosine_center"] == center and cal["cosine_slope"] == slope
+
+
+# ── tagged model refs resolve to their base model's calibration ──────────────
+#
+# Regression: corpora are indexed under an Ollama ref like `bge-m3:batch4k`,
+# where the tag selects runtime batch options, not a different model. The
+# calibration table is keyed by model name, so the exact-match lookup missed
+# and every tagged corpus silently fell back to the nomic-ish defaults —
+# whose 0.66 center sits ABOVE almost every bge-m3 cosine. That mis-set both
+# the display sigmoid and `_cosine_floor`, which pushed the pre-fusion floor
+# to 0.56 and discarded nearly the whole dense channel.
+
+def test_tagged_model_ref_uses_base_model_calibration() -> None:
+    assert _calibration_for("bge-m3:batch4k") == _calibration_for("bge-m3")
+    assert _calibration_for("mxbai-embed-large:latest") == _calibration_for(
+        "mxbai-embed-large"
+    )
+    assert _calibration_for("nomic-embed-text:v1.5") == _calibration_for(
+        "nomic-embed-text"
+    )
+
+
+def test_tagged_ref_does_not_fall_back_to_module_defaults() -> None:
+    from vecgrep.backend.service import CALIBRATION_CENTER, CALIBRATION_SLOPE
+
+    assert _calibration_for("bge-m3:batch4k") != (CALIBRATION_CENTER, CALIBRATION_SLOPE)
+
+
+def test_exact_ref_wins_over_base_name() -> None:
+    """A deliberately pinned tagged ref must not be overridden by its base."""
+    saved = dict(svc_mod._MODEL_CALIBRATION)
+    try:
+        svc_mod._MODEL_CALIBRATION["bge-m3:batch4k"] = (0.71, 9.0)
+        assert _calibration_for("bge-m3:batch4k") == (0.71, 9.0)
+    finally:
+        svc_mod._MODEL_CALIBRATION.clear()
+        svc_mod._MODEL_CALIBRATION.update(saved)
+
+
+def test_unknown_model_still_falls_back() -> None:
+    from vecgrep.backend.service import CALIBRATION_CENTER, CALIBRATION_SLOPE
+
+    for ref in ("who-knows", "who-knows:v2", "", None):
+        assert _calibration_for(ref) == (CALIBRATION_CENTER, CALIBRATION_SLOPE)
+
+
+def test_tagged_ref_lowers_the_pre_fusion_cosine_floor() -> None:
+    """The floor a real deployed corpus gets must match its base model's."""
+    from vecgrep.backend.service import _cosine_floor
+
+    assert _cosine_floor("bge-m3:batch4k") == _cosine_floor("bge-m3")
+    # And it must sit below bge-m3's real hit band, not above it.
+    assert _cosine_floor("bge-m3:batch4k") < 0.52

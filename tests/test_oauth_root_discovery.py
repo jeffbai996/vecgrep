@@ -428,3 +428,45 @@ def test_register_rate_limits_bursts(oauth_client):
     assert all(r.status_code == 201 for r in responses[:30])
     assert responses[-1].status_code == 429
     assert responses[-1].headers["retry-after"]
+
+
+def test_protected_resource_metadata_matches_origin_for_direct_loopback(oauth_client):
+    # A same-machine SDK client that dials the loopback bypass URL directly
+    # must see a `resource` that matches the origin it actually connected to
+    # (2026-09-18) -- otherwise its own OAuth spec-compliance check refuses to
+    # proceed even though this peer was never going to be challenged.
+    with TestClient(
+        create_app(),
+        base_url="http://127.0.0.1:8765",
+        client=("127.0.0.1", 50000),
+    ) as client:
+        r = client.get("/.well-known/oauth-protected-resource/mcp")
+        assert r.status_code == 200
+        d = r.json()
+        assert d["resource"] == "http://127.0.0.1:8765/mcp"
+        # The authorization server stays the public issuer -- only the
+        # resource identity is loopback-local.
+        assert d["authorization_servers"] == ["https://example.com:10000/"]
+
+
+def test_protected_resource_metadata_stays_public_for_proxied_or_tailnet_callers(oauth_client):
+    # Same route, same loopback socket peer -- but carrying a Tailscale/proxy
+    # header means it is NOT a genuine direct loopback call (per the same
+    # trust model used for the bearer-token bypass), so it must keep seeing
+    # the public resource identity unchanged.
+    with TestClient(
+        create_app(),
+        base_url="http://127.0.0.1:8765",
+        client=("127.0.0.1", 50000),
+    ) as client:
+        r = client.get(
+            "/.well-known/oauth-protected-resource/mcp", headers=TAILNET_HEADERS
+        )
+        assert r.status_code == 200
+        assert r.json()["resource"] == "https://example.com:10000/mcp"
+
+
+def test_protected_resource_metadata_stays_public_over_non_loopback_client(oauth_client):
+    r = oauth_client.get("/.well-known/oauth-protected-resource/mcp")
+    assert r.status_code == 200
+    assert r.json()["resource"] == "https://example.com:10000/mcp"

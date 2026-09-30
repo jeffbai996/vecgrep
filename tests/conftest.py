@@ -48,6 +48,22 @@ class StubEmbed(EmbedBackend):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_rerank_score_cache() -> Iterator[None]:
+    """The cross-encoder score cache is module state and outlives a test.
+
+    Left alone, one test that scores ("q", five chunks) makes the next test
+    that expects those pairs to reach the model see nothing but hits -- found
+    the day the cache landed, when test_rerank_memory_bounds's
+    "released even when scoring raises" stopped raising because nothing was
+    scored. Every test starts with an empty cache.
+    """
+    from vecgrep.backend import rerank
+    rerank.clear_score_cache()
+    yield
+    rerank.clear_score_cache()
+
+
+@pytest.fixture(autouse=True)
 def vg_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Isolate VECGREP_HOME per test. Resets the config singleton so the
     new env var actually wins.

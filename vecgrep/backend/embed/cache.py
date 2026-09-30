@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -22,6 +23,24 @@ from array import array
 from pathlib import Path
 
 from .base import EmbedBackend
+
+logger = logging.getLogger(__name__)
+
+# Warn while there is still time to act. The cap comment below documents the
+# failure mode -- a cap below the corpus size turns a repair into a full
+# re-embed -- but until 2026-09-08 nothing watched the approach: the cache was
+# found at 83% of cap with the corpus still growing.
+_CAP_WARN_FRACTION = 0.9
+
+# How long a cache hit's last_used stamp may live in memory before reaching
+# sqlite. The LRU column made every READ a write: an UPDATE plus COMMIT per
+# lookup, and because last_used is indexed, each touched row dirties a table
+# page AND an index page -- ~12 KB of WAL for a one-text lookup, 2.1 MB for a
+# 500-text batch. On an always-on server that is gigabytes a day of SSD wear to
+# maintain an eviction order that is only consulted when the cache is over cap.
+# Buffering bounds the loss from an unclean exit to this interval's reads, which
+# costs nothing worse than a slightly stale victim choice.
+_TOUCH_FLUSH_SECONDS = float(os.environ.get("VECGREP_EMBED_CACHE_TOUCH_FLUSH_SECONDS", "300"))
 
 
 _SCHEMA = """
@@ -126,6 +145,11 @@ class EmbedCache:
         self._lock = threading.Lock()
         # Resolved once per instance so tests can set the env before construction.
         self._max_rows = _max_rows()
+        self._cap_warned = False
+        # Deferred LRU bookkeeping. See _TOUCH_FLUSH_SECONDS: hits accumulate
+        # here and reach sqlite on a timer instead of one COMMIT per lookup.
+        self._pending_touch: dict[tuple[str, str], int] = {}
+        self._last_flush = time.monotonic()
 
     def _migrate_last_used(self) -> None:
         """Add the LRU column to a cache created before it existed.
@@ -171,28 +195,60 @@ class EmbedCache:
                 for sha, raw in cur.fetchall():
                     out[sha] = _decode(raw)
             if out and not self._read_only:
-                # A read is what makes an entry worth keeping. One UPDATE per
-                # batch, not per row, so this stays cheap on the hot path.
-                #
-                # BEST EFFORT, always. This is bookkeeping for the eviction
-                # order -- losing it costs nothing but a slightly worse choice
-                # of victim later. Letting it raise costs a whole reindex, which
-                # is exactly what happened when contention on the shared cache
-                # first surfaced. A cache lookup must never be able to fail the
-                # embed it was supposed to make cheaper.
-                try:
-                    self._touch_locked(identity, list(out))
-                    self._conn.commit()
-                except sqlite3.Error:
-                    try:
-                        self._conn.rollback()
-                    except sqlite3.Error:
-                        pass
+                # A read is what makes an entry worth keeping -- but recording
+                # that must not cost a disk write. Buffer in memory and let the
+                # timer below flush; see _TOUCH_FLUSH_SECONDS.
+                now = self._now()
+                for sha in out:
+                    self._pending_touch[(identity, sha)] = now
+                if time.monotonic() - self._last_flush >= _TOUCH_FLUSH_SECONDS:
+                    self._flush_touches_locked()
         return out
 
-    def _touch_locked(self, identity: str, shas: list[str]) -> None:
+    def _flush_touches_locked(self) -> None:
+        """Persist buffered last_used stamps. Caller must hold self._lock.
+
+        BEST EFFORT, always. This is bookkeeping for the eviction order --
+        losing it costs nothing but a slightly worse choice of victim later.
+        Letting it raise costs a whole reindex, which is exactly what happened
+        when contention on the shared cache first surfaced. A cache lookup must
+        never be able to fail the embed it was supposed to make cheaper.
+        """
+        self._last_flush = time.monotonic()
+        if not self._pending_touch or self._read_only:
+            self._pending_touch.clear()
+            return
+        pending, self._pending_touch = self._pending_touch, {}
+        try:
+            by_stamp: dict[tuple[str, int], list[str]] = {}
+            for (identity, sha), stamp in pending.items():
+                by_stamp.setdefault((identity, stamp), []).append(sha)
+            for (identity, stamp), shas in by_stamp.items():
+                self._touch_locked(identity, shas, now=stamp)
+            self._conn.commit()
+        except sqlite3.Error:
+            try:
+                self._conn.rollback()
+            except sqlite3.Error:
+                pass
+
+    def flush_touches(self) -> None:
+        """Persist buffered LRU stamps now (shutdown, or before a snapshot)."""
+        with self._lock:
+            self._flush_touches_locked()
+
+    def close(self) -> None:
+        """Flush deferred bookkeeping, then drop the connection."""
+        with self._lock:
+            self._flush_touches_locked()
+            try:
+                self._conn.close()
+            except sqlite3.Error:
+                pass
+
+    def _touch_locked(self, identity: str, shas: list[str], *, now: int | None = None) -> None:
         """Mark rows as freshly used. Caller must hold self._lock."""
-        now = self._now()
+        now = self._now() if now is None else now
         for i in range(0, len(shas), 500):
             batch = shas[i : i + 500]
             placeholders = ",".join("?" * len(batch))
@@ -213,13 +269,24 @@ class EmbedCache:
             for t, v in zip(texts, vectors)
         ]
         with self._lock:
-            self._conn.executemany(
-                "INSERT OR REPLACE INTO embed_cache "
-                "(identity, text_sha, vector, last_used) VALUES (?, ?, ?, ?)",
-                rows,
-            )
-            self._evict_over_cap_locked()
-            self._conn.commit()
+            try:
+                self._conn.executemany(
+                    "INSERT OR REPLACE INTO embed_cache "
+                    "(identity, text_sha, vector, last_used) VALUES (?, ?, ?, ?)",
+                    rows,
+                )
+                self._evict_over_cap_locked()
+                self._conn.commit()
+            except sqlite3.OperationalError as exc:
+                # The cache is shared by the API server and every indexer. A
+                # long writer can outlive busy_timeout; the freshly computed
+                # vectors are still valid, so cache persistence must remain a
+                # best-effort optimisation rather than fail the search/index.
+                try:
+                    self._conn.rollback()
+                except sqlite3.Error:
+                    pass
+                logger.warning("embed cache write skipped: %s", exc)
 
     def _evict_over_cap_locked(self) -> None:
         """Drop the coldest rows if over the cap. Caller must hold self._lock.
@@ -237,10 +304,35 @@ class EmbedCache:
         """
         if self._max_rows <= 0:
             return
+        # Buffered reads are what protect a hot row. Land them before choosing
+        # a victim, or eviction ranks by a stale last_used and drops exactly
+        # the entries the deferral was meant to keep.
+        self._flush_touches_locked()
         (count,) = self._conn.execute("SELECT COUNT(*) FROM embed_cache").fetchone()
+        threshold = self._max_rows * _CAP_WARN_FRACTION
+        if count >= threshold:
+            if not self._cap_warned:
+                self._cap_warned = True
+                logger.warning(
+                    "embed cache at %d rows, %.0f%% of VECGREP_EMBED_CACHE_MAX_ROWS=%d; "
+                    "a cap below the corpus size turns a repair into a full re-embed -- "
+                    "raise it before it binds",
+                    count,
+                    100.0 * count / self._max_rows,
+                    self._max_rows,
+                )
+        else:
+            self._cap_warned = False
         overage = count - self._max_rows
         if overage <= 0:
             return
+        logger.warning(
+            "embed cache over cap: evicting %d coldest of %d rows "
+            "(VECGREP_EMBED_CACHE_MAX_ROWS=%d)",
+            overage,
+            count,
+            self._max_rows,
+        )
         self._conn.execute(
             "DELETE FROM embed_cache WHERE rowid IN "
             "(SELECT rowid FROM embed_cache ORDER BY last_used ASC, rowid ASC LIMIT ?)",
@@ -308,6 +400,7 @@ class EmbedCache:
         *,
         identities: list[str] | None = None,
         dry_run: bool = False,
+        max_delete_fraction: float | None = None,
     ) -> dict[str, int]:
         """Delete every row whose (identity, sha) is not in `keep`.
 
@@ -316,31 +409,59 @@ class EmbedCache:
         entirely orphaned. `identities` restricts the sweep to those
         identities; default is every identity present. Returns
         {identity: rows deleted (or would be, under dry_run)}.
+
+        `max_delete_fraction` is the rail for unattended runs: a keep-set built
+        while a corpus is empty or mid-rebuild makes most of the cache look
+        orphaned, and sweeping at that moment destroys exactly the vectors
+        that make the rebuild cheap. When the scoped deletion would exceed the
+        fraction, the sweep aborts loudly having deleted nothing. Dry runs are
+        exempt -- they are how the damage gets investigated.
         """
         if self._read_only and not dry_run:
             raise RuntimeError("embed cache is read-only")
         out: dict[str, int] = {}
+        victims_by_ident: dict[str, list[str]] = {}
         with self._lock:
             present = [r[0] for r in self._conn.execute(
                 "SELECT DISTINCT identity FROM embed_cache").fetchall()]
+            scoped_rows = 0
             for ident in present:
                 if identities is not None and ident not in identities:
                     continue
                 keep_shas = keep.get(ident, set())
                 cur = self._conn.execute(
                     "SELECT text_sha FROM embed_cache WHERE identity = ?", (ident,))
-                victims = [row[0] for row in cur.fetchall() if row[0] not in keep_shas]
+                shas = [row[0] for row in cur.fetchall()]
+                scoped_rows += len(shas)
+                victims = [s for s in shas if s not in keep_shas]
                 out[ident] = len(victims)
-                if dry_run or not victims:
-                    continue
-                for i in range(0, len(victims), 500):
-                    part = victims[i:i + 500]
-                    self._conn.execute(
-                        f"DELETE FROM embed_cache WHERE identity = ? AND text_sha IN "
-                        f"({','.join('?' * len(part))})",
-                        [ident, *part],
-                    )
-                self._conn.commit()
+                victims_by_ident[ident] = victims
+            total_victims = sum(len(v) for v in victims_by_ident.values())
+            if (
+                not dry_run
+                and max_delete_fraction is not None
+                and scoped_rows
+                and total_victims / scoped_rows > max_delete_fraction
+            ):
+                raise RuntimeError(
+                    f"sweep would delete {total_victims} of {scoped_rows} rows "
+                    f"({total_victims / scoped_rows:.0%}), over the "
+                    f"max delete fraction {max_delete_fraction:.0%}; refusing. "
+                    "If the corpora really did shrink this much, re-run without "
+                    "the limit after checking them."
+                )
+            if not dry_run:
+                for ident, victims in victims_by_ident.items():
+                    if not victims:
+                        continue
+                    for i in range(0, len(victims), 500):
+                        part = victims[i:i + 500]
+                        self._conn.execute(
+                            f"DELETE FROM embed_cache WHERE identity = ? AND text_sha IN "
+                            f"({','.join('?' * len(part))})",
+                            [ident, *part],
+                        )
+                    self._conn.commit()
         return {k: v for k, v in out.items() if v or dry_run}
 
     def clear(self, identity: str | None = None) -> int:

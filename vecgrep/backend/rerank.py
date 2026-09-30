@@ -13,10 +13,12 @@ when the user actually asks for reranking.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import logging
 import math
 import os
+from collections import OrderedDict
 from pathlib import Path
 import threading
 import time
@@ -86,6 +88,32 @@ RERANK_WORKER_MAX_BYTES = max(
 )
 RERANK_WORKER_MAX_JOBS = max(
     0, int(os.environ.get("VECGREP_RERANK_WORKER_MAX_JOBS", "64"))
+)
+
+# How much of a chunk the cross-encoder reads. bge-reranker-v2-m3 accepts 8192
+# tokens; the chunks it is actually fed measure ~620 tokens median and ~1730
+# at the tail (measured 2026-09-12 over the repos corpus), so the ceiling never
+# binds and costs nothing. A LOWER cap does not remove waste, it removes
+# content: 512 made a scoped reranked search 2.83s -> 0.91s and changed the
+# top-8 on every query tried, because it truncates the median chunk to 40%.
+# That is a retrieval-quality decision, not a tuning knob, so it ships OFF.
+# 0 keeps the model's own default.
+RERANK_MAX_LENGTH = max(
+    0, int(os.environ.get("VECGREP_RERANK_MAX_LENGTH", "0"))
+)
+
+# A cross-encoder score is a pure function of (model, query, chunk text), so a
+# repeat is arithmetic already done. Scoring is ~2.3s of a 2.8s reranked search
+# and it was paid again on every identical query.
+#
+# In memory, not sqlite like the embed cache: a score is eight bytes and there
+# are fifty per search, so persistence across restarts would buy little and
+# cost SSD writes on every miss. Bounded by entry count, because the point is
+# to stop thinking about this, and an unbounded cache is just a slower leak.
+# 50k entries is roughly a thousand searches at ~130 bytes each -- single-digit
+# MB. 0 turns it off.
+RERANK_SCORE_CACHE_SIZE = max(
+    0, int(os.environ.get("VECGREP_RERANK_SCORE_CACHE_SIZE", "50000"))
 )
 RERANK_WORKER_START_TIMEOUT_S = float(
     os.environ.get("VECGREP_RERANK_WORKER_START_TIMEOUT_S", "600")
@@ -236,11 +264,13 @@ def _construct_model(model_name: str):
         import torch
 
         kwargs = {}
+        if RERANK_MAX_LENGTH:
+            kwargs["max_length"] = RERANK_MAX_LENGTH
         if torch.cuda.is_available():
             # The v2-m3 checkpoint is stored as 2.2 GB of FP32 weights. Loading
             # directly in FP16 halves the steady-state model allocation and is
             # the native fast path on CUDA. CPU keeps the upstream default.
-            kwargs = {"model_kwargs": {"torch_dtype": torch.float16}}
+            kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
         return CrossEncoder(model_name, **kwargs)
     except Exception as e:
         raise RerankerError(
@@ -686,6 +716,55 @@ def wait_ready(
     return is_ready(model_name)
 
 
+_score_cache: "OrderedDict[str, float]" = OrderedDict()
+_score_lock = threading.Lock()
+
+
+def _score_key(model_name: str, query: str, text: str) -> str:
+    """One key per (model, query, chunk text).
+
+    Hashed on the TEXT, not a chunk id: identical text scores identically
+    whatever it is called, so the cache survives a re-index that renumbers
+    chunks. The query rides in the hash because the score depends on it —
+    there is no lossless way to reuse a score across two different questions.
+    """
+    digest = hashlib.sha256()
+    for part in (model_name, query, text):
+        digest.update(part.encode("utf-8", "replace"))
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def _score_cache_get(key: str) -> float | None:
+    if RERANK_SCORE_CACHE_SIZE <= 0:
+        return None
+    with _score_lock:
+        value = _score_cache.get(key)
+        if value is not None:
+            _score_cache.move_to_end(key)
+        return value
+
+
+def _score_cache_put(key: str, value: float) -> None:
+    if RERANK_SCORE_CACHE_SIZE <= 0:
+        return
+    with _score_lock:
+        _score_cache[key] = value
+        _score_cache.move_to_end(key)
+        while len(_score_cache) > RERANK_SCORE_CACHE_SIZE:
+            _score_cache.popitem(last=False)
+
+
+def clear_score_cache() -> None:
+    with _score_lock:
+        _score_cache.clear()
+
+
+def score_cache_size() -> int:
+    with _score_lock:
+        return len(_score_cache)
+
+
 def _load(model_name: str):
     with _lock:
         cached = _cache.get(model_name)
@@ -709,17 +788,30 @@ def rerank(
     if not candidates:
         return []
     texts = [text for text, _ in candidates]
-    if RERANK_WORKER_ENABLED:
-        raw = _worker_predict(query, texts, model_name)
-    else:
-        model = _load(model_name)
-        pairs = [(query, text) for text in texts]
-        try:
-            raw = model.predict(pairs, batch_size=RERANK_BATCH)  # numpy logits
-        finally:
-            # Release on the failure path too: a rerank that dies mid-batch is
-            # exactly when the card is most full and the next caller needs room.
-            _release_cuda_cache()
+    keys = [_score_key(model_name, query, text) for text in texts]
+
+    # Only the misses reach the model. A full hit never wakes the worker at
+    # all, which is most of what the repeat used to cost.
+    raw: list[float | None] = [_score_cache_get(k) for k in keys]
+    todo = [i for i, value in enumerate(raw) if value is None]
+    if todo:
+        pending = [texts[i] for i in todo]
+        if RERANK_WORKER_ENABLED:
+            fresh = _worker_predict(query, pending, model_name)
+        else:
+            model = _load(model_name)
+            pairs = [(query, text) for text in pending]
+            try:
+                fresh = model.predict(pairs, batch_size=RERANK_BATCH)  # logits
+            finally:
+                # Release on the failure path too: a rerank that dies mid-batch
+                # is exactly when the card is most full and the next caller
+                # needs room.
+                _release_cuda_cache()
+        for slot, score in zip(todo, fresh):
+            value = float(score)
+            raw[slot] = value
+            _score_cache_put(keys[slot], value)
 
     # bge-reranker emits raw logits; squashing through sigmoid puts them in
     # 0..1 which is more useful for percentage display than raw values.

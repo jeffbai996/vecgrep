@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- vecgrep: a vector. One diagonal and a head, nothing else.
+       Drawn for 16px first, which is where the old lens-and-dots mark
+       collapsed into a blob. The shaft runs corner to corner of a 220-unit
+       box centred in the 512 grid, so the margins are an even 120 on every
+       side once the round caps are counted.
+       House style follows babylog: 512 box, rx=120 ground, flat accent, one
+       dark glyph, round caps and joins. -->
+  <rect width="512" height="512" rx="120" fill="#a78bfa"/>
+  <g fill="none" stroke="#1c1033" stroke-width="52" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M146 366L366 146"/>
+    <path d="M256 146h110v110"/>
+  </g>
+</svg>

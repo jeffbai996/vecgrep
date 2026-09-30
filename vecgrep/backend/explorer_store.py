@@ -148,6 +148,32 @@ class ExplorerStore:
                 row,
             )
 
+    def upsert_many(self, corpus: str, records: list[dict]) -> None:
+        """Write one pass's source rows in a single transaction.
+
+        The catalog is WAL'd SQLite and small; a commit per source rewrote it
+        thousands of times per incremental pass. One transaction per pass
+        keeps the invalidate-then-write contract of `upsert` at a fraction
+        of the writes.
+        """
+        if not records:
+            return
+        rows = [self._record_row(corpus, record) for record in records]
+        with self._lock, self._connection:
+            self._connection.execute(
+                "DELETE FROM generations WHERE corpus = ?", (corpus,)
+            )
+            self._connection.executemany(
+                "INSERT INTO documents "
+                "(corpus, source_id, metadata_json, doc_timestamp, chunk_count) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(corpus, source_id) DO UPDATE SET "
+                "metadata_json = excluded.metadata_json, "
+                "doc_timestamp = excluded.doc_timestamp, "
+                "chunk_count = excluded.chunk_count",
+                rows,
+            )
+
     def delete_source(self, corpus: str, source_id: str) -> None:
         with self._lock, self._connection:
             self._connection.execute(

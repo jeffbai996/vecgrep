@@ -8,6 +8,8 @@ patch = fixes). The version is a single source of truth in
 ## [Unreleased]
 
 ### Added
+- MCP search intent presets, explicit ignored-parameter reporting, and complete
+  JSON response budgets measured with cl100k_base. See [agent search](docs/AGENT_SEARCH.md).
 - Push/PR validation reuses the release gate: Python tests, frontend build,
   package build, and clean-environment wheel install/import smoke.
 - SQLite/FTS5 BM25 store, persisted backend selection, and explicit pickle
@@ -17,6 +19,22 @@ patch = fixes). The version is a single source of truth in
   and corpus exploration views.
 
 ### Fixed
+- `doctor` reports duplicate source path aliases after directory moves or
+  symlink changes, with exact groups in JSON and a failing health gate. Alias
+  repair remains manual so canonical coverage is verified before deletion.
+- MCP tool calls wait a bounded `VECGREP_MCP_GATE_WAIT_S` for the single tool
+  slot and report `ToolBusyError` instead of queueing behind a stuck call.
+  One tool body blocked on a saturated disk used to hold that slot with no
+  ceiling, so every later MCP call hung while REST kept answering.
+- Corpus search admission is bounded by `search_lock_timeout_s`. A corpus that
+  cannot admit a search in time is reported rather than waited on, so an
+  unscoped search answers from the corpora it can reach and a scoped one
+  raises. A thread that already holds a corpus read lock now re-enters it
+  instead of queueing behind a waiting writer, which never resolved.
+- Unchanged-source indexing checks its content hash before chunk construction;
+  recovery still verifies chunk counts and force-indexing still rebuilds.
+- MCP response trimming protects top passages from preview-heavy tails and
+  preserves fitting passages when a higher-ranked chunk exceeds the budget.
 - Test settings are isolated by default; production paths and symlink escapes
   fail before settings can open persistent state.
 - Reranker failures preserve hybrid ranking, model warming stays outside search,

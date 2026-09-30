@@ -76,6 +76,38 @@ def test_decay_demotes_stale_below_fresh(svc, make_doc):
     )
 
 
+def test_search_order_follows_decayed_score(svc, make_doc):
+    """The order a caller receives is the decayed fused score, not the
+    displayed similarity_pct.
+
+    Regression guard: search() used to re-sort the final list by
+    similarity_pct, which carries no decay term and is not one scale across
+    channels (a BM25-only hit reads ~90 rank-relative, a dense hit reads its
+    calibrated cosine). That let a 400-day-old lexical-only hit sit above a
+    fresh dense hit on a 30-day half-life, while explain still claimed
+    `score` was what ranked it. test_decay_demotes_stale_below_fresh only
+    caught this once display % stopped tying; this locks the invariant.
+    """
+    fresh = make_doc("fresh.md", _saved(1, "quantum widget assembly protocol."))
+    stale = make_doc("stale.md", _saved(400, "quantum widget assembly protocol."))
+    svc.index(str(fresh), "c")
+    svc.index(str(stale), "c")
+    svc.set_decay("c", 30.0)
+
+    hits = svc.search("quantum widget assembly", "c", top_k=5)
+    assert len(hits) >= 2
+    scores = [h.score for h in hits]
+    assert scores == sorted(scores, reverse=True), scores
+
+    by_src = {h.source_id: h for h in hits}
+    f, s = by_src[str(fresh.resolve())], by_src[str(stale.resolve())]
+    assert f.explain["decay"] > 0.9
+    assert abs(s.explain["decay"] - 0.5) < 1e-9  # DECAY_FLOOR
+    assert f.score > s.score
+    assert abs(f.score - f.explain["rrf"] * f.explain["decay"]) < 1e-12
+    assert abs(s.score - s.explain["rrf"] * s.explain["decay"]) < 1e-12
+
+
 def test_decay_explain_records_factor(svc, make_doc):
     p = make_doc("d.md", _saved(30, "recency factor under inspection here."))
     svc.index(str(p), "c")

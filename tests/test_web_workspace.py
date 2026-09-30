@@ -265,28 +265,229 @@ def test_search_explainers_do_not_advertise_retired_models() -> None:
     assert "configured cross-encoder" in sidebar
 
 
-def test_score_tuning_explains_effect_and_automatic_mode() -> None:
+def test_score_tuning_names_its_controls_without_explaining_them() -> None:
     app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
     panel = (FRONTEND / "components" / "TuningPanel.tsx").read_text(
         encoding="utf-8"
     )
     tuning = (FRONTEND / "tuning.ts").read_text(encoding="utf-8")
 
-    assert "Score interpretation" in panel
-    assert "displayed percentages and result order" in panel
+    assert "Score tuning" in panel
     for section in ("Semantic scoring", "Keyword scoring", "Hybrid balance"):
         assert section in panel
     assert "Automatic" in panel and "Custom" in panel
     assert "onReset" in panel and "clearTuning" in app
     assert "localStorage.removeItem" in tuning
+    # The panel explains itself by working: a named control, a live number and
+    # the two words at each end of its track. The paragraphs that used to sit
+    # above and under the sliders are tooltips now (Jeff 2026-09-09, and the
+    # squad's no-explanatory-copy rule).
+    assert "title={slider.help}" in panel, "the help text lost its tooltip home"
+    for gone in ("Search retrieval stays unchanged",
+                 "How raw matches become percentages",
+                 "Changes apply instantly"):
+        assert gone not in panel, f"explanatory copy is back: {gone!r}"
+    # Two columns where there is room; the sliders used to stack one per row.
+    assert panel.count("sm:grid-cols-2") >= 2, "the slider rows do not pair up"
 
 
 def test_committed_web_bundle_has_no_private_companion_url() -> None:
     dist = FRONTEND.parent / "dist"
+    # Text only: dist also carries the raster icons, and a PNG is not UTF-8.
     built = "\n".join(
-        path.read_text(encoding="utf-8")
+        path.read_text(encoding="utf-8", errors="ignore")
         for path in dist.rglob("*")
-        if path.is_file()
+        if path.is_file() and path.suffix not in {".png", ".ico", ".woff", ".woff2"}
     )
 
     assert ".ts.net" not in built
+
+
+def test_the_app_ships_a_favicon_and_serves_it() -> None:
+    """vecgrep had no icon at all — no link in the head, nothing on disk — so
+    every tab showed the browser's default globe. And only /assets is mounted,
+    so a file at the root falls through to the SPA catch-all and the browser
+    asking for /favicon.svg gets handed a page (Jeff 2026-09-09)."""
+    head = (FRONTEND.parent / "index.html").read_text(encoding="utf-8")
+    assert 'rel="icon"' in head and "favicon.svg" in head
+
+    icon = FRONTEND.parent / "public" / "favicon.svg"
+    assert icon.is_file(), "no favicon source"
+    svg = icon.read_text(encoding="utf-8")
+    assert svg.lstrip().startswith("<svg"), "favicon is not an svg"
+    assert 'viewBox="0 0 512 512"' in svg, "off the squad's 512 icon grid"
+
+    built = FRONTEND.parent / "dist" / "favicon.svg"
+    assert built.is_file(), "favicon did not make it into dist/"
+
+    main = (
+        FRONTEND.parent.parent / "backend" / "main.py"
+    ).read_text(encoding="utf-8")
+    assert '"favicon.svg"' in main, (
+        "nothing serves /favicon.svg, so it falls through to the SPA catch-all "
+        "and the browser is handed index.html")
+
+
+def test_instance_health_is_a_page_not_a_question() -> None:
+    """Jeff 2026-09-09: "so that I can inspect vecgrep health at a glance
+    without having to ask yall". A Health view, backed by an endpoint that is
+    cheap enough to poll."""
+    app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
+    panel = (FRONTEND / "components" / "InstanceHealth.tsx").read_text(encoding="utf-8")
+    client = (FRONTEND / "api.ts").read_text(encoding="utf-8")
+    routes = (
+        FRONTEND.parent.parent / "backend" / "api" / "routes.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"health"' in app and "<InstanceHealth />" in app, "no Health view"
+    assert '"/api/health/detail"' in client
+    # NOT bolted onto /api/health: that one is the public, unauthenticated
+    # liveness probe and is exempt from api_token, while this reports corpus
+    # names, on-disk paths and process memory.
+    assert '@router.get("/health/detail")' in routes
+    assert '@public_router.get("/health")' in routes, "the public probe moved"
+
+    # The checks that matter, and the numbers behind them.
+    for signal in ("embedding model", "embed cache", "vector store", "search"):
+        assert signal in routes, f"health lost its {signal!r} check"
+    for shown in ("checks", "corpora", "cache", "process"):
+        assert shown in panel, f"the page does not render {shown}"
+
+
+def test_health_detail_avoids_the_expensive_stats_walk() -> None:
+    """corpus_stats iterates every payload in a corpus. Fine on demand for one
+    corpus, hopeless for a page you glance at, so the snapshot is built from
+    counts the registry already holds."""
+    routes = (
+        FRONTEND.parent.parent / "backend" / "api" / "routes.py"
+    ).read_text(encoding="utf-8")
+    body = routes[routes.index('@router.get("/health/detail")'):]
+    body = body[:body.index('@router.get("/stats/')]
+    # The call, not the word: the docstring names corpus_stats to explain why
+    # it is avoided.
+    assert ".corpus_stats(" not in body, "the health page walks every payload"
+    assert "list_corpora" in body
+
+
+def test_the_view_lives_in_the_url() -> None:
+    """A tab you cannot link to is a tab you have to describe over Discord.
+    The view was component state, so /#health could not be sent, bookmarked or
+    reloaded into (Jeff 2026-09-09, asking for health at a glance)."""
+    app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
+    assert "viewFromHash" in app, "the view does not read the URL"
+    assert "hashchange" in app, "back/forward and a hand-edited hash do nothing"
+    assert "window.location.hash = view" in app, "the URL never follows the view"
+
+
+def test_search_reports_its_own_wall_time() -> None:
+    """Jeff 2026-09-09: "it took like over a minute to load. we should include
+    load time in seconds on the vecgrep results tbh so i can debug a bit
+    better". Server-side, so a slow retrieval can be told apart from a slow
+    round trip — which from a browser look identical."""
+    schemas = (
+        FRONTEND.parent.parent / "backend" / "api" / "schemas.py"
+    ).read_text(encoding="utf-8")
+    routes = (
+        FRONTEND.parent.parent / "backend" / "api" / "routes.py"
+    ).read_text(encoding="utf-8")
+    client = (FRONTEND / "api.ts").read_text(encoding="utf-8")
+    results = (FRONTEND / "components" / "ResultList.tsx").read_text(encoding="utf-8")
+
+    assert "took_ms" in schemas, "the response cannot carry a time"
+    # Both return paths: budget mode and the ordinary one.
+    assert routes.count("took_ms=took()") >= 2, "a search path returns no time"
+    assert "took_ms" in client and "took_ms" in results, "the page never shows it"
+
+
+def test_every_icon_a_browser_asks_for_is_served() -> None:
+    """One SVG was not enough. Safari ignores an SVG apple-touch-icon, and a
+    browser falling back to /favicon.ico was being handed the SPA's index.html
+    — so Jeff saw no icon at all (2026-09-09)."""
+    public = FRONTEND.parent / "public"
+    dist = FRONTEND.parent / "dist"
+    for name in ("favicon.svg", "favicon.ico", "apple-touch-icon.png"):
+        assert (public / name).is_file(), f"{name} missing from public/"
+        assert (dist / name).is_file(), f"{name} did not reach dist/"
+
+    head = (FRONTEND.parent / "index.html").read_text(encoding="utf-8")
+    # The hrefs carry a cache-busting ?v= (see the versioning test below), so
+    # match the path and let the query float.
+    assert 'href="/favicon.ico' in head
+    assert 'rel="apple-touch-icon"' in head and 'apple-touch-icon.png' in head, \
+        "apple-touch-icon must point at a PNG; Safari ignores an SVG here"
+
+    main = (
+        FRONTEND.parent.parent / "backend" / "main.py"
+    ).read_text(encoding="utf-8")
+    for name in ("favicon.svg", "favicon.ico", "apple-touch-icon.png"):
+        assert f'"{name}"' in main, f"nothing serves /{name}"
+    # A /{path} catch-all would swallow every unmatched GET in the app.
+    assert '@app.get("/{icon:path}"' not in main
+
+
+def test_the_ico_really_carries_more_than_one_size() -> None:
+    """PIL derives each ICO entry from the base image it is handed, so building
+    the file from a 16px render clamped all three entries to 16x16 and a 32px
+    tab bar got an upscaled blur (found 2026-09-09). Render large once, then
+    let it step down.
+
+    The header is read directly rather than through PIL: this suite must not
+    grow an image dependency to check a 674-byte file. An ICO is a 6-byte
+    header, then one 16-byte directory entry per image whose first two bytes
+    are width and height, with 0 meaning 256.
+    """
+    import struct
+
+    raw = (FRONTEND.parent / "public" / "favicon.ico").read_bytes()
+    reserved, kind, count = struct.unpack_from("<HHH", raw, 0)
+    assert (reserved, kind) == (0, 1), "not an icon file"
+    sizes = sorted((raw[6 + i * 16] or 256, raw[7 + i * 16] or 256)
+                   for i in range(count))
+    assert (32, 32) in sizes, f"only {sizes} in the ico"
+    assert len(sizes) >= 2
+
+
+def test_the_svg_carries_explicit_dimensions() -> None:
+    """A viewBox alone is enough for most renderers and not all of them."""
+    svg = (FRONTEND.parent / "public" / "favicon.svg").read_text(encoding="utf-8")
+    assert 'width="512"' in svg and 'height="512"' in svg
+
+
+def test_the_result_count_offers_a_short_page() -> None:
+    """The shortest page was 25, which is a scroll when the question is "did
+    this ever come up". 10 fits on a screen (Jeff 2026-09-10)."""
+    search = (FRONTEND / "components" / "SearchBar.tsx").read_text(encoding="utf-8")
+    assert "<option value={10}>10</option>" in search
+    # ...without moving the default, which is a separate decision.
+    assert "useState(40)" in search
+
+
+def test_the_mode_selector_is_lowercase() -> None:
+    """The rest of that row is a mono, lowercase control strip — the labels
+    were Title Case and read as three proper nouns (Jeff 2026-09-10:
+    "all lowercaps, not Hybrid Semantic")."""
+    search = (FRONTEND / "components" / "SearchBar.tsx").read_text(encoding="utf-8")
+    for label in ("hybrid", "semantic", "keyword"):
+        assert f'label: "{label}"' in search, f"{label} is not lowercase"
+        assert f'label: "{label.capitalize()}"' not in search
+
+
+def test_the_icon_links_carry_a_version() -> None:
+    """A browser that once asked for /favicon.ico and was handed the SPA's
+    index.html caches that miss, and it keeps caching it after the file is
+    real: the icon shipped at 03:22 and the tab was still blank at 07:25
+    (Jeff 2026-09-10, "still no favicon ... even tho bots r claiming there
+    is" — the bots were right, the bytes were on the wire). A version on the
+    href is a different URL, so the stale entry cannot answer for it."""
+    import re
+
+    head = (FRONTEND.parent / "index.html").read_text(encoding="utf-8")
+    hrefs = re.findall(r'<link[^>]*rel="(?:icon|apple-touch-icon)"[^>]*'
+                       r'href="([^"]+)"', head)
+    assert len(hrefs) == 3, f"expected three icon links, found {hrefs}"
+    for href in hrefs:
+        assert re.search(r"\?v=\d+$", href), f"{href} is not versioned"
+    # The query is not part of the route, so the backend still serves these
+    # by plain name — bumping the version must never need a server change.
+    assert len({h.split("?")[1] for h in hrefs}) == 1, \
+        "bump every icon together or the browser refetches only some"

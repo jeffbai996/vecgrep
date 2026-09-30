@@ -22,7 +22,7 @@ import weakref
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 from .config import Settings, get_settings
 from .embed import EmbedBackend, EmbedBackendError, get_embed_backend
@@ -107,6 +107,19 @@ CHUNKERS: dict[str, type[Chunker]] = {
 
 SearchMode = Literal["hybrid", "vector", "bm25"]
 DEFAULT_MODE: SearchMode = "hybrid"
+# Single source of truth for mode validation. An unrecognized mode used to
+# fall through every `if mode in (...)` branch in _search_one_locked and land
+# in the RRF block with two empty retriever dicts, returning [] — which a
+# caller cannot distinguish from "no results exist" and will report as a
+# confident absence. Unknown modes raise instead.
+SEARCH_MODES: frozenset[str] = frozenset(get_args(SearchMode))
+
+
+def _validate_search_mode(mode: str) -> None:
+    """Raise on an unrecognized search mode rather than returning []."""
+    if mode not in SEARCH_MODES:
+        known = ", ".join(sorted(SEARCH_MODES))
+        raise CorpusError(f"Unknown search mode: {mode!r} (known modes: {known})")
 
 
 @dataclass(frozen=True)
@@ -308,25 +321,34 @@ RRF_K = 60
 # Override via env var VECGREP_BM25_WEIGHT.
 BM25_WEIGHT = float(os.environ.get("VECGREP_BM25_WEIGHT", "1.5"))
 
-# Floor + headroom for displaying BM25-only hit pct.
-#
-# BM25 scores are unbounded positive numbers and corpus-relative, so the raw
-# value can't map directly to a meaningful percentage. We rescale within the
-# result set: the strongest BM25 hit for this query reads at BM25_DISPLAY_TOP,
-# weaker hits taper toward BM25_DISPLAY_FLOOR. The display is "rank-relative
-# confidence", not absolute. Underlying ranking uses raw RRF scores and is
-# unaffected.
-#
-# Calibration matches the cosine sigmoid: floor at 25% (visible but clearly
-# weak), top at 90% (strong but not "certain"). Anything below 25% gets
-# clipped — if BM25 didn't find it strongly, vector probably should be the
-# voice that speaks.
+# Lexical-only confidence stays below the related/strong semantic bands.
+# Within that band the rank-relative scale preserves lexical ordering, while
+# raw BM25/RRF scores and corpus rank weights retain their existing meaning.
 BM25_DISPLAY_FLOOR = 25.0
-BM25_DISPLAY_TOP = 90.0
+BM25_DISPLAY_TOP = 39.0
 
 # How many candidates each retriever returns before fusion. Larger pool
 # = better recall, marginal cost. 50 is a good default for small corpora.
 CANDIDATE_POOL = 50
+
+# Admission this slow is worth a line in the journal: the silent version
+# of this wait is what made a wedged corpus invisible until a restart.
+SLOW_ADMISSION_S = 1.0
+
+# How many candidates the cross-encoder is allowed to score in one search.
+#
+# Reranking only ever surfaces top_k, and a candidate sitting 200th on fusion
+# score is not a plausible winner -- scoring it is latency spent on an answer
+# nobody receives. Scoped to one corpus the fused pool IS CANDIDATE_POOL, so
+# this cap is inert; unscoped it is CANDIDATE_POOL per corpus, and a
+# seven-corpus fan-out sent ~350 pairs through the model (unscoped p50 873 ->
+# 2936 ms, round 4). Capping the head bounds that cost by the number of
+# corpora rather than scaling with it.
+#
+# The tail is NOT dropped -- it is returned below the reranked head in fusion
+# order. A latency cap must not shrink a result set. 0 or less disables the
+# cap (score everything), which is the pre-2026-09-10 behaviour.
+RERANK_POOL_MAX = int(os.environ.get("VECGREP_RERANK_POOL_MAX", CANDIDATE_POOL))
 
 # Vector noise floor. The vector retriever returns a full top-50 even when
 # nothing matches semantically -- those sub-noise hits then flood RRF. Drop any
@@ -438,7 +460,16 @@ class SearchResult:
     @property
     def relevance_label(self) -> str:
         """Qualitative bucket so callers don't have to interpret percentages:
-        exact >= 95, strong >= 75, related >= 40, else weak."""
+        exact >= 95, strong >= 75, related >= 40, else weak.
+
+        A hit the dense channel never corroborated is "lexical-only" instead
+        of a confidence bucket. Its percentage is rank-relative within one
+        corpus (see BM25_DISPLAY_FLOOR/TOP), so the top lexical hit stays below 40
+        whether its absolute BM25 score is 7.5 or 0.067 — a bucket derived
+        from that number reads as semantic confidence it does not have.
+        """
+        if "bm25" in self.matched_by and "vector" not in self.matched_by:
+            return "lexical-only"
         pct = self.similarity_pct
         if pct >= 95.0:
             return "exact"
@@ -455,6 +486,7 @@ class VecgrepService:
         settings: Settings | None = None,
         ephemeral: bool = False,
         embed_cache_read_only: bool = False,
+        recover_pending: bool = True,
     ) -> None:
         self.settings = settings or get_settings()
         self.ephemeral = ephemeral
@@ -500,7 +532,8 @@ class VecgrepService:
                 read_only=embed_cache_read_only,
             )
         )
-        self.recover_pending_mutations()
+        if recover_pending:
+            self.recover_pending_mutations()
 
     # ----- mutation recovery --------------------------------------------------
     def recover_pending_mutations(self) -> list[str]:
@@ -898,8 +931,22 @@ class VecgrepService:
         # Qdrant writes and journal removals have already committed.
         if update_bm25 and len(docs) > 1 and not isinstance(self.bm25, BM25SqliteStore):
             _bulk.enter_context(self.bm25.bulk(corpus_name))
+        # corpora.json lands once per run, not once per source (see
+        # CorpusRegistry.deferred_saves). The journal record per source is the
+        # crash boundary; the registry is derived state recovery can rebuild.
+        if update_registry and not self.ephemeral:
+            _bulk.enter_context(self.registry.deferred_saves(corpus_name))
         with _bulk:
+            explorer_pending: list[dict] = []
             for doc in docs:
+                doc_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
+                matches_recorded_source = corpus.source_hashes.get(doc.source_id) == doc_hash
+                # Recovery still needs the chunk count below to verify that a
+                # partially restored source is complete. Ordinary unchanged
+                # sources do not need chunk construction a second time.
+                if not force and resume_source_counts is None and matches_recorded_source:
+                    skipped += 1
+                    continue
                 # doc-aware chunkers (code_symbol) see the source path for
                 # language detection; text-only chunkers keep the old contract
                 chunks = (chunker.chunk_doc(doc)
@@ -907,8 +954,6 @@ class VecgrepService:
                 if not chunks:
                     continue
 
-                doc_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
-                matches_recorded_source = corpus.source_hashes.get(doc.source_id) == doc_hash
                 if (
                     resume_source_counts is not None
                     and matches_recorded_source
@@ -918,11 +963,6 @@ class VecgrepService:
                     # exact content recorded in the registry. Leave it alone.
                     skipped += 1
                     continue
-                if not force and corpus.source_hashes.get(doc.source_id) == doc_hash:
-                    # Already indexed at this exact content — skip embed call.
-                    skipped += 1
-                    continue
-
                 # Normal re-indexing removes a prior version so a source that
                 # shrank cannot leave old tail chunks behind. A partial Qdrant
                 # recovery can skip that scan: point IDs are deterministic for the
@@ -947,8 +987,8 @@ class VecgrepService:
                         "operation": "index_source",
                         "phase": "prepared",
                         "source_id": doc.source_id,
-                        "corpus_before": asdict(corpus) if self.registry.has(corpus_name) else None,
-                        "corpus_target": asdict(target),
+                        "corpus_before": _journal_corpus(corpus) if self.registry.has(corpus_name) else None,
+                        "corpus_target": _journal_corpus(target),
                         "old_points": old_records,
                     })
 
@@ -997,25 +1037,15 @@ class VecgrepService:
                     self.mutations.write(record)
                 if update_bm25:
                     self.bm25.upsert(corpus_name, ids, [c.text for c in chunks], payloads)
-                    try:
-                        self.explorer_store.upsert(
-                            corpus_name,
-                            {
-                                "source_id": doc.source_id,
-                                "metadata": payloads[0].get("metadata") or {},
-                                "doc_timestamp": doc.timestamp,
-                                "chunk_count": len(chunks),
-                            },
-                        )
-                    except Exception as exc:
-                        # Browse metadata is disposable. Never fail canonical
-                        # indexing because its derived cache needs a rebuild.
-                        catalog_sync_ok = False
-                        logger.warning(
-                            "explorer catalog update failed for %s: %s",
-                            corpus_name,
-                            exc,
-                        )
+                    # Browse metadata lands once per pass (see the flush after
+                    # the loop): a commit per source rewrote the catalog for
+                    # every document of every incremental pass.
+                    explorer_pending.append({
+                        "source_id": doc.source_id,
+                        "metadata": payloads[0].get("metadata") or {},
+                        "doc_timestamp": doc.timestamp,
+                        "chunk_count": len(chunks),
+                    })
                     if journaled:
                         record = self.mutations.read(corpus_name) or {}
                         record["phase"] = "bm25_done"
@@ -1035,18 +1065,6 @@ class VecgrepService:
                         self.registry._corpora[corpus.name] = corpus
                     else:
                         self.registry.upsert(corpus)
-                    if catalog_sync_ok:
-                        try:
-                            self.explorer_store.set_generation(
-                                corpus.name, self._explorer_generation(corpus)
-                            )
-                        except Exception as exc:
-                            catalog_sync_ok = False
-                            logger.warning(
-                                "explorer catalog commit failed for %s: %s",
-                                corpus_name,
-                                exc,
-                            )
                     if journaled:
                         record = self.mutations.read(corpus_name) or {}
                         record["phase"] = "registry_done"
@@ -1056,6 +1074,24 @@ class VecgrepService:
         # During recovery, do not persist an intermediate point count as the
         # corpus's expected total. If interrupted, diagnose() must retain count
         # drift instead of accepting a partial collection as healthy.
+        if update_bm25 and explorer_pending:
+            # Browse metadata is disposable. Never fail canonical indexing
+            # because its derived cache needs a rebuild; a stale generation
+            # marker is caught at read time and the catalog rebuilt from BM25.
+            try:
+                self.explorer_store.upsert_many(corpus_name, explorer_pending)
+                # Stamp the generation only when the catalog was complete going
+                # in; a partial legacy catalog stays unstamped so the explorer
+                # rebuilds it from BM25 instead of trusting a short list.
+                if update_registry and catalog_sync_ok:
+                    self.explorer_store.set_generation(
+                        corpus.name, self._explorer_generation(corpus)
+                    )
+            except Exception as exc:
+                catalog_sync_ok = False
+                logger.warning(
+                    "explorer catalog update failed for %s: %s", corpus_name, exc,
+                )
         if not update_registry:
             if prev_bypass is not None and hasattr(backend, "bypass"):
                 backend.bypass = prev_bypass
@@ -1112,6 +1148,7 @@ class VecgrepService:
         corpus_names: list[str] | None = None,
     ) -> SearchOutcome:
         started = time.monotonic()
+        _validate_search_mode(mode)
         top_k = top_k or self.settings.default_top_k
         if expand_aliases:
             # Entity alias expansion (user-supplied map, outside the repo;
@@ -1267,13 +1304,20 @@ class VecgrepService:
             # distinct evidence, not five slices of one exchange. On corpora
             # with no near-dups this degrades to plain score order.
             results = mmr_select(results, top_k)
-            # Display order follows similarity_pct scaled by the corpus rank
-            # weight — identical to raw pct order when weights are neutral;
-            # where they differ, a curated corpus deliberately edges out a
-            # transcript hit of comparable %, which is the point of weighting.
-            weights = {c.name: (getattr(c, "rank_weight", 1.0) or 1.0) for c in corpora}
-            results.sort(key=lambda r: r.similarity_pct * weights.get(r.corpus, 1.0),
-                         reverse=True)
+            # Final order follows `score`: the fused RRF score already
+            # multiplied by recency decay and the corpus rank weight in
+            # _search_one — the one number the pipeline claims ranked a hit.
+            #
+            # This used to sort by similarity_pct * rank_weight so the list
+            # read monotonic in the displayed %. That silently erased decay:
+            # similarity_pct carries no decay term, and since 2026-09-09 it is
+            # not even one scale (calibrated cosine for dense hits, a
+            # rank-relative rescale that always reads ~90 for the top
+            # BM25-only hit), so a 400-day-old lexical-only hit sat above a
+            # fresh dense hit on a corpus with a 30-day half-life. The
+            # lexical-only label and `explain` are how a consumer reconciles
+            # a lower % ranked higher; the ordering itself must be the score.
+            results.sort(key=lambda r: r.score, reverse=True)
         if corpus_name is None or plural_scope:
             counts = {name: 0 for name in successful}
             for result in results:
@@ -2083,6 +2127,17 @@ class VecgrepService:
 
         if not candidates:
             return []
+        # Cap the cross-encoder's workload at the most plausible candidates.
+        # The pool arrives in fan-out order (corpus by corpus), NOT in global
+        # fusion order, so ranking by similarity_pct here is what makes "top
+        # N" mean anything -- slicing the arrival order would just hand the
+        # model the first corpora searched. similarity_pct is still the fused
+        # score at this point; _apply_rerank overwrites it below, which is
+        # precisely why the tail has to be split off BEFORE that happens.
+        tail: list[SearchResult] = []
+        if 0 < RERANK_POOL_MAX < len(candidates):
+            ordered = sorted(candidates, key=lambda r: r.similarity_pct, reverse=True)
+            candidates, tail = ordered[:RERANK_POOL_MAX], ordered[RERANK_POOL_MAX:]
         # rerank() takes (text, payload-ish) pairs. We pass each candidate's
         # chunk text + a dict that lets us reconstruct the SearchResult.
         pairs = [(c.chunk, c) for c in candidates]
@@ -2110,9 +2165,26 @@ class VecgrepService:
         # near-clones; selection order starts from the best hit, so the
         # reranked ordering survives for everything selected. Do NOT re-sort
         # by similarity_pct here (that would undo the rerank).
-        return mmr_select(
+        selected = mmr_select(
             out, top_k, key=lambda r: r.explain.get("rerank_score", 0.0)
         )
+        if tail and len(selected) < top_k:
+            # Backfill from the unscored tail, in fusion order. These carry no
+            # rerank_score and are NOT marked as reranked: the model never saw
+            # them, so claiming it did would misreport why they are here (and
+            # would let an unscored hit's calibrated-looking pct be compared
+            # against a real one). They sit strictly below the reranked head.
+            selected = selected + tail[:top_k - len(selected)]
+        return selected
+
+    def _search_admission_timeout(self) -> float | None:
+        """Seconds one corpus gets to admit a search; None waits."""
+        timeout = getattr(self.settings, "search_lock_timeout_s", 10.0)
+        try:
+            timeout = float(timeout)
+        except (TypeError, ValueError):
+            return 10.0
+        return timeout if timeout > 0 else None
 
     def _search_one(
         self,
@@ -2124,7 +2196,16 @@ class VecgrepService:
         query_vectors: _QueryVectorMemo | None = None,
     ) -> list[SearchResult]:
         self._recover_if_pending(corpus.name)
-        with self.locks.read(corpus.name):
+        # LockTimeout leaves this corpus in search()'s failures list, which an
+        # unscoped search reports as a warning beside the corpora that did
+        # answer. The alternative is the whole call hanging on one busy corpus.
+        queued = time.monotonic()
+        with self.locks.read(corpus.name, timeout=self._search_admission_timeout()):
+            waited = time.monotonic() - queued
+            if waited >= SLOW_ADMISSION_S:
+                logger.warning(
+                    "corpus %s took %.1fs to admit a search", corpus.name, waited
+                )
             # A migration/delete may have completed while query assembly was
             # selecting corpora. Re-resolve metadata inside admission.
             corpus = self.registry.get(corpus.name)
@@ -2262,7 +2343,7 @@ class VecgrepService:
         ]
         hydrated = self.store.get_many_by_id(collection, missing)
         # For BM25-only display: rescale per-query so the top BM25 hit reads
-        # at BM25_DISPLAY_TOP (~90%) and weaker BM25 hits taper toward
+        # at BM25_DISPLAY_TOP (below 40%) and weaker BM25 hits taper toward
         # BM25_DISPLAY_FLOOR. The raw fused RRF score is unchanged for ranking.
         max_bm25 = max(bm25_score_by_id.values()) if bm25_score_by_id else 0.0
 
@@ -2276,12 +2357,22 @@ class VecgrepService:
             matched_by = sources.get(cid, [])
             # similarity_pct: pick the most informative signal for display.
             # When vector saw it, the calibrated cosine pct (after sigmoid)
-            # already reflects semantic relevance. When only BM25 saw it,
-            # use rank-relative scaling so a strong keyword hit doesn't read
-            # as "1.6% noise" (the raw RRF score for a BM25-only hit).
-            # When BOTH retrievers fired, we take the higher of the two —
-            # confirmation across modalities should boost confidence, not
-            # average it down.
+            # already reflects semantic relevance, and it is ABSOLUTE — so it
+            # is the number we show, even when BM25 also fired. When only BM25
+            # saw it, fall back to rank-relative scaling so a strong keyword
+            # hit doesn't read as "1.6% noise" (the raw RRF score for a
+            # BM25-only hit).
+            #
+            # This used to be max(cos_pct, bm_pct) on the theory that
+            # cross-modal confirmation should boost confidence. It does the
+            # opposite: bm_pct is normalized against the best BM25 score in
+            # THIS corpus for THIS query, so the top lexical hit always reads
+            # ~BM25_DISPLAY_TOP regardless of absolute score, and max() let
+            # that overwrite a weak semantic verdict. Measured 2026-09-09: one
+            # chunk displayed 90.0 "strong" in hybrid and 25.8 "weak" in
+            # vector mode — same chunk, same query. matched_by already tells a
+            # caller both retrievers fired; it does not need to be smuggled
+            # into the percentage.
             cos_pct = (
                 _cosine_to_pct(vector_score_by_id[cid], model=corpus.embed_model)
                 if cid in vector_score_by_id
@@ -2291,9 +2382,7 @@ class VecgrepService:
             if max_bm25 > 0 and cid in bm25_score_by_id:
                 ratio = bm25_score_by_id[cid] / max_bm25
                 bm_pct = BM25_DISPLAY_FLOOR + (BM25_DISPLAY_TOP - BM25_DISPLAY_FLOOR) * ratio
-            if cos_pct is not None and bm_pct is not None:
-                pct = max(cos_pct, bm_pct)
-            elif cos_pct is not None:
+            if cos_pct is not None:
                 pct = cos_pct
             elif bm_pct is not None:
                 pct = bm_pct
@@ -2338,8 +2427,27 @@ class VecgrepService:
                     shas.add(EmbedCache._sha(text))
         return keep
 
+
+    def flush_embed_cache(self) -> None:
+        """Land buffered LRU stamps. Called on server shutdown.
+
+        Cache hits defer their last_used write (see cache._TOUCH_FLUSH_SECONDS);
+        without this, every restart would discard up to one interval of reads
+        and leave the whole cache looking equally cold to eviction.
+        """
+        if self._embed_cache is None:
+            return
+        try:
+            self._embed_cache.flush_touches()
+        except Exception as exc:  # bookkeeping only -- never block shutdown
+            logger.warning("embed cache flush on shutdown failed: %s", exc)
+
     def cache_sweep(
-        self, *, dry_run: bool = False, identities: list[str] | None = None
+        self,
+        *,
+        dry_run: bool = False,
+        identities: list[str] | None = None,
+        max_delete_fraction: float | None = None,
     ) -> dict:
         """Delete cached vectors no registered corpus references.
 
@@ -2351,7 +2459,12 @@ class VecgrepService:
         if self._embed_cache is None:
             return {"kept": {}, "deleted": {}, "dry_run": dry_run}
         keep = self.cache_keep_set()
-        deleted = self._embed_cache.sweep(keep, identities=identities, dry_run=dry_run)
+        deleted = self._embed_cache.sweep(
+            keep,
+            identities=identities,
+            dry_run=dry_run,
+            max_delete_fraction=max_delete_fraction,
+        )
         return {
             "kept": {k: len(v) for k, v in keep.items()},
             "deleted": deleted,
@@ -2368,7 +2481,7 @@ class VecgrepService:
                 "corpus": name,
                 "operation": "delete_corpus",
                 "phase": "prepared",
-                "corpus_before": asdict(corpus),
+                "corpus_before": _journal_corpus(corpus),
             })
             self.store.drop_collection(_collection_for(corpus.name))
             record = self.mutations.read(name) or {}
@@ -2512,8 +2625,8 @@ class VecgrepService:
                 "operation": "delete_source",
                 "phase": "prepared",
                 "source_id": source_id,
-                "corpus_before": asdict(corpus),
-                "corpus_target": asdict(target),
+                "corpus_before": _journal_corpus(corpus),
+                "corpus_target": _journal_corpus(target),
             })
             self.store.delete_by_source(collection, source_id)
             record = self.mutations.read(corpus_name) or {}
@@ -2600,6 +2713,9 @@ class VecgrepService:
             Its chunks are still indexed, so a deleted document keeps being
             returned as a live answer. Always fixable — the fix is to purge it
             from both backends. Carries an extra "source_id" key.
+          - "source_path_aliases": multiple registered IDs resolve to the same
+            existing file. Carries "groups" and "extra_sources". Requires manual
+            canonical-coverage verification before deleting legacy IDs.
           - "embed_model_split": corpora on the same backend disagree about
             which embedding model to use. Not corruption — everything still
             answers — which is exactly why it hides. Ollama treats each model
@@ -2678,6 +2794,21 @@ class VecgrepService:
                         "detail": f"source no longer exists: {src_id}",
                         "fixable": True,
                     })
+
+            groups = _source_path_aliases(
+                list(set(c.sources or []) | set(c.source_hashes or {}))
+            )
+            if groups:
+                extra = sum(len(group["source_ids"]) - 1 for group in groups)
+                issues.append({
+                    "corpus": name,
+                    "kind": "source_path_aliases",
+                    "detail": f"{len(groups)} file(s) registered under multiple "
+                              f"path spellings ({extra} extra source IDs)",
+                    "fixable": False,
+                    "extra_sources": extra,
+                    "groups": groups,
+                })
 
             if c.chunk_count > 0:
                 if not self.bm25.exists(name):
@@ -2823,6 +2954,11 @@ class VecgrepService:
                     "kind": kind,
                     "source_id": issue["source_id"],
                     "action": "purged",
+                })
+            elif kind == "source_path_aliases":
+                actions.append({
+                    "corpus": name, "kind": kind,
+                    "action": "needs_source_deduplication",
                 })
             else:  # orphan_collection
                 actions.append({"corpus": name, "kind": kind, "action": "needs_manual_index"})
@@ -3174,7 +3310,7 @@ class VecgrepService:
             archive_name = meta.get("name") if isinstance(meta, dict) else None
             self.registry.validate_user_name(archive_name)
 
-            target_name = rename or archive_name
+            target_name = archive_name if rename is None else rename
             # Names become filesystem components below. Validate both archive
             # metadata and an explicit rename before closing or writing storage.
             self.registry.validate_user_name(target_name)
@@ -3290,11 +3426,58 @@ def _collection_for(corpus_name: str) -> str:
     return f"{_COLLECTION_PREFIX}{corpus_name}"
 
 
+def _journal_corpus(corpus: "Corpus | None") -> dict | None:
+    """The corpus as the crash journal should remember it: metadata only.
+
+    Recovery rebuilds `sources` and `source_hashes` from the live Qdrant
+    payloads and never reads them from the record, yet the record used to
+    carry both. On a 5,791-source corpus that made every journal write a
+    4.4 MB fsync'd file, rewritten four times per indexed source: 76% of all
+    bytes an index run put on disk, ~6 GB for one reindex of a large repo corpus
+    (2026-09-13). Keep the fields so old readers still see a full Corpus,
+    just empty.
+    """
+    if corpus is None:
+        return None
+    data = asdict(corpus)
+    data["sources"] = []
+    data["source_hashes"] = {}
+    return data
+
+
 def _corpus_from_collection(collection: str) -> str | None:
     """Inverse of _collection_for. None for a collection we don't own."""
     if collection.startswith(_COLLECTION_PREFIX):
         return collection[len(_COLLECTION_PREFIX):]
     return None
+
+
+def _source_path_aliases(sources: list[str]) -> list[dict]:
+    """Group existing file IDs by resolved path, without comparing content.
+
+    Distinct hard-link names remain distinct identities because adapters keep
+    those names after resolving symlinks. Missing files are diagnosed separately.
+    """
+    by_path: dict[str, list[str]] = {}
+    for source in sorted(set(sources)):
+        if source.startswith(("http://", "https://")):
+            continue
+        try:
+            path = Path(source).resolve(strict=True)
+            if not path.is_file():
+                continue
+        except (OSError, RuntimeError, ValueError):
+            continue
+        by_path.setdefault(str(path), []).append(source)
+    return [
+        {
+            "canonical_source_id": canonical,
+            "source_ids": aliases,
+            "canonical_registered": canonical in aliases,
+        }
+        for canonical, aliases in sorted(by_path.items())
+        if len(aliases) > 1
+    ]
 
 
 def _source_exists(source_id: str) -> bool:
@@ -3588,10 +3771,33 @@ _MODEL_CALIBRATION: dict[str, tuple[float, float]] = {
 }
 
 
+def _calibration_base_name(model: str) -> str:
+    """The calibration key for an embed model ref, tag stripped.
+
+    Ollama model refs carry a `:tag` suffix that selects runtime options, not
+    a different model — `bge-m3:batch4k` embeds identically to `bge-m3`. The
+    calibration table is keyed by model, so the tag must not participate in
+    the lookup.
+    """
+    return model.split(":", 1)[0]
+
+
 def _calibration_for(model: str | None) -> tuple[float, float]:
-    """(center, slope) for an embed model, falling back to module defaults."""
-    if model and model in _MODEL_CALIBRATION:
-        return _MODEL_CALIBRATION[model]
+    """(center, slope) for an embed model, falling back to module defaults.
+
+    Exact ref first (so a tagged ref can be pinned deliberately), then the
+    tag-stripped base name. An unmatched tag silently fell back to the
+    nomic-ish defaults, whose 0.66 center sits ABOVE almost every bge-m3
+    cosine — that pushed `_cosine_floor` to 0.56 and discarded nearly the
+    whole dense channel before fusion. Measured 2026-09-09 on a two-corpus
+    install: a plain-prose query returned 0 vector hits under the fallback.
+    """
+    if model:
+        if model in _MODEL_CALIBRATION:
+            return _MODEL_CALIBRATION[model]
+        base = _calibration_base_name(model)
+        if base in _MODEL_CALIBRATION:
+            return _MODEL_CALIBRATION[base]
     return CALIBRATION_CENTER, CALIBRATION_SLOPE
 
 

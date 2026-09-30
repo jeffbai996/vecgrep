@@ -39,7 +39,7 @@ import base64
 import ipaddress
 import json
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Literal
 
 
 # --- MCP server icon (SEP-973) ------------------------------------------
@@ -181,33 +181,80 @@ def _result_payload(r) -> dict:
 RERANK_AUTO_MIN_POINTS = 10_000
 
 
+def _corpus_chunk_counts(svc) -> dict[str, int]:
+    """name -> chunk_count for every corpus, from whichever shape svc returns.
+
+    list_corpora() yields Corpus objects locally and dicts through the API
+    mirror. chunk_count is the field that actually exists — `points`/`chunks`
+    do not, and guessing them would make every size gate silently read zero.
+    """
+    out: dict[str, int] = {}
+    for c in svc.list_corpora():
+        if isinstance(c, dict):
+            cn, n = c.get("name"), c.get("chunk_count")
+        else:
+            cn, n = getattr(c, "name", None), getattr(c, "chunk_count", None)
+        if cn:
+            out[str(cn)] = int(n or 0)
+    return out
+
+
+def _fanout_chunk_count(svc, args: dict) -> int:
+    """Total chunks an unscoped/multi-corpus search will actually fan out over.
+
+    Mirrors service.search_with_diagnostics's scope resolution: an explicit
+    `corpora` list is searched as given, and an omitted scope resolves to
+    _searchable_corpora() — the registry minus cross_corpus_exclude, so an
+    eval-* build copy never inflates the estimate. Falls back to list_corpora()
+    for service objects that predate the helper (and for the API dict mirror).
+    """
+    names = args.get("corpora")
+    counts = _corpus_chunk_counts(svc)
+    if names:
+        return sum(counts.get(str(n), 0) for n in names)
+    searchable = getattr(svc, "_searchable_corpora", None)
+    if callable(searchable):
+        total = 0
+        for c in searchable():
+            name = c.get("name") if isinstance(c, dict) else getattr(c, "name", None)
+            if name:
+                total += counts.get(str(name), 0)
+        return total
+    return sum(counts.values())
+
+
 def _should_rerank(svc, args: dict) -> bool:
     """Explicit `rerank` in the call always wins; otherwise decide on size.
 
-    Never raises: if the corpus size can't be read for any reason, fall back to
+    Scoped to one corpus, size that corpus. Unscoped (the default squad-bot
+    call) or given a `corpora` list, size the SUM over the corpora the fan-out
+    will search: service.search_with_diagnostics merges every corpus into one
+    candidate list and only then filters, dedups and reranks, so a cross-corpus
+    rerank is a single cross-encoder pass over the fused top-50 — the same unit
+    of work the single-corpus rule was priced against, not one pass per corpus.
+    The old rule skipped it here ("don't pay it blind"), which left the highest
+    -traffic call path unreranked and therefore uncalibrated: the eval measured
+    unreranked hybrid returning a confident top hit for 92% of negatives vs 4%
+    with the reranker on.
+
+    An explicit empty `corpora` list is a caller error the service raises on;
+    it is not "search everything", so it must not opt into rerank here.
+
+    Never raises: if corpus sizes can't be read for any reason, fall back to
     the old default (off) rather than failing the search.
     """
     explicit = args.get("rerank")
     if explicit is not None:
         return bool(explicit)
     try:
+        if args.get("corpora") == []:
+            return False
         name = args.get("corpus")
         if not name:
-            return False          # cross-corpus search: don't pay it blind
-        for c in svc.list_corpora():
-            # list_corpora returns Corpus objects; the API mirror is a dict.
-            # Handle both, and read chunk_count — the field that actually
-            # exists (points/chunks do not, and guessing them would make this
-            # silently return False forever).
-            if isinstance(c, dict):
-                cn, n = c.get("name"), c.get("chunk_count")
-            else:
-                cn, n = getattr(c, "name", None), getattr(c, "chunk_count", None)
-            if cn == name:
-                return bool(n and int(n) >= RERANK_AUTO_MIN_POINTS)
+            return _fanout_chunk_count(svc, args) >= RERANK_AUTO_MIN_POINTS
+        return _corpus_chunk_counts(svc).get(name, 0) >= RERANK_AUTO_MIN_POINTS
     except Exception:
         return False
-    return False
 
 
 def _should_budget(svc, args: dict) -> bool:
@@ -216,8 +263,17 @@ def _should_budget(svc, args: dict) -> bool:
     Same size rule as rerank, for the same reason: on a small corpus the
     candidate pool IS the haystack, so a stub tail adds nothing. On a big one
     the head fills with near-duplicates and the tail is where the distinct
-    sources are. Never raises — an unreadable corpus size falls back to the
-    old default (off) rather than failing the search.
+    sources are.
+
+    Deliberately NOT extended to unscoped/multi-corpus search the way rerank
+    was. Rerank only reorders a result list the caller already receives; budget
+    changes the response SHAPE (full hits plus a `stubs` tail), so auto-firing
+    it on every unscoped call would silently rewrite what every existing
+    consumer parses. Same arithmetic, very different blast radius — an unscoped
+    caller who wants breadth passes `budget=true`.
+
+    Never raises — an unreadable corpus size falls back to the old default
+    (off) rather than failing the search.
     """
     explicit = args.get("budget")
     if explicit is not None:
@@ -226,19 +282,16 @@ def _should_budget(svc, args: dict) -> bool:
         name = args.get("corpus")
         if not name:
             return False
-        for c in svc.list_corpora():
-            if isinstance(c, dict):
-                cn, n = c.get("name"), c.get("chunk_count")
-            else:
-                cn, n = getattr(c, "name", None), getattr(c, "chunk_count", None)
-            if cn == name:
-                return bool(n and int(n) >= RERANK_AUTO_MIN_POINTS)
+        return _corpus_chunk_counts(svc).get(name, 0) >= RERANK_AUTO_MIN_POINTS
     except Exception:
         return False
-    return False
 
 
 def _run_search(args: dict) -> str:
+    from .search_policy import resolve_search, bounded_payload, DEFAULT_RESPONSE_TOKEN_CEILING
+
+    explicit_top_k = args.get("top_k") is not None
+    args = resolve_search(args)
     svc = _svc()
     common = dict(
         corpus_name=args.get("corpus"),
@@ -246,6 +299,10 @@ def _run_search(args: dict) -> str:
         mode=args.get("mode", "hybrid"),
         rerank=_should_rerank(svc, args),
         filters=args.get("filters") or None,
+        # Superseded versions are hidden by default (a stale revision is not
+        # current truth). Reading history is the one legitimate reason to want
+        # them, and it was the only search flag the MCP layer never exposed.
+        include_superseded=bool(args.get("include_superseded") or False),
         # Bots use the raw retriever breakdown to interpret a blended display
         # score. It is assembled from scores already in hand; no extra search.
         explain=True,
@@ -278,11 +335,29 @@ def _run_search(args: dict) -> str:
             ],
             "warnings": [asdict(w) for w in warnings],
         }
-        return json.dumps(payload, indent=2)
+        return bounded_payload(
+            payload, args.get("response_token_ceiling", DEFAULT_RESPONSE_TOKEN_CEILING),
+            {"profile": args.get("profile"),
+             "ignored_parameters": ["top_k"] if explicit_top_k else [],
+             "rerank_requested": common["rerank"],
+             "reranked_results": sum("rerank" in r.matched_by for r in [*full, *stubs]),
+             "scope": {"corpus": common["corpus_name"], "corpora": common["corpus_names"],
+                       "filters": common["filters"]}},
+        )
     outcome = svc.search_with_diagnostics(
         args["query"], top_k=args.get("top_k"), **common
     )
     hits = [_result_payload(r) for r in outcome.results]
+    if args.get("response_token_ceiling") is not None:
+        return bounded_payload(
+            {"hits": hits, "warnings": [asdict(w) for w in outcome.warnings]},
+            args["response_token_ceiling"],
+            {"profile": args.get("profile"), "ignored_parameters": [],
+             "rerank_requested": common["rerank"],
+             "reranked_results": sum("rerank" in r.matched_by for r in outcome.results),
+             "scope": {"corpus": common["corpus_name"], "corpora": common["corpus_names"],
+                       "filters": common["filters"]}},
+        )
     if outcome.warnings:
         return json.dumps({
             "hits": hits,
@@ -1232,7 +1307,7 @@ def build_mcp_server() -> Any:
                         },
                         "top_k": {
                             "type": "integer",
-                            "description": "Max results (default 5).",
+                            "description": "Max results outside budget mode (default 5); ignored in budget mode, which retrieves up to 100.",
                             "default": 5,
                         },
                         "mode": {
@@ -1282,6 +1357,15 @@ def build_mcp_server() -> Any:
                                 "stubs — they are real results, and get_chunk "
                                 "expands any of them in full."
                             ),
+                        },
+                        "profile": {
+                            "type": "string",
+                            "enum": ["lookup", "explore", "deep"],
+                            "description": "Optional intent preset; explicit knobs override it. Scope is never broadened. Presets are starting policies, not measured optima.",
+                        },
+                        "response_token_ceiling": {
+                            "type": "integer", "minimum": 512,
+                            "description": "Whole JSON text cap in cl100k_base tokens, including metadata. Budget-mode default 12000; presets choose 4000/8000/16000. Excludes MCP transport wrappers; other model tokenizers differ.",
                         },
                         "full_k": {
                             "type": "integer",
@@ -1686,6 +1770,95 @@ def build_mcp_server() -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Tool dispatch — off the event loop
+# ---------------------------------------------------------------------------
+
+class ToolBusyError(RuntimeError):
+    """Raised when a tool call cannot get the single tool slot in time.
+
+    An agent can read this and retry or narrow its query. The alternative --
+    what this replaces -- was queueing behind the stuck call until the client
+    gave up, which every MCP caller experienced as a dead server while REST
+    kept answering normally.
+    """
+
+
+# How long a tool call waits for the slot before saying so. Long enough that
+# an ordinary search ahead of it finishes, short enough to stay inside a
+# client's tool timeout.
+MCP_GATE_WAIT_S = float(_os.environ.get("VECGREP_MCP_GATE_WAIT_S", "20"))
+
+
+def _offload_sync_tools(fmcp: Any) -> None:
+    """Make `@fmcp.tool` register synchronous bodies as coroutines.
+
+    The MCP SDK runs a tool that is not a coroutine INLINE on the asyncio
+    event loop (mcp/server/fastmcp/utilities/func_metadata.py:
+    `if fn_is_async: await fn(...) else: return fn(...)`). Every tool here has
+    a synchronous body, and a search is seconds of embed + qdrant + sqlite +
+    cross-encoder, so for that whole time uvicorn could not accept a
+    connection or answer anything -- including /api/health, whose entire body
+    is `return {"status": "ok"}`.
+
+    Measured against the live server on 2026-09-12: one MCP search took
+    17.90s and /api/health was blocked for 17.89s of it, against a 2ms
+    baseline. The squad watchdog probes that endpoint with a 5s timeout and
+    restarts after three strikes, so a few slow searches in a row bounced the
+    service and everything in flight got a 504.
+
+    Why it started biting on 2026-09-11 and not before: the blocking call had
+    always been there, but cf21ce9 (2026-09-10) turned cross-encoder rerank on
+    by default for cross-corpus fan-out, which pushed a routine search past
+    the 5s probe budget.
+
+    Calls stay SERIALIZED. They were already, by virtue of running on the
+    loop; the gate keeps that property so nothing in the search path meets
+    concurrency it was never written for. What changes is only that the loop
+    is free to answer while a tool works.
+    """
+    import functools
+    import inspect as _inspect
+
+    import anyio
+
+    register = fmcp.tool
+    gate = anyio.Semaphore(1)
+
+    def tool(*args: Any, **kwargs: Any):
+        decorate = register(*args, **kwargs)
+
+        def apply(fn):
+            if _inspect.iscoroutinefunction(fn):
+                return decorate(fn)
+
+            @functools.wraps(fn)          # keeps __wrapped__, so the schema
+            async def offloaded(**call):  # FastMCP derives from the signature
+                                          # is the original function's
+                # Bounded: one tool body stuck on a saturated disk used to
+                # hold this slot indefinitely, and every later call -- even
+                # ones whose body does nothing -- waited behind it forever.
+                with anyio.move_on_after(MCP_GATE_WAIT_S) as scope:
+                    await gate.acquire()
+                if scope.cancelled_caught:
+                    raise ToolBusyError(
+                        f"vecgrep is busy: no tool slot within "
+                        f"{MCP_GATE_WAIT_S:.0f}s. Retry, or scope the call to "
+                        f"one corpus."
+                    )
+                try:
+                    return await anyio.to_thread.run_sync(
+                        functools.partial(fn, **call))
+                finally:
+                    gate.release()
+
+            return decorate(offloaded)
+
+        return apply
+
+    fmcp.tool = tool
+
+
+# ---------------------------------------------------------------------------
 # HTTP transport — FastMCP with json_response + stateless_http
 # ---------------------------------------------------------------------------
 
@@ -1796,9 +1969,29 @@ def build_oauth_root_routes(oauth_issuer_url: str) -> list:
         scopes_supported=list(VALID_SCOPES),
     )
     return [
-        _guard_oauth_registration(_trace_oauth(advertise_public_clients(r)))
+        _guard_oauth_registration(_trace_oauth(advertise_loopback_resource(advertise_public_clients(r))))
         for r in routes
     ]
+
+
+def advertise_loopback_resource(route):
+    """A direct loopback caller never needs OAuth to use /mcp -- but this
+    metadata route is built once at startup with the public Funnel URL baked
+    in as `resource`, since that's the correct identity for the claude.ai/
+    ChatGPT connectors this same route also serves.
+    An SDK client that dials the loopback URL directly then fetches this
+    metadata sees a `resource` that doesn't match the origin it connected to
+    and refuses to proceed as a spec-compliance check (2026-09-18) -- even
+    though that peer was never going to be challenged for a token anyway.
+    Rewrite `resource` to the literal loopback origin for a request that
+    passes the same trust check used to bypass bearer-token enforcement
+    elsewhere in this file (peer is loopback, no proxy/Tailscale headers);
+    every other caller keeps seeing the public identity unchanged."""
+    from starlette.routing import Route
+    if not isinstance(route, Route) or not route.path.startswith("/.well-known/oauth-protected-resource"):
+        return route
+    return Route(route.path, endpoint=_LoopbackResourceMetadata(route.endpoint),
+                 methods=list(route.methods or ["GET", "OPTIONS"]))
 
 
 def advertise_public_clients(route):
@@ -2013,6 +2206,53 @@ class _OAuthTraceASGI:
                    b"".join(out).decode("utf-8", "replace"))
 
 
+class _LoopbackResourceMetadata:
+    """Rewrite the `resource` field of RFC 9728 protected-resource metadata to
+    the literal loopback origin, but only for a request that passes the same
+    unproxied-loopback-peer check the bearer-token bypass uses elsewhere in
+    this file. See advertise_loopback_resource() for why."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    async def __call__(self, scope, receive, send):
+        import json as _json
+
+        start = None
+        chunks: list[bytes] = []
+
+        async def capture(message):
+            nonlocal start
+            if message["type"] == "http.response.start":
+                start = message
+            elif message["type"] == "http.response.body":
+                chunks.append(message.get("body", b""))
+
+        await self._inner(scope, receive, capture)
+        if start is None:
+            return
+        body = b"".join(chunks)
+        if (
+            _has_loopback_peer(scope)
+            and _has_loopback_server(scope)
+            and not (_mcp_request_headers(scope).keys() & _PROXY_TRANSIT_HEADERS)
+        ):
+            try:
+                meta = _json.loads(body)
+                server_host, server_port = scope.get("server", (None, None))
+                if server_host:
+                    resource_path = str(meta.get("resource", "")).split("://", 1)[-1]
+                    resource_path = "/" + resource_path.split("/", 1)[1] if "/" in resource_path else "/mcp"
+                    meta["resource"] = f"http://{server_host}:{server_port}{resource_path}"
+                    body = _json.dumps(meta).encode()
+            except Exception:
+                pass
+        headers = [(k, v) for k, v in start.get("headers", []) if k.lower() != b"content-length"]
+        headers.append((b"content-length", str(len(body)).encode()))
+        await send({"type": "http.response.start", "status": start["status"], "headers": headers})
+        await send({"type": "http.response.body", "body": body})
+
+
 class _PublicClientMetadata:
     def __init__(self, inner):
         self._inner = inner
@@ -2212,6 +2452,10 @@ def _is_direct_loopback_mcp(scope: dict) -> bool:
     bypass, never enable it. Missing/malformed peer data and any forwarding
     marker fail closed into OAuth.
     """
+    from ..backend.auth.ingress import PRIVATE_INGRESS
+
+    if scope.get(PRIVATE_INGRESS) is not True:
+        return False
     if scope.get("type") != "http" or scope.get("path") != "/":
         return False
     if not _has_loopback_peer(scope):
@@ -2325,6 +2569,7 @@ def build_http_app(
 
     fmcp_kwargs["icons"] = _server_icons()
     fmcp = FastMCP("vecgrep", **fmcp_kwargs)
+    _offload_sync_tools(fmcp)
     fmcp.settings.json_response = True
     fmcp.settings.stateless_http = True
     # Register at '/' so the parent app's prefix-stripping (_BearerGatedASGI
@@ -2356,19 +2601,35 @@ def build_http_app(
         query: str,
         corpus: str | None = None,
         corpora: list[str] | None = None,
-        top_k: int = 5,
+        top_k: int | None = None,
         mode: str = "hybrid",
         rerank: bool | None = None,
         filters: list[str] | None = None,
+        include_superseded: bool = False,
         budget: bool | None = None,
-        full_k: int = 8,
-        token_ceiling: int = 4000,
+        full_k: int | None = None,
+        token_ceiling: int | None = None,
+        profile: Literal["lookup", "explore", "deep"] | None = None,
+        response_token_ceiling: int | None = None,
     ) -> str:
         """Natural-language query. corpus: limit to one corpus (omit = all).
-        top_k: max results. mode: hybrid|vector|bm25.
+        top_k: max results outside budget mode (default 5); ignored in budget
+        mode, which retrieves up to 100. mode: hybrid|vector|bm25.
+        profile: lookup (5 hits, 4000 tokens), explore (6 full + previews,
+        8000 tokens), deep (10 full + previews, 16000 tokens). All request
+        reranking. Explicit knobs override presets; scope never broadens.
+        Presets are starting policies, not benchmarked optima.
+        response_token_ceiling: whole JSON text cap in cl100k_base tokens;
+        minimum 512, default 12000 in budget mode. Includes metadata, excludes
+        transport wrappers. Other model tokenizers differ. search_info reports
+        truncation, scope, ignored knobs and pre-budget reranked result count.
+        full_k defaults to 8; token_ceiling defaults to 4000 and still applies
+        only to the approximate preview-tail budget.
         rerank: cross-encoder rerank — markedly better on long, fuzzy
-        queries. Omit to auto-enable on large corpora (>=10k chunks)
-        and skip it on small ones; pass true/false to force.
+        queries. Omit to auto-enable when the corpora being searched hold
+        >=10k chunks in total (a scoped corpus by its own size, an unscoped
+        or multi-corpus search by the sum over what it fans out across) and
+        skip it below that; pass true/false to force.
         filters: hard constraints — 'source:<glob>', 'source_path:<glob>',
         'corpus:<name>', 'meta.<k>=<v>', 'date:YYYY-MM-DD|today|yesterday',
         'after:<iso>|7d|24h|2w', 'before:<iso>|today', 'channel:<name>',
@@ -2376,6 +2637,9 @@ def build_http_app(
         'has:code|table|link'; prefix with '-' to EXCLUDE. Use time filters
         for 'today'-style questions so old lore can't leak in; speaker: for
         'what did X say'.
+        include_superseded: also return versions a later write replaced.
+        Default false — a superseded revision is history, not current truth.
+        Turn it on to read how a document changed, not to answer with it.
         budget: breadth mode — top full_k results WITH context plus a
         one-line stub tail capped at ~token_ceiling tokens. ON BY DEFAULT for
         large corpora (omit to let it decide). The stubs are real results:
@@ -2389,9 +2653,12 @@ def build_http_app(
             "mode": mode,
             "rerank": rerank,
             "filters": filters,
+            "include_superseded": include_superseded,
             "budget": budget,
             "full_k": full_k,
             "token_ceiling": token_ceiling,
+            "profile": profile,
+            "response_token_ceiling": response_token_ceiling,
         })
 
     @fmcp.tool(

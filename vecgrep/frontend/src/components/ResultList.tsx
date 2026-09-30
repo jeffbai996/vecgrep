@@ -164,7 +164,26 @@ export default function ResultList({
           <span className="text-zinc-600">distinct evidence, relevance order</span>
         </span>
         <span className="text-zinc-600 shrink-0">
-          {searching ? "refreshing" : `${response.hits.length} rich · ${response.stubs.length} compact`}
+          {searching ? (
+            "refreshing"
+          ) : (
+            <>
+              {response.took_ms != null && (
+                <>
+                  <span
+                    className={response.took_ms >= 3000 ? "text-amber-400" : "text-zinc-500"}
+                    title="server-side wall time; the rest of any wait was the round trip"
+                  >
+                    {response.took_ms >= 1000
+                      ? `${(response.took_ms / 1000).toFixed(1)} s`
+                      : `${response.took_ms} ms`}
+                  </span>
+                  <span className="text-zinc-700"> · </span>
+                </>
+              )}
+              {`${response.hits.length} rich · ${response.stubs.length} compact`}
+            </>
+          )}
         </span>
       </header>
 

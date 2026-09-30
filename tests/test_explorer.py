@@ -292,3 +292,31 @@ def test_explorer_source_reveals_home_and_returns_a_bounded_preview(svc, tmp_pat
     assert preview["source_length"] > len(preview["text"])
     assert preview["truncated"] is True
     assert len(preview["text"]) == 40
+
+
+def test_an_index_pass_commits_the_explorer_catalog_once(svc, tmp_path, monkeypatch) -> None:
+    # One commit per document rewrote the whole 4.6 MB WAL'd catalog for every
+    # source in every 15-minute incremental pass: 13 GB/day on the root SSD
+    # (2026-09-27). A pass now lands its rows in one transaction and stamps the
+    # generation once.
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    for i in range(3):
+        (folder / f"note-{i}.md").write_text(f"# Note {i}\n\nBody {i}.", encoding="utf-8")
+    calls = {"upsert": 0, "upsert_many": 0, "set_generation": 0}
+    store = svc.explorer_store
+    real_many, real_gen = store.upsert_many, store.set_generation
+
+    def no_per_doc_upsert(*_a, **_k):
+        calls["upsert"] += 1
+        raise AssertionError("explorer upsert ran per document")
+
+    monkeypatch.setattr(store, "upsert", no_per_doc_upsert)
+    monkeypatch.setattr(store, "upsert_many", lambda *a, **k: (calls.__setitem__("upsert_many", calls["upsert_many"] + 1), real_many(*a, **k))[1])
+    monkeypatch.setattr(store, "set_generation", lambda *a, **k: (calls.__setitem__("set_generation", calls["set_generation"] + 1), real_gen(*a, **k))[1])
+    svc.index(str(folder), "library")
+    assert calls == {"upsert": 0, "upsert_many": 1, "set_generation": 1}
+    assert len(store.records("library")) == 3
+    assert store.generation("library") is not None
+    svc._explorer_cache.clear()
+    assert len(svc.explore("library")["documents"]) == 3

@@ -6,6 +6,8 @@ refuse to mix models within one corpus.
 """
 from __future__ import annotations
 
+import contextlib
+
 import json
 import os
 import re
@@ -83,6 +85,8 @@ class CorpusRegistry:
         self.path = path
         self.in_memory = in_memory
         self.locks = locks or CorpusLocks(path.parent / "locks")
+        # corpus name -> pending entry while deferred_saves() is open
+        self._deferred: dict[str, Corpus | None] = {}
         self._corpora: dict[str, Corpus] = {}
         if not in_memory:
             with self.locks.registry_read():
@@ -118,6 +122,17 @@ class CorpusRegistry:
         self._corpora = {}
         self._load()
 
+    def _on_disk_text(self) -> str | None:
+        """Current file contents, or None if unreadable for any reason.
+
+        None always means "write it": a missing, truncated or permission-denied
+        file must never be mistaken for "already up to date".
+        """
+        try:
+            return self.path.read_text()
+        except OSError:
+            return None
+
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {name: asdict(c) for name, c in self._corpora.items()}
@@ -127,6 +142,14 @@ class CorpusRegistry:
         # — the root of the recurring "corpora vanished" losses. Mirrors
         # config._atomic_write_json, which this used to lack.
         text = json.dumps(payload, indent=2, sort_keys=True)
+        # Skip a byte-identical rewrite. The registry is saved once per indexed
+        # source so each journal record has a full recovery boundary, and a
+        # no-op re-ingest walks every source without changing any of them --
+        # which used to cost the whole file (2.2 MB on a real install) plus two
+        # fsyncs per source, for zero new information. Comparing first is one
+        # read of a file the OS already has cached.
+        if self._on_disk_text() == text:
+            return
         fd, tmp_name = tempfile.mkstemp(
             dir=str(self.path.parent), prefix=self.path.name + ".", suffix=".tmp"
         )
@@ -181,6 +204,12 @@ class CorpusRegistry:
             if name not in self._corpora:
                 raise CorpusError(f"No such corpus: {name}")
             return deepcopy(self._corpora[name])
+        # A deferred entry is the truth for this process until it lands; the
+        # file only lags it. Readers in this process (the journal-retire check
+        # that compares BM25 rows to chunk_count) must see the live one.
+        pending = self._deferred.get(name)
+        if pending is not None:
+            return deepcopy(pending)
         with self.locks.registry_read():
             self._reload()
             if name not in self._corpora:
@@ -190,13 +219,46 @@ class CorpusRegistry:
     def has(self, name: str) -> bool:
         if self.in_memory:
             return name in self._corpora
+        if self._deferred.get(name) is not None:
+            return True
         with self.locks.registry_read():
             self._reload()
             return name in self._corpora
 
+    @contextlib.contextmanager
+    def deferred_saves(self, name: str):
+        """Hold this corpus's upserts in memory and write corpora.json once.
+
+        An index run upserts the registry after every source, and each save
+        rewrites the whole file with two fsyncs: on a real install that was
+        2.4 MB per source, 15% of everything an index run put on disk
+        (2026-09-13). The caller holds the corpus write lock for the whole
+        run, so nothing else can move this entry meanwhile, and a crash loses
+        only hashes that recovery rebuilds from Qdrant anyway. Other corpora
+        keep saving immediately. The pending entry lands on exit, exception
+        or not, so partial progress is never thrown away.
+        """
+        if self.in_memory or name in self._deferred:
+            yield
+            return
+        self._deferred[name] = None
+        try:
+            yield
+        finally:
+            pending = self._deferred.pop(name, None)
+            if pending is not None:
+                with self.locks.registry_write():
+                    self._reload()
+                    self._corpora[name] = pending
+                    self._save()
+
     def upsert(self, c: Corpus) -> None:
         self.validate_name(c.name)
         if self.in_memory:
+            self._corpora[c.name] = deepcopy(c)
+            return
+        if c.name in self._deferred:
+            self._deferred[c.name] = deepcopy(c)
             self._corpora[c.name] = deepcopy(c)
             return
         # The lock spans reload -> modify -> replace. Atomic replace alone kept

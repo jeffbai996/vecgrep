@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from vecgrep.backend.embed.base import EmbedBackend
 from vecgrep.backend.embed.cache import DEFAULT_MAX_ROWS, CachedBackend, EmbedCache
 
@@ -246,6 +248,30 @@ def test_touch_failure_never_breaks_a_lookup(tmp_path, monkeypatch):
     assert cache.get_many("id", ["a"]) == {EmbedCache._sha("a"): [9.0]}
 
 
+def test_cache_write_contention_never_discards_fresh_vectors(tmp_path, monkeypatch):
+    """Persistence is optional; a computed embedding is the real result."""
+    cache = EmbedCache(tmp_path / "embed.db")
+    inner = _Counting()
+    backend = CachedBackend(inner, cache)
+
+    class LockedConnection:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def execute(self, *args, **kwargs):
+            return self.inner.execute(*args, **kwargs)
+
+        def executemany(self, *_a, **_k):
+            raise sqlite3.OperationalError("database is locked")
+
+        def rollback(self):
+            return self.inner.rollback()
+
+    monkeypatch.setattr(cache, "_conn", LockedConnection(cache._conn))
+    assert backend.embed(["fresh"]) == [[5.0, 0.0, 0.0, 0.0]]
+    assert inner.calls == 1
+
+
 def test_read_only_cache_serves_hits_without_any_mutation(tmp_path):
     """Recovery may read a shared warm cache but must never contend on it."""
     db = tmp_path / "embed.db"
@@ -350,3 +376,205 @@ def test_stats_bytes_reports_per_identity_size(tmp_path):
     cache.put_many("id", ["a", "b"], [[1.0] * 8] * 2)
     s = cache.stats_bytes()
     assert s["id"]["rows"] == 2 and s["id"]["bytes"] == 2 * 8 * 4
+
+
+# ── cap headroom warning ────────────────────────────────────────────────────
+# The cap comment documents the failure mode (a cap below the corpus size
+# turns a repair into a full overnight re-embed) but nothing watched for the
+# approach. Found 2026-09-08 with the cache at 83% of cap and growing.
+
+def _vecs(n: int) -> tuple[list[str], list[list[float]]]:
+    return [f"t{i}" for i in range(n)], [[1.0, 0.0, 0.0, 0.0]] * n
+
+
+def test_cap_warning_fires_near_cap(tmp_path, caplog, monkeypatch):
+    import logging
+
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "10")
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts, vecs = _vecs(9)  # 90% of cap
+    with caplog.at_level(logging.WARNING, logger="vecgrep.backend.embed.cache"):
+        cache.put_many("id", texts, vecs)
+    assert "VECGREP_EMBED_CACHE_MAX_ROWS" in caplog.text, (
+        "operator must be told which knob to raise before the cap binds"
+    )
+
+
+def test_cap_warning_silent_below_threshold(tmp_path, caplog, monkeypatch):
+    import logging
+
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "10")
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts, vecs = _vecs(8)  # below the 90% line
+    with caplog.at_level(logging.WARNING, logger="vecgrep.backend.embed.cache"):
+        cache.put_many("id", texts, vecs)
+    assert "VECGREP_EMBED_CACHE_MAX_ROWS" not in caplog.text
+
+
+def test_cap_warning_fires_once_not_per_put(tmp_path, caplog, monkeypatch):
+    import logging
+
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "10")
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts, vecs = _vecs(9)
+    with caplog.at_level(logging.WARNING, logger="vecgrep.backend.embed.cache"):
+        cache.put_many("id", texts, vecs)
+        cache.put_many("id", *_vecs(9))  # same rows again, still at 90%
+    warnings = [r for r in caplog.records if "VECGREP_EMBED_CACHE_MAX_ROWS" in r.message]
+    assert len(warnings) == 1
+
+
+def test_eviction_is_logged_when_cap_binds(tmp_path, caplog, monkeypatch):
+    import logging
+
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "5")
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts, vecs = _vecs(8)
+    with caplog.at_level(logging.WARNING, logger="vecgrep.backend.embed.cache"):
+        cache.put_many("id", texts, vecs)
+    assert cache.stats() == {"id": 5}
+    assert any("evict" in r.message.lower() for r in caplog.records), (
+        "the cap binding is the documented danger state; it must be visible"
+    )
+
+
+def test_cap_disabled_stays_silent(tmp_path, caplog, monkeypatch):
+    import logging
+
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "0")
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts, vecs = _vecs(50)
+    with caplog.at_level(logging.WARNING, logger="vecgrep.backend.embed.cache"):
+        cache.put_many("id", texts, vecs)
+    assert "VECGREP_EMBED_CACHE_MAX_ROWS" not in caplog.text
+
+
+# ── sweep delete-fraction guard ─────────────────────────────────────────────
+# An unattended sweep that runs while a corpus is empty or mid-rebuild would
+# delete exactly the vectors that make the rebuild cheap. The guard makes a
+# grossly lopsided sweep abort loudly instead of proceeding.
+
+def test_sweep_guard_aborts_on_excessive_deletion(tmp_path):
+    import pytest
+
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts, vecs = _vecs(10)
+    cache.put_many("id", texts, vecs)
+    keep = {"id": {EmbedCache._sha(t) for t in texts[:2]}}  # would delete 8/10
+
+    with pytest.raises(RuntimeError, match="fraction"):
+        cache.sweep(keep, max_delete_fraction=0.5)
+    assert cache.stats() == {"id": 10}, "an aborted sweep must delete nothing"
+
+
+def test_sweep_guard_allows_within_fraction(tmp_path):
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts, vecs = _vecs(10)
+    cache.put_many("id", texts, vecs)
+    keep = {"id": {EmbedCache._sha(t) for t in texts[:8]}}  # deletes 2/10
+
+    got = cache.sweep(keep, max_delete_fraction=0.5)
+    assert got == {"id": 2}
+    assert cache.stats() == {"id": 8}
+
+
+def test_sweep_guard_not_applied_to_dry_run(tmp_path):
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts, vecs = _vecs(10)
+    cache.put_many("id", texts, vecs)
+    keep = {"id": set()}  # would delete everything
+
+    got = cache.sweep(keep, dry_run=True, max_delete_fraction=0.5)
+    assert got == {"id": 10}, "dry run reports the damage instead of refusing"
+    assert cache.stats() == {"id": 10}
+
+
+# --- steady-state write churn -------------------------------------------------
+#
+# The LRU bookkeeping turned every cache HIT into an UPDATE + COMMIT. With an
+# index on last_used each touched row dirties a table page and an index page,
+# measured at ~12 KB of WAL for a single-text lookup and 2.1 MB for a 500-text
+# batch -- write amplification on a pure read path, on the SSD, forever. The
+# fix buffers the timestamps in memory and flushes them on a timer, at
+# shutdown, and before eviction needs them to pick a victim.
+
+def _wal_size(cache) -> int:
+    from pathlib import Path
+    p = Path(cache._conn.execute("PRAGMA database_list").fetchone()[2] + "-wal")
+    return p.stat().st_size if p.exists() else 0
+
+
+def test_cache_hit_writes_nothing_to_disk(tmp_path):
+    """A read must not cost a write. This is the whole point of the change."""
+    cache = EmbedCache(tmp_path / "embed.db")
+    cache.put_many("id", [f"t{i}" for i in range(200)], [[1.0]] * 200)
+    cache._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    before = _wal_size(cache)
+
+    for _ in range(5):
+        cache.get_many("id", [f"t{i}" for i in range(200)])
+
+    assert _wal_size(cache) == before
+
+
+def test_buffered_touches_flush_on_close(tmp_path):
+    """Deferred is not discarded: a clean shutdown persists the LRU order."""
+    db = tmp_path / "embed.db"
+    cache = EmbedCache(db)
+    cache.put_many("id", ["warm"], [[1.0]])
+    sha = EmbedCache._sha("warm")
+    cache._conn.execute("UPDATE embed_cache SET last_used = 0")
+    cache._conn.commit()
+
+    cache.get_many("id", ["warm"])
+    cache.close()
+
+    conn = sqlite3.connect(str(db))
+    (stored,) = conn.execute(
+        "SELECT last_used FROM embed_cache WHERE text_sha = ?", (sha,)
+    ).fetchone()
+    assert stored > 0
+
+
+def test_eviction_sees_pending_touches(tmp_path, monkeypatch):
+    """A buffered read must still protect its row from being evicted."""
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "3")
+    cache = EmbedCache(tmp_path / "embed.db")
+    cache.put_many("id", ["a", "b", "c"], [[1.0], [2.0], [3.0]])
+    cache._conn.execute("UPDATE embed_cache SET last_used = 0")
+    cache._conn.commit()
+
+    # "a" is read (hot, buffered only), then a new row pushes us over the cap.
+    cache.get_many("id", ["a"])
+    cache.put_many("id", ["d"], [[4.0]])
+
+    assert cache.get_many("id", ["a"]) == {EmbedCache._sha("a"): [1.0]}
+
+
+@pytest.mark.parametrize("clock_start", [0.0, 5.0, 1_000_000.0])
+def test_touches_flush_once_the_interval_elapses(tmp_path, monkeypatch, clock_start):
+    """Flush at the elapsed-time boundary, regardless of monotonic origin."""
+    import vecgrep.backend.embed.cache as cache_module
+
+    now = clock_start
+    monkeypatch.setattr(cache_module.time, "monotonic", lambda: now)
+    monkeypatch.setattr(cache_module, "_TOUCH_FLUSH_SECONDS", 300.0)
+    cache = EmbedCache(tmp_path / "embed.db")
+    cache.put_many("id", ["warm"], [[1.0]])
+    cache._conn.execute("UPDATE embed_cache SET last_used = 0")
+    cache._conn.commit()
+
+    cache.get_many("id", ["warm"])
+    (stored,) = cache._conn.execute("SELECT last_used FROM embed_cache").fetchone()
+    assert stored == 0  # still buffered
+
+    now = clock_start + 299.0
+    cache.get_many("id", ["warm"])
+    (stored,) = cache._conn.execute("SELECT last_used FROM embed_cache").fetchone()
+    assert stored == 0  # do not flush before the interval
+
+    now = clock_start + 300.0
+    cache.get_many("id", ["warm"])
+
+    (stored,) = cache._conn.execute("SELECT last_used FROM embed_cache").fetchone()
+    assert stored > 0

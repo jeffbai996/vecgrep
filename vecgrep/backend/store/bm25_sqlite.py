@@ -146,7 +146,44 @@ class BM25SqliteStore:
                 log_frames,
                 checkpointed,
             )
+        self._truncate_oversized_wal(corpus, conn)
         return busy, log_frames, checkpointed
+
+    def _truncate_oversized_wal(self, corpus: str, conn: sqlite3.Connection) -> None:
+        """Reclaim a WAL that outgrew its limit and would otherwise stay big.
+
+        journal_size_limit only truncates when a checkpoint RESETS the log. A
+        bulk index whose writer then goes quiet leaves the full-sized WAL on
+        disk indefinitely — repos.db-wal reached 239 MB, larger than its
+        database, exactly this way (2026-09-08). PASSIVE checkpoints never
+        reset past a reader, so escalate to TRUNCATE, but with a short busy
+        timeout: a pinning reader defers the shrink (a later mutation retries)
+        rather than stalling the mutation path behind it.
+        """
+        limit = WAL_JOURNAL_SIZE_LIMIT_BYTES
+        path = self._path(corpus)
+        if path is None or limit <= 0:
+            return
+        wal = Path(f"{path}-wal")
+        try:
+            if not wal.exists() or wal.stat().st_size <= limit:
+                return
+        except OSError:
+            return
+        conn.execute("PRAGMA busy_timeout=100")
+        try:
+            row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        except sqlite3.Error as exc:
+            logger.warning("BM25 WAL truncate deferred for %s: %s", corpus, exc)
+            return
+        finally:
+            conn.execute("PRAGMA busy_timeout=10000")
+        if row is not None and int(row[0]):
+            logger.info(
+                "BM25 WAL truncate deferred for %s: reader pins the log", corpus
+            )
+        else:
+            logger.info("BM25 WAL truncated for %s", corpus)
 
     def close(self, corpus: str) -> None:
         with self._lock:

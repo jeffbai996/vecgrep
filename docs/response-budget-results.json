@@ -1,0 +1,229 @@
+{
+  "method": "Three fixed live candidate sets replayed before and after; ranking held constant. No answer-quality gold set.",
+  "baseline_commit": "4260886",
+  "tokenizer": "cl100k_base",
+  "full_requested_by_budget": {
+    "8000": 6,
+    "12000": 6,
+    "16000": 10,
+    "24000": 10
+  },
+  "results": [
+    {
+      "case": "transcript-1",
+      "budget": 8000,
+      "policy": "before",
+      "full": 0,
+      "previews": 40,
+      "tokens": 7814,
+      "allocation_ms": 171.9
+    },
+    {
+      "case": "transcript-1",
+      "budget": 8000,
+      "policy": "after",
+      "full": 6,
+      "previews": 21,
+      "tokens": 7942,
+      "allocation_ms": 185.0
+    },
+    {
+      "case": "transcript-1",
+      "budget": 12000,
+      "policy": "before",
+      "full": 0,
+      "previews": 61,
+      "tokens": 11881,
+      "allocation_ms": 119.0
+    },
+    {
+      "case": "transcript-1",
+      "budget": 12000,
+      "policy": "after",
+      "full": 6,
+      "previews": 41,
+      "tokens": 11956,
+      "allocation_ms": 134.6
+    },
+    {
+      "case": "transcript-1",
+      "budget": 16000,
+      "policy": "before",
+      "full": 0,
+      "previews": 84,
+      "tokens": 15998,
+      "allocation_ms": 100.9
+    },
+    {
+      "case": "transcript-1",
+      "budget": 16000,
+      "policy": "after",
+      "full": 10,
+      "previews": 51,
+      "tokens": 15921,
+      "allocation_ms": 122.5
+    },
+    {
+      "case": "transcript-1",
+      "budget": 24000,
+      "policy": "before",
+      "full": 10,
+      "previews": 75,
+      "tokens": 20472,
+      "allocation_ms": 5.7
+    },
+    {
+      "case": "transcript-1",
+      "budget": 24000,
+      "policy": "after",
+      "full": 10,
+      "previews": 75,
+      "tokens": 20472,
+      "allocation_ms": 5.8
+    },
+    {
+      "case": "repository-1",
+      "budget": 8000,
+      "policy": "before",
+      "full": 0,
+      "previews": 40,
+      "tokens": 7962,
+      "allocation_ms": 138.3
+    },
+    {
+      "case": "repository-1",
+      "budget": 8000,
+      "policy": "after",
+      "full": 6,
+      "previews": 12,
+      "tokens": 7972,
+      "allocation_ms": 200.7
+    },
+    {
+      "case": "repository-1",
+      "budget": 12000,
+      "policy": "before",
+      "full": 0,
+      "previews": 62,
+      "tokens": 11895,
+      "allocation_ms": 86.3
+    },
+    {
+      "case": "repository-1",
+      "budget": 12000,
+      "policy": "after",
+      "full": 6,
+      "previews": 24,
+      "tokens": 11798,
+      "allocation_ms": 178.2
+    },
+    {
+      "case": "repository-1",
+      "budget": 16000,
+      "policy": "before",
+      "full": 3,
+      "previews": 69,
+      "tokens": 15646,
+      "allocation_ms": 89.4
+    },
+    {
+      "case": "repository-1",
+      "budget": 16000,
+      "policy": "after",
+      "full": 10,
+      "previews": 27,
+      "tokens": 15911,
+      "allocation_ms": 185.5
+    },
+    {
+      "case": "repository-1",
+      "budget": 24000,
+      "policy": "before",
+      "full": 10,
+      "previews": 62,
+      "tokens": 22152,
+      "allocation_ms": 6.5
+    },
+    {
+      "case": "repository-1",
+      "budget": 24000,
+      "policy": "after",
+      "full": 10,
+      "previews": 62,
+      "tokens": 22152,
+      "allocation_ms": 6.1
+    },
+    {
+      "case": "repository-2",
+      "budget": 8000,
+      "policy": "before",
+      "full": 0,
+      "previews": 41,
+      "tokens": 7936,
+      "allocation_ms": 147.3
+    },
+    {
+      "case": "repository-2",
+      "budget": 8000,
+      "policy": "after",
+      "full": 6,
+      "previews": 11,
+      "tokens": 7777,
+      "allocation_ms": 210.0
+    },
+    {
+      "case": "repository-2",
+      "budget": 12000,
+      "policy": "before",
+      "full": 0,
+      "previews": 62,
+      "tokens": 11845,
+      "allocation_ms": 99.2
+    },
+    {
+      "case": "repository-2",
+      "budget": 12000,
+      "policy": "after",
+      "full": 6,
+      "previews": 30,
+      "tokens": 11819,
+      "allocation_ms": 165.4
+    },
+    {
+      "case": "repository-2",
+      "budget": 16000,
+      "policy": "before",
+      "full": 0,
+      "previews": 86,
+      "tokens": 15806,
+      "allocation_ms": 109.8
+    },
+    {
+      "case": "repository-2",
+      "budget": 16000,
+      "policy": "after",
+      "full": 10,
+      "previews": 31,
+      "tokens": 15904,
+      "allocation_ms": 247.9
+    },
+    {
+      "case": "repository-2",
+      "budget": 24000,
+      "policy": "before",
+      "full": 10,
+      "previews": 76,
+      "tokens": 23878,
+      "allocation_ms": 12.5
+    },
+    {
+      "case": "repository-2",
+      "budget": 24000,
+      "policy": "after",
+      "full": 10,
+      "previews": 75,
+      "tokens": 23893,
+      "allocation_ms": 23.8
+    }
+  ]
+}

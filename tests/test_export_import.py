@@ -106,7 +106,8 @@ def test_import_rejects_archive_name_before_copying_outside_home(
 
 @pytest.mark.parametrize(
     "unsafe_name",
-    ["../../../../../escaped", "__migrate__../../../../../escaped"],
+    ["../../../../../escaped", "__migrate__../../../../../escaped",
+     "", "notes\n", "__ephemeral__"],
 )
 def test_import_rejects_unsafe_rename_before_copying(
     svc, make_doc, vg_home, tmp_path, unsafe_name
@@ -157,3 +158,28 @@ def test_import_never_loads_archive_bm25_pickle(svc, tmp_path):
 
     assert restored.name == "restored"
     assert not marker.exists()
+
+@pytest.mark.parametrize(
+    "metadata",
+    [{}, {"name": None}, {"name": 42}, {"name": []},
+     {"name": "notes\n"}, {"name": "__ephemeral__"}, [], None],
+)
+def test_import_rejects_invalid_metadata_before_storage_mutation(
+    svc, tmp_path, monkeypatch, metadata
+):
+    archive = tmp_path / "invalid-metadata.tar.gz"
+    payload = json.dumps(metadata).encode()
+    with tarfile.open(archive, "w:gz") as bundle:
+        member = tarfile.TarInfo("corpus.json")
+        member.size = len(payload)
+        bundle.addfile(member, BytesIO(payload))
+
+    def storage_must_stay_open():
+        raise AssertionError("invalid metadata must be rejected before storage closes")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(svc.store.client, "close", storage_must_stay_open)
+        with pytest.raises(CorpusError, match="Invalid corpus name"):
+            svc.import_corpus(archive)
+
+    svc.store.client.get_collections()

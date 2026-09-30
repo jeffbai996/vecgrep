@@ -67,6 +67,10 @@ export type SearchResponse = {
   hits: SearchHit[];
   stubs: SearchStub[];
   calibration?: Calibration;
+  /** Server-side wall time. A slow retrieval and a slow network look the same
+   *  from here; this is the server's own figure, so the difference between it
+   *  and how long the page felt is the round trip. */
+  took_ms?: number | null;
 };
 
 export type SearchOptions = {
@@ -110,8 +114,39 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return res.json();
 }
 
+export type HealthCheck = {
+  name: string;
+  ok: boolean | null;
+  detail: string;
+};
+
+export type InstanceHealth = {
+  ok: boolean;
+  failing: string[];
+  checks: HealthCheck[];
+  corpora: {
+    name: string;
+    documents: number | null;
+    chunks: number | null;
+    embed_model: string | null;
+    embed_backend: string | null;
+    dim: number | null;
+  }[];
+  chunks: number;
+  cache: {
+    path: string | null;
+    bytes: number | null;
+    rows: number | null;
+    coverage_pct: number | null;
+  };
+  process: { rss_bytes?: number; peak_rss_bytes?: number };
+  search_ms: number | null;
+};
+
 export const api = {
   listCorpora: () => request<Corpus[]>("/api/corpora"),
+  // Not /api/health: that is the public unauthenticated liveness probe.
+  health: () => request<InstanceHealth>("/api/health/detail"),
   deleteCorpus: (name: string) =>
     request<{ deleted: string }>(`/api/corpora/${encodeURIComponent(name)}`, {
       method: "DELETE",

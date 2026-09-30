@@ -1048,6 +1048,14 @@ def serve(host: str | None, port: int | None, reload: bool, open_browser: bool) 
     actual_host = host or s.api_host
     actual_port = port or s.api_port
     _require_safe_serve_bind(actual_host, s.api_token)
+    if s.oauth_enabled and actual_port == s.oauth_public_port:
+        raise click.ClickException("OAuth public and private listeners must use different ports")
+    # Keep the accepted socket and application ingress policy in agreement,
+    # including OAuth-off --port overrides and reload child processes.
+    os.environ["VECGREP_API_PORT"] = str(actual_port)
+    from ..backend.config import reset_settings
+
+    reset_settings()
     if open_browser:
         import threading
         import webbrowser
@@ -1059,6 +1067,12 @@ def serve(host: str | None, port: int | None, reload: bool, open_browser: bool) 
     # connection axed before the registry-write response is delivered.
     # The server side completes the work but the CLI sees httpx.ReadTimeout
     # and the registry never records the new corpus. Bump to 15 min.
+    if s.oauth_enabled:
+        from ..backend.http_server import serve_http
+
+        serve_http(host=actual_host, port=actual_port,
+                   public_port=s.oauth_public_port, reload=reload)
+        return
     uvicorn.run(
         "vecgrep.backend.main:app",
         host=actual_host,
@@ -1070,6 +1084,7 @@ def serve(host: str | None, port: int | None, reload: bool, open_browser: bool) 
 
 @cli.command()
 @click.argument("path")
+@click.option("--also-watch", multiple=True, help="Additional directory feeding the same corpus; repeatable.")
 @click.option("--corpus", required=True, help="Named corpus to keep current.")
 @click.option(
     "--chunker",
@@ -1100,8 +1115,8 @@ def serve(host: str | None, port: int | None, reload: bool, open_browser: bool) 
     "re-embedded in full on every append, forever. 0 disables.",
 )
 def watch(path: str, corpus: str, chunker: str, debounce: float,
-          include: str | None, quiet_period: float) -> None:
-    """Watch a directory and re-index on change.
+          include: str | None, quiet_period: float, also_watch: tuple[str, ...] = ()) -> None:
+    """Watch directories and re-index on change.
 
     Re-indexes incrementally — only sources whose content hash changed get
     re-embedded. Press Ctrl+C to stop.
@@ -1117,26 +1132,24 @@ def watch(path: str, corpus: str, chunker: str, debounce: float,
             "watch requires `watchfiles`. Install with `pip install \"vecgrep[watch]\"`."
         )
 
-    target = Path(path).resolve()
-    if not target.is_dir():
-        raise click.ClickException(f"watch target must be a directory: {target}")
+    targets = list(dict.fromkeys(Path(p).resolve() for p in (path, *also_watch)))
+    for target in targets:
+        if not target.is_dir():
+            raise click.ClickException(f"watch target must be a directory: {target}")
 
     filt = f" (include: {include})" if include else ""
-    click.echo(f"watching {target} -> corpus '{corpus}'{filt} (Ctrl+C to stop)")
-    # Initial pass picks up everything currently on disk. It must not be
-    # fatal: an embed backend timing out under load killed the process here,
-    # systemd restarted it, and the pass began again from zero under the
-    # same load — a restart treadmill (NRestarts=90 on one unit,
-    # 2026-07-27). Files the pass missed are healed by later events and the
-    # pending sweep; a dead watcher heals nothing.
-    try:
-        _do_index(str(target), corpus, chunker, force=False, include=include)
-    except KeyboardInterrupt:
-        raise
-    except Exception as e:
-        click.echo(
-            f"  error: initial pass incomplete ({type(e).__name__}: {e}) — "
-            "watching anyway", err=True)
+    click.echo(f"watching {', '.join(map(str, targets))} -> corpus '{corpus}'{filt} (Ctrl+C to stop)")
+    # Keep each root independent: a transient failure in one initial pass
+    # must not prevent the other producers from being indexed or watched.
+    for target in targets:
+        try:
+            _do_index(str(target), corpus, chunker, force=False, include=include)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            click.echo(
+                f"  error: initial pass incomplete for {target} "
+                f"({type(e).__name__}: {e}) — watching anyway", err=True)
 
     def _index_one(p: str) -> None:
         _watch_index_resilient(p, corpus, chunker, include)
@@ -1146,7 +1159,7 @@ def watch(path: str, corpus: str, chunker: str, debounce: float,
     # whether deferred files have gone quiet.
     sweep_ms = int(min(quiet_period or 60, 60) * 1000)
     try:
-        for changes in _watch(str(target), step=int(debounce * 1000),
+        for changes in _watch(*map(str, targets), step=int(debounce * 1000),
                               rust_timeout=sweep_ms, yield_on_timeout=True):
             # Respect the include glob on per-file events too, so a sibling
             # raw file changing doesn't get indexed into a markdown-only
@@ -1402,8 +1415,21 @@ def cache_clear(identity: str | None, yes: bool) -> None:
 @cache.command("sweep")
 @click.option("--dry-run", is_flag=True, help="Report what would be deleted; delete nothing.")
 @click.option("--identity", default=None, help="Only sweep this identity.")
+@click.option(
+    "--max-delete-fraction",
+    type=float,
+    default=None,
+    help="Abort (deleting nothing) if the sweep would remove more than this "
+    "fraction of rows. Rail for unattended runs; a keep-set built during a "
+    "corpus rebuild makes most of the cache look orphaned.",
+)
 @click.option("--json", "json_out", is_flag=True, help="Emit JSON.")
-def cache_sweep(dry_run: bool, identity: str | None, json_out: bool) -> None:
+def cache_sweep(
+    dry_run: bool,
+    identity: str | None,
+    max_delete_fraction: float | None,
+    json_out: bool,
+) -> None:
     """Delete cached vectors that no registered corpus references.
 
     The keep-set is derived from qdrant (every chunk text every live corpus
@@ -1415,7 +1441,11 @@ def cache_sweep(dry_run: bool, identity: str | None, json_out: bool) -> None:
     from ..backend.service import VecgrepService
 
     svc = VecgrepService()
-    rep = svc.cache_sweep(dry_run=dry_run, identities=[identity] if identity else None)
+    rep = svc.cache_sweep(
+        dry_run=dry_run,
+        identities=[identity] if identity else None,
+        max_delete_fraction=max_delete_fraction,
+    )
     if json_out:
         click.echo(json.dumps(rep, indent=2))
         return
@@ -1595,7 +1625,9 @@ def doctor(
     Catches vector-store drift plus a missing BM25 sidecar: a corpus a Qdrant
     restart wiped (registry says N chunks, store has 0), a chunk_count that
     drifted, an orphan collection with no registry entry, a missing keyword
-    index, or a registered source whose file is gone. Read-only by default —
+    index, a registered source whose file is gone, or duplicate path aliases.
+    Path aliases require manual repair even with --fix: confirm canonical
+    coverage before removing legacy source IDs. Read-only by default —
     pass --fix to recount drift, re-index any wiped corpus from its recorded
     sources, rebuild a missing BM25 index from existing Qdrant payloads without
     embedding again, and PURGE sources that no longer exist from both the
@@ -1644,6 +1676,11 @@ def doctor(
     for i in issues:
         mark = "○" if i["fixable"] else "●"
         click.echo(f"  {mark} [{i['kind']}] {i['corpus']}: {i['detail']}")
+    if any(i["kind"] == "source_path_aliases" for i in issues):
+        click.echo("")
+        click.echo("path aliases require manual repair: normalize ingestion paths, "
+                   "confirm canonical coverage, then delete legacy source IDs "
+                   "through VecgrepService.delete_source. Use --json for alias groups.")
     if fix:
         click.echo("")
         click.echo("actions:")
@@ -1657,7 +1694,10 @@ def doctor(
                 click.echo(f"  vecgrep index <source> --corpus {a['corpus']}")
     else:
         click.echo("")
-        click.echo("run `vecgrep doctor --fix` to repair (○ = auto-fixable).")
+        if any(i["fixable"] for i in issues):
+            click.echo("run `vecgrep doctor --fix` to repair (○ = auto-fixable).")
+        elif not any(i["kind"] == "source_path_aliases" for i in issues):
+            click.echo("These issues require manual repair; use --json for details.")
 
     if require_healthy and remaining_issues:
         click.echo("")

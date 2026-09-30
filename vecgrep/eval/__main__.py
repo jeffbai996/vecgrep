@@ -54,6 +54,7 @@ def cmd_run(a) -> int:
         configs = [harness.RunConfig(
             name=a.name or "adhoc", corpora=corpora, mode=a.mode, rerank=a.rerank,
             top_k=a.top_k, bm25_weight=a.bm25_weight, rrf_k=a.rrf_k,
+            unscoped=a.unscoped,
         )]
     if a.only:
         keep = set(a.only.split(","))
@@ -133,6 +134,8 @@ def main(argv=None) -> int:
     r.add_argument("--map", action="append", help="logical=actual (repeatable)")
     r.add_argument("--mode", default="hybrid")
     r.add_argument("--rerank", action="store_true")
+    r.add_argument("--unscoped", action="store_true",
+                   help="search with no corpus argument (the default bot call)")
     r.add_argument("--top-k", type=int, default=10)
     r.add_argument("--bm25-weight", type=float)
     r.add_argument("--rrf-k", type=int)
