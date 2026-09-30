@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from vecgrep.backend.embed.base import EmbedBackend
 from vecgrep.backend.embed.cache import DEFAULT_MAX_ROWS, CachedBackend, EmbedCache
 
@@ -549,8 +551,14 @@ def test_eviction_sees_pending_touches(tmp_path, monkeypatch):
     assert cache.get_many("id", ["a"]) == {EmbedCache._sha("a"): [1.0]}
 
 
-def test_touches_flush_once_the_interval_elapses(tmp_path, monkeypatch):
-    """The buffer is bounded in time, so a crash loses minutes, not months."""
+@pytest.mark.parametrize("clock_start", [0.0, 5.0, 1_000_000.0])
+def test_touches_flush_once_the_interval_elapses(tmp_path, monkeypatch, clock_start):
+    """Flush at the elapsed-time boundary, regardless of monotonic origin."""
+    import vecgrep.backend.embed.cache as cache_module
+
+    now = clock_start
+    monkeypatch.setattr(cache_module.time, "monotonic", lambda: now)
+    monkeypatch.setattr(cache_module, "_TOUCH_FLUSH_SECONDS", 300.0)
     cache = EmbedCache(tmp_path / "embed.db")
     cache.put_many("id", ["warm"], [[1.0]])
     cache._conn.execute("UPDATE embed_cache SET last_used = 0")
@@ -560,7 +568,12 @@ def test_touches_flush_once_the_interval_elapses(tmp_path, monkeypatch):
     (stored,) = cache._conn.execute("SELECT last_used FROM embed_cache").fetchone()
     assert stored == 0  # still buffered
 
-    cache._last_flush = 0.0  # pretend the interval has elapsed
+    now = clock_start + 299.0
+    cache.get_many("id", ["warm"])
+    (stored,) = cache._conn.execute("SELECT last_used FROM embed_cache").fetchone()
+    assert stored == 0  # do not flush before the interval
+
+    now = clock_start + 300.0
     cache.get_many("id", ["warm"])
 
     (stored,) = cache._conn.execute("SELECT last_used FROM embed_cache").fetchone()
