@@ -22,6 +22,7 @@ from collections import OrderedDict
 from pathlib import Path
 import threading
 import time
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +279,45 @@ def _construct_model(model_name: str):
         ) from e
 
 
+def _predict_length_grouped(
+    model: Any, query: str, texts: list[str], *, batch_size: int,
+) -> list[float]:
+    """Keep outliers from padding a whole batch without shortening any input.
+
+    The library length-sorts, but its fixed batch size still puts one very
+    long document beside many short ones. Character lengths are a cheap
+    padding estimate; the model retains its tokenizer and input ceiling.
+    Include the query because it is repeated in every query/document pair.
+    """
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if not texts:
+        return []
+    lengths = [max(1, len(query) + len(text)) for text in texts]
+    if max(lengths) <= 2 * min(lengths):
+        # Uniform inputs already batch efficiently inside predict().
+        return [float(score) for score in model.predict(
+            [(query, text) for text in texts], batch_size=batch_size)]
+
+    ordered = sorted(range(len(texts)), key=lambda i: lengths[i], reverse=True)
+    batches: list[list[int]] = []
+    for index in ordered:
+        if (not batches or len(batches[-1]) >= batch_size
+                or lengths[batches[-1][0]] > 2 * lengths[index]):
+            batches.append([])
+        batches[-1].append(index)
+
+    scores = [0.0] * len(texts)
+    for batch in batches:
+        predicted = model.predict(
+            [(query, texts[i]) for i in batch], batch_size=batch_size)
+        if len(predicted) != len(batch):
+            raise RerankerError("Cross-encoder returned an incomplete score batch")
+        for index, score in zip(batch, predicted):
+            scores[index] = float(score)
+    return scores
+
+
 def _worker_main(
     connection,
     model_name: str,
@@ -306,9 +346,8 @@ def _worker_main(
                 connection.send(("error", "ProtocolError", "unknown command"))
                 return
             _, query, texts = request
-            pairs = [(query, text) for text in texts]
             try:
-                raw = model.predict(pairs, batch_size=batch_size)
+                raw = _predict_length_grouped(model, query, texts, batch_size=batch_size)
                 scores = [float(score) for score in raw]
             except Exception as exc:
                 connection.send(("error", type(exc).__name__, str(exc)))
@@ -800,9 +839,9 @@ def rerank(
             fresh = _worker_predict(query, pending, model_name)
         else:
             model = _load(model_name)
-            pairs = [(query, text) for text in pending]
             try:
-                fresh = model.predict(pairs, batch_size=RERANK_BATCH)  # logits
+                fresh = _predict_length_grouped(
+                    model, query, pending, batch_size=RERANK_BATCH)
             finally:
                 # Release on the failure path too: a rerank that dies mid-batch
                 # is exactly when the card is most full and the next caller
