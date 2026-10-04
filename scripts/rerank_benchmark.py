@@ -96,8 +96,10 @@ def model_identity(path):
         digest.update(str(file.relative_to(path)).encode())
         digest.update(b"\0")
         with file.open("rb") as stream:
-            file_hash = hashlib.file_digest(stream, "sha256").digest()
-        digest.update(file_hash)
+            file_hash = hashlib.sha256()
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                file_hash.update(block)
+        digest.update(file_hash.digest())
     return {"sha256": digest.hexdigest(), "files": len(files), "bytes": total}
 
 

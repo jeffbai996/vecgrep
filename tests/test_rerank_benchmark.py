@@ -100,7 +100,7 @@ def test_plan_records_artifact_and_input_identity_without_loading_model(tmp_path
     code.parent.mkdir(parents=True)
     code.write_text("raise AssertionError('planning must not import this')\n")
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+    subprocess.run(["git", "-C", str(root), "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
                     "commit", "-m", "fixture"], check=True, capture_output=True)
     cases = tmp_path/"cases.json"
     cases.write_text(json.dumps({"cases": [{"id": "neg", "query": "q", "negative": True,
