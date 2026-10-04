@@ -20,11 +20,12 @@ python -m pip install -e '.[dev,mcp]' build
 VECGREP_HOME="$(mktemp -d)" python -m pytest tests
 (cd vecgrep/frontend && npm ci && npm run build)
 python -m build
-python -m venv /tmp/vecgrep-wheel-smoke
-/tmp/vecgrep-wheel-smoke/bin/pip install dist/*.whl
-(cd /tmp && /tmp/vecgrep-wheel-smoke/bin/vecgrep --version)
-(cd /tmp && /tmp/vecgrep-wheel-smoke/bin/vecgrep --help)
-(cd /tmp && VECGREP_HOME="$(mktemp -d)" /tmp/vecgrep-wheel-smoke/bin/python \
+WHEEL_SMOKE_DIR="$(mktemp -d /tmp/vecgrep-wheel-smoke.XXXXXX)"
+python -m venv "$WHEEL_SMOKE_DIR"
+"$WHEEL_SMOKE_DIR/bin/pip" install dist/*.whl
+(cd /tmp && "$WHEEL_SMOKE_DIR/bin/vecgrep" --version)
+(cd /tmp && "$WHEEL_SMOKE_DIR/bin/vecgrep" --help)
+(cd /tmp && VECGREP_HOME="$(mktemp -d)" "$WHEEL_SMOKE_DIR/bin/python" \
   -c 'from vecgrep.backend.main import app; assert app is not None')
 ```
 

@@ -55,6 +55,19 @@ def test_stale_gold_is_rejected_before_prediction(tmp_path):
         bench.load_cases(path)
 
 
+@pytest.mark.parametrize('kind', ['memory', 'journal'])
+def test_legacy_positive_gold_requires_the_exact_file_stem(tmp_path, kind):
+    path = tmp_path/'cases.json'
+    case = {'id': 'legacy', 'query': 'q', 'want': [f'{kind}-1'],
+            'candidates': [{'text': 'document', 'source_id': f'notes/{kind}-105.md'}]}
+    path.write_text(json.dumps({'cases': [case]}))
+    with pytest.raises(ValueError, match='gold is absent'):
+        bench.load_cases(path)
+    case['candidates'][0]['source_id'] = f'notes/{kind}-1.md'
+    path.write_text(json.dumps({'cases': [case]}))
+    assert bench.load_cases(path)[0] == [case]
+
+
 def test_dirty_artifact_cannot_be_benchmarked_as_committed(tmp_path):
     subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
     (tmp_path/"dirty.txt").write_text("uncommitted")

@@ -75,8 +75,14 @@ def load_cases(path):
                 raise ValueError("candidate must be text of at most 40000 characters")
             if not isinstance(c["source_id"], str) or not c["source_id"]:
                 raise ValueError("candidate requires source_id")
+        # Use the evaluator's source matcher: legacy memory/journal IDs match
+        # an exact file stem, while other expectations remain substrings.
+        gold_type = load_module("benchmark_gold_contract",
+            Path(__file__).resolve().parents[1]/"vecgrep/eval/gold.py").GoldCase
+        gold = gold_type(id=case["id"], corpus=case.get("corpus", "frozen"),
+                        query=case["query"], want=tuple(case.get("want", [])))
         if not case.get("negative") and not any(
-            w in c["source_id"] for w in case["want"] for c in candidates
+            gold.matches_want(c["source_id"]) for c in candidates
         ):
             raise ValueError("positive gold is absent from the frozen pool")
     return cases, hashlib.sha256(raw).hexdigest()
