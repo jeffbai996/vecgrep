@@ -8,6 +8,9 @@ patch = fixes). The version is a single source of truth in
 ## [Unreleased]
 
 ### Added
+- Offline fixed-candidate reranker benchmark with committed-artifact and model
+  fingerprints, separate uncached/cache-hit trials, and bounded CPU-only execution.
+  Planning reports `NOT_RUN`; see [benchmark methodology](docs/RERANK_BENCHMARK.md).
 - MCP search intent presets, explicit ignored-parameter reporting, and complete
   JSON response budgets measured with cl100k_base. See [agent search](docs/AGENT_SEARCH.md).
 - Push/PR validation reuses the release gate: Python tests, frontend build,
@@ -19,6 +22,14 @@ patch = fixes). The version is a single source of truth in
   and corpus exploration views.
 
 ### Fixed
+- Length-aware reranker batches separate long outliers without shortening inputs.
+  Scores are restored to candidate order; performance gains require uncached
+  measurements rather than HTTP samples containing score-cache hits.
+- Corpus imports reject invalid names before storage writes, including hostile
+  path forms.
+- Embedding-cache flush timing tests use a controlled clock.
+- Final search ordering uses the decayed score rather than display percentage;
+  lexical-only confidence remains below semantic confidence bands.
 - `doctor` reports duplicate source path aliases after directory moves or
   symlink changes, with exact groups in JSON and a failing health gate. Alias
   repair remains manual so canonical coverage is verified before deletion.
