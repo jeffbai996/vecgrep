@@ -15,12 +15,16 @@ import math
 import os
 from pathlib import Path
 import platform
-import resource
+try:
+    import resource
+except ImportError:  # Windows has no stdlib resource module.
+    resource = None
 import statistics
 import subprocess
 import sys
 import tempfile
 import time
+import types
 from datetime import datetime, timezone
 
 
@@ -45,6 +49,34 @@ def load_module(name, path):
     return module
 
 
+def harness_identity(root=None):
+    root = Path(root or Path(__file__).resolve().parents[1]).resolve()
+    sources = ("scripts/rerank_benchmark.py", "vecgrep/eval/gold.py", "vecgrep/eval/metrics.py")
+    return {"commit": git(root, "rev-parse", "HEAD"),
+            "tree": git(root, "rev-parse", "HEAD^{tree}"),
+            "clean": not bool(git(root, "status", "--porcelain", "--untracked-files=normal")),
+            "source_sha256": {name: hashlib.sha256((root/name).read_bytes()).hexdigest()
+                              for name in sources}}
+
+
+def load_evaluator():
+    # Measurement helpers come from the recorded harness, independently of
+    # the baseline/candidate artifacts whose rerank implementations we compare.
+    path = Path(__file__).resolve().parents[1]/"vecgrep/eval"
+    package = types.ModuleType("benchmark_eval_contract")
+    package.__path__ = [str(path)]
+    sys.modules[package.__name__] = package
+    gold = load_module(package.__name__ + ".gold", path/"gold.py")
+    metrics = load_module(package.__name__ + ".metrics", path/"metrics.py")
+    return gold, metrics
+
+
+def peak_rss_bytes():
+    if resource is None:
+        return None
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (1 if sys.platform == "darwin" else 1024)
+
+
 def load_cases(path):
     raw = Path(path).read_bytes()
     if len(raw) > 8 * 1024 * 1024:
@@ -55,14 +87,16 @@ def load_cases(path):
     if not 1 <= len(cases) <= 50:
         raise ValueError("use 1..50 frozen cases")
     ids = set()
+    contract, _ = load_evaluator()
     for case in cases:
         if case["id"] in ids:
             raise ValueError("duplicate case ID")
         ids.add(case["id"])
         if not isinstance(case.get("negative", False), bool):
             raise ValueError("negative must be boolean")
-        if any(not isinstance(w, str) for w in case.get("want", [])):
-            raise ValueError("want must contain source strings")
+        if any(isinstance(w, bool) or not isinstance(w, (str, int)) for w in case.get("want", [])):
+            raise ValueError("want must contain source strings or legacy numeric IDs")
+        case["want"] = list(contract._normalize_want(case.get("want", [])))
         if not isinstance(case["query"], str) or not case["query"]:
             raise ValueError("query must be nonempty text")
         candidates = case["candidates"]
@@ -77,9 +111,7 @@ def load_cases(path):
                 raise ValueError("candidate requires source_id")
         # Use the evaluator's source matcher: legacy memory/journal IDs match
         # an exact file stem, while other expectations remain substrings.
-        gold_type = load_module("benchmark_gold_contract",
-            Path(__file__).resolve().parents[1]/"vecgrep/eval/gold.py").GoldCase
-        gold = gold_type(id=case["id"], corpus=case.get("corpus", "frozen"),
+        gold = contract.GoldCase(id=case["id"], corpus=case.get("corpus", "frozen"),
                         query=case["query"], want=tuple(case.get("want", [])))
         if not case.get("negative") and not any(
             gold.matches_want(c["source_id"]) for c in candidates
@@ -150,6 +182,8 @@ def measure(module, model, case, cache_hit=False):
 
 
 def worker(config):
+    if harness_identity() != config["measurement_harness"]:
+        raise ValueError("measurement harness changed before worker execution")
     import torch
     from sentence_transformers import CrossEncoder
     torch.set_num_threads(config["threads"])
@@ -159,8 +193,9 @@ def worker(config):
         if identity(root) != config["identities"][name]:
             raise ValueError("artifact identity changed before worker execution")
     sys.path.insert(0, roots["candidate"])
-    from vecgrep.eval.gold import GoldCase
-    from vecgrep.eval.metrics import score_case, summarize
+    gold_contract, metrics = load_evaluator()
+    GoldCase = gold_contract.GoldCase
+    score_case, summarize = metrics.score_case, metrics.summarize
     cases, fingerprint = load_cases(config["cases"])
     if fingerprint != config["fixture_sha256"]:
         raise ValueError("fixture changed before worker execution")
@@ -229,9 +264,8 @@ def worker(config):
         "model_max_length": real.max_length,
         "pair_token_lengths_untruncated": distribution(token_lengths),
         "pair_token_lengths_effective": distribution(effective_lengths),
-        "process_peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss *
-            (1 if sys.platform == "darwin" else 1024),
-        "memory_note": "whole-worker peak RSS, shared model; not attributed to a variant",
+        "process_peak_rss_bytes": peak_rss_bytes(),
+        "memory_note": "whole-worker peak RSS, shared model; not attributed to a variant; null when unavailable",
         "latency": {name: {mode: distribution([s["latency_s"] for s in samples])
                       for mode, samples in modes.items()} for name, modes in trials.items()},
         "fixed_pool_metrics": {name: summarize(rows) for name, rows in quality.items()},
@@ -270,11 +304,13 @@ def main():
     roots = {"baseline": str(args.baseline_root.resolve()), "candidate": str(args.candidate_root.resolve())}
     cases, fingerprint = load_cases(args.cases)
     config = {"roots": roots, "identities": {n: identity(p) for n, p in roots.items()},
+        "measurement_harness": harness_identity(),
         "cases": str(args.cases.resolve()), "fixture_sha256": fingerprint,
         "repetitions": args.repetitions, "batch_size": args.batch_size,
         "max_length": args.max_length, "threads": args.threads}
     report = {"schema_version": 1, "result": "NOT_RUN", "started_at": datetime.now(timezone.utc).isoformat(),
         "artifacts": config["identities"], "fixture_sha256": fingerprint, "cases": len(cases),
+        "measurement_harness": config["measurement_harness"],
         "repetitions": args.repetitions, "batch_size": args.batch_size,
         "pair_character_lengths": distribution([len(c["query"]) + len(d["text"])
                                                  for c in cases for d in c["candidates"]]),
@@ -284,6 +320,8 @@ def main():
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     if args.run:
         try:
+            if not config["measurement_harness"]["clean"]:
+                raise ValueError("--run requires a clean committed measurement harness")
             if args.model is None or not args.model.is_dir():
                 raise ValueError("--run requires an existing local model directory")
             with tempfile.TemporaryDirectory(prefix="vecgrep-benchmark-") as tmp:

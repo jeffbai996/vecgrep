@@ -7,7 +7,11 @@ not import Torch, load weights, contact a service, or read a corpus.
 Use the parent of the length-batching merge as the baseline and the candidate
 commit as the second tree. For PR #45 these are `2e57b8e` and `736c707`.
 Create detached worktrees; keep inputs, reports and local model files outside
-this public repository. Existing permitted evaluation gold should be preserved,
+this public repository. Run the script from a third checkout containing the
+committed measurement harness. Reports record that checkout's commit, tree,
+cleanliness and SHA-256 of the script and evaluator helpers. Execution requires
+a clean harness and rechecks its identity before loading a model; planning may
+record a dirty harness without executing it. Existing permitted evaluation gold should be preserved,
 not regenerated from current search results. Frozen positive pools must contain
 an expected source. Include uniform and mixed lengths, long outliers, CJK and
 negative queries. Use a bounded, representative subset rather than a new corpus.
@@ -53,7 +57,8 @@ versions, CPU/platform, character/token distributions, tokenizer ceiling,
 predict-call composition, per-trial scores/order and median/p95/max latency.
 Recording overhead is included equally in both paths. Predict calls describe
 inputs handed to the library; the library may sort/subbatch internally. Peak
-RSS covers the whole worker with the shared model and cannot establish which
+RSS is null on platforms without the stdlib `resource` module. Where available it
+covers the whole worker with the shared model and cannot establish which
 variant used less memory. Inspect sample count before interpreting tails.
 
 Source-level hit@k, MRR, precision and negative-query metrics reuse

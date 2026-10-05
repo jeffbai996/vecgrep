@@ -68,6 +68,54 @@ def test_legacy_positive_gold_requires_the_exact_file_stem(tmp_path, kind):
     assert bench.load_cases(path)[0] == [case]
 
 
+@pytest.mark.parametrize('want', [[1], ['1']])
+@pytest.mark.parametrize('kind', ['memory', 'journal'])
+def test_numeric_legacy_gold_uses_existing_normalization(tmp_path, want, kind):
+    path = tmp_path/'cases.json'
+    case = {'id': 'legacy-numeric', 'query': 'q', 'want': want,
+            'candidates': [{'text': 'document', 'source_id': f'notes/{kind}-1.md'}]}
+    path.write_text(json.dumps({'cases': [case]}))
+    normalized, _ = bench.load_cases(path)
+    assert normalized[0]['want'] == ['memory-1', 'journal-1']
+
+
+def test_harness_identity_records_changed_measurement_code(tmp_path):
+    subprocess.run(['git', 'init', str(tmp_path)], check=True, capture_output=True)
+    for name in ('scripts/rerank_benchmark.py', 'vecgrep/eval/gold.py', 'vecgrep/eval/metrics.py'):
+        p = tmp_path/name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('original\n')
+    subprocess.run(['git', '-C', str(tmp_path), 'add', '.'], check=True)
+    subprocess.run(['git', '-C', str(tmp_path), '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
+                    '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                    'commit', '-m', 'fixture'], check=True, capture_output=True)
+    before = bench.harness_identity(tmp_path)
+    assert before['clean'] is True
+    (tmp_path/'vecgrep/eval/metrics.py').write_text('changed\n')
+    after = bench.harness_identity(tmp_path)
+    assert after['commit'] == before['commit']
+    assert after['clean'] is False
+    assert after['source_sha256'] != before['source_sha256']
+
+
+def test_benchmark_import_survives_a_platform_without_resource(monkeypatch):
+    import builtins
+    real_import = builtins.__import__
+    def without_resource(name, *args, **kwargs):
+        if name == 'resource':
+            raise ModuleNotFoundError('resource is unavailable on this platform')
+        return real_import(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', without_resource)
+    module = bench.load_module('benchmark_without_resource', Path(bench.__file__))
+    assert module.peak_rss_bytes() is None
+
+
+def test_worker_rejects_changed_harness_before_model_import(monkeypatch):
+    monkeypatch.setattr(bench, 'harness_identity', lambda: {'source_sha256': 'changed'})
+    with pytest.raises(ValueError, match='measurement harness changed'):
+        bench.worker({'measurement_harness': {'source_sha256': 'approved'}})
+
+
 def test_dirty_artifact_cannot_be_benchmarked_as_committed(tmp_path):
     subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
     (tmp_path/"dirty.txt").write_text("uncommitted")
@@ -128,4 +176,5 @@ def test_plan_records_artifact_and_input_identity_without_loading_model(tmp_path
     assert report["artifacts"]["candidate"]["clean"] is True
     assert report["artifacts"]["candidate"]["commit"] == bench.git(root, "rev-parse", "HEAD")
     assert report["fixture_sha256"] == bench.load_cases(cases)[1]
+    assert report["measurement_harness"] == bench.harness_identity()
     assert "latency" not in report
