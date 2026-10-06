@@ -34,6 +34,7 @@ def _resolve_ollama(settings, model: str | None):
             settings.ollama_url,
             chosen,
             num_batch=settings.ollama_num_batch,
+            overflow_url=settings.ollama_overflow_url,
         )
     fallback = settings.ollama_fallback_url
     if fallback and _ollama_alive(fallback):
@@ -41,6 +42,7 @@ def _resolve_ollama(settings, model: str | None):
             fallback,
             chosen,
             num_batch=settings.ollama_num_batch,
+            overflow_url=settings.ollama_overflow_url,
         )
     return None
 

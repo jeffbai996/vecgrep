@@ -8,6 +8,11 @@ patch = fixes). The version is a single source of truth in
 ## [Unreleased]
 
 ### Added
+- `VECGREP_OLLAMA_OVERFLOW_URL` / `ollama_overflow_url`: an optional second
+  Ollama endpoint for bulk embedding. Multi-text batches go there first;
+  queries stay on the primary, and any unclean overflow answer sends the
+  batch to the primary and benches the overflow for two minutes. It must
+  serve the same model as the primary.
 - Offline fixed-candidate reranker benchmark with committed-artifact and model
   fingerprints, separate uncached/cache-hit trials, and bounded CPU-only execution.
   Planning reports `NOT_RUN`; see [benchmark methodology](docs/RERANK_BENCHMARK.md).

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 import math
-
 import os
+import time
+from typing import Callable
 
 import httpx
 
@@ -30,6 +31,10 @@ _MAX_BATCH = 64
 # 4xx. 8 halvings take a 1 MB chunk under 4 KB.
 _MAX_CLIPS = 8
 _MIN_CLIP_CHARS = 64
+# How long an overflow endpoint that failed is left alone before it is tried
+# again. A host whose GPU has been handed to something else refuses every
+# request; without a cooldown each batch would pay that round trip first.
+_OVERFLOW_COOLDOWN_S = 120.0
 
 
 def _is_too_long(body: str) -> bool:
@@ -51,10 +56,21 @@ class OllamaBackend(EmbedBackend):
         model: str,
         timeout: float = 60.0,
         num_batch: int | None = None,
+        overflow_url: str | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.num_batch = num_batch
+        # Bulk-embedding endpoint serving the same model. Optional, and never
+        # load-bearing: every failure there falls back to the primary.
+        self.overflow_url = overflow_url.rstrip("/") if overflow_url else None
+        self.overflow_cooldown_s = _OVERFLOW_COOLDOWN_S
+        self._clock = clock
+        self._overflow_benched_until = 0.0
+        self._overflow_client = (
+            self._make_client(read=timeout) if self.overflow_url else None
+        )
         # Phase-split timeout: a SHORT connect timeout so an unreachable host
         # (asleep / no service) fails over fast instead of hanging the full
         # read budget, but a LONG read timeout so a slow-but-alive embed (big
@@ -105,14 +121,51 @@ class OllamaBackend(EmbedBackend):
         """
         if not texts:
             return []
+        # A single text is a query (or a one-chunk document): latency matters
+        # more than offloading it, so only multi-text calls use the overflow.
+        bulk = len(texts) > 1
         out: list[list[float]] = []
         for i in range(0, len(texts), _MAX_BATCH):
             window = texts[i : i + _MAX_BATCH]
-            rows = self._embed_batch(window)
+            rows = self._embed_overflow(window) if bulk else None
+            if rows is None:
+                rows = self._embed_batch(window)
             if rows is None:
                 rows = [self._embed_one_resilient(t) for t in window]
             out.extend(rows)
         return out
+
+    def _embed_overflow(self, texts: list[str]) -> list[list[float]] | None:
+        """The window from the overflow endpoint, or None to use the primary.
+
+        Only a clean, correctly-sized, all-finite answer counts. Everything
+        else benches the overflow for the cooldown and returns None. In
+        particular a refusal is never routed into the per-chunk path, whose
+        last resort is a zero vector: a refused overflow says nothing about
+        the chunks, and the primary can embed them properly.
+        """
+        if self._overflow_client is None or self._clock() < self._overflow_benched_until:
+            return None
+        try:
+            r = self._overflow_client.post(
+                f"{self.overflow_url}/api/embed",
+                json=self._request_payload(texts),
+            )
+            rows = r.json().get("embeddings") if r.status_code == 200 else None
+        except (httpx.HTTPError, ValueError, AttributeError):
+            rows = None
+        if (
+            isinstance(rows, list)
+            and len(rows) == len(texts)
+            and all(_is_finite_vector(v) for v in rows)
+        ):
+            return rows
+        self._overflow_benched_until = self._clock() + self.overflow_cooldown_s
+        logger.info(
+            "Overflow embed endpoint %s did not answer cleanly; using the primary "
+            "for %.0fs", self.overflow_url, self.overflow_cooldown_s,
+        )
+        return None
 
     def _embed_batch(self, texts: list[str]) -> list[list[float]] | None:
         """One request for the whole window. None means "use the slow path".

@@ -22,6 +22,7 @@ OAUTH_APPROVAL_ENV = "VECGREP_OAUTH_APPROVAL_TOKEN"
 ENV_MAP = {
     "VECGREP_OLLAMA_URL": "ollama_url",
     "VECGREP_OLLAMA_FALLBACK_URL": "ollama_fallback_url",
+    "VECGREP_OLLAMA_OVERFLOW_URL": "ollama_overflow_url",
     "VECGREP_OLLAMA_NUM_BATCH": "ollama_num_batch",
     "VECGREP_EMBED_MODEL": "embed_model",
     "OPENAI_API_KEY": "openai_api_key",
@@ -98,6 +99,11 @@ class Settings:
     # is unreachable, before considering OpenAI. Lets a deployment run a primary
     # (e.g. a GPU box) with a local-host fallback. Unset (None) = no fallback.
     ollama_fallback_url: str | None = None
+    # Optional Ollama endpoint for bulk embedding. Batches (indexing) go here
+    # first and fall back to the primary on any failure; single texts
+    # (queries) always use the primary. It must serve the same model as the
+    # primary so vectors stay compatible. Unset (None) = primary only.
+    ollama_overflow_url: str | None = None
     # Optional per-request Ollama runner batch bound. Lowering this reduces
     # model working memory without changing weights, context, or vector shape.
     # None preserves the model/runtime default.
@@ -363,6 +369,7 @@ def _validate_rest_allowed_host(value: str) -> None:
 def validate_settings(settings: Settings) -> None:
     _validate_url("ollama_url", settings.ollama_url)
     _validate_url("ollama_fallback_url", settings.ollama_fallback_url)
+    _validate_url("ollama_overflow_url", settings.ollama_overflow_url)
     _validate_url("qdrant_url", settings.qdrant_url)
     _validate_url("oauth_issuer_url", settings.oauth_issuer_url)
     if not 1 <= int(settings.api_port) <= 65535:
