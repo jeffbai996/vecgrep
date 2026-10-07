@@ -9,6 +9,7 @@ from typing import Callable
 import httpx
 
 from .base import EmbedBackend, EmbedBackendError
+from .local_usage import record
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +152,10 @@ class OllamaBackend(EmbedBackend):
                 f"{self.overflow_url}/api/embed",
                 json=self._request_payload(texts),
             )
-            rows = r.json().get("embeddings") if r.status_code == 200 else None
+            data = r.json() if r.status_code == 200 else None
+            if isinstance(data, dict):
+                record(data, model=self.model)
+            rows = data.get("embeddings") if isinstance(data, dict) else None
         except (httpx.HTTPError, ValueError, AttributeError):
             rows = None
         if (
@@ -197,7 +201,9 @@ class OllamaBackend(EmbedBackend):
             # 404/4xx from a transient 5xx, so error messages stay identical.
             return None
         try:
-            rows = r.json().get("embeddings")
+            data = r.json()
+            record(data, model=self.model)
+            rows = data.get("embeddings")
         except ValueError:
             return None
         if not isinstance(rows, list) or len(rows) != len(texts):
@@ -274,6 +280,7 @@ class OllamaBackend(EmbedBackend):
                 continue
 
             data = r.json()
+            record(data, model=self.model)
             # /api/embed nests under "embeddings" (a list, one row per input);
             # the legacy endpoint used a flat "embedding". Read both so a
             # mixed-version Ollama cannot silently zero-vector every chunk.
