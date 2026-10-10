@@ -143,3 +143,13 @@ def test_old_route_rows_are_pruned(receipt_db, monkeypatch):
 def test_unavailable_storage_does_not_fail_embedding(receipt_db):
     receipt_db.mkdir()
     assert len(_backend(_answer).embed(["a", "b"])) == 2
+
+
+def test_no_test_writes_the_real_receipt_database(tmp_path):
+    """Every test's receipts land in its own directory.
+
+    The overflow tests build backends without asking for a receipt fixture, and
+    each bulk batch now writes a route row, so an unisolated run put test rows
+    in the operator's real database.
+    """
+    assert local_usage._database().resolve().is_relative_to(tmp_path.resolve())

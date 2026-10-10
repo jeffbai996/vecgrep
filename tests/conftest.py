@@ -75,6 +75,9 @@ def vg_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         if key.startswith("VECGREP_") or key == "OPENAI_API_KEY":
             monkeypatch.delenv(key)
     monkeypatch.setenv("VECGREP_HOME", str(home))
+    # Embedding receipts and route rows go to a shared database outside
+    # VECGREP_HOME; a test batch must never land in the operator's copy.
+    monkeypatch.setenv("LOCAL_LLM_USAGE_DB", str(tmp_path / "usage.sqlite3"))
     monkeypatch.setattr(cfg_mod, "_settings", None)
     original_init = cfg_mod.Settings.__init__
 
