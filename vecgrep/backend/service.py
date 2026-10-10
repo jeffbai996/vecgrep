@@ -2185,14 +2185,18 @@ class VecgrepService:
         return selected
 
     def _apply_rerank_prior(self, results: list[SearchResult]) -> None:
-        """Weight each reranker score by its corpus's rank weight and recency.
+        """Weight each reranker score by its corpus's rank weight.
 
-        The same multiplier _search_one applies to the fused score. It goes on
-        the raw cross-encoder score, not similarity_pct: the calibrated percent
-        is steep around its centre, so a 1.25 weight on it would decide almost
-        nothing. similarity_pct is left as the reranker's own value.
+        Weight only, not recency decay. Measured 2026-10-10: applying the
+        45-day chats decay after the reranker halved every transcript older
+        than a couple of months and took chats hit@3 from 31/44 to 0/44.
+        Decay keeps doing its job before the reranker, choosing the pool.
+
+        The weight goes on the raw cross-encoder score, not similarity_pct:
+        the calibrated percent is steep around its centre, so a 1.25 weight
+        on it would decide almost nothing. similarity_pct is left as the
+        reranker's own value.
         """
-        now = time.time()
         corpora: dict[str, Corpus | None] = {}
         for r in results:
             if r.corpus not in corpora:
@@ -2201,9 +2205,7 @@ class VecgrepService:
                 except Exception:  # noqa: BLE001 -- an unknown corpus gets no prior
                     corpora[r.corpus] = None
             corpus = corpora[r.corpus]
-            weight = (getattr(corpus, "rank_weight", 1.0) or 1.0) if corpus else 1.0
-            half_life = getattr(corpus, "decay_half_life_days", None) if corpus else None
-            prior = weight * _recency_factor(r.doc_timestamp, half_life, now)
+            prior = (getattr(corpus, "rank_weight", 1.0) or 1.0) if corpus else 1.0
             r.explain["rerank_prior"] = prior
             r.explain["rerank_ranked"] = r.explain.get("rerank_score", 0.0) * prior
 

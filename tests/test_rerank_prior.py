@@ -1,4 +1,4 @@
-"""Corpus rank weight and recency decay survive the reranker when asked to.
+"""Corpus rank weight survives the reranker when asked to.
 
 Both were applied only to the fused score, which picks the reranker's pool. The
 cross-encoder then re-sorted on text alone, so `squad-store` at 1.25 and a
@@ -7,8 +7,8 @@ the order the caller saw. On the 2026-10-10 eval, 9 of 11 squad-store misses
 were the curated memory losing to an old transcript of the conversation that
 produced it.
 
-With settings.rerank_prior on, the final order is the calibrated reranker
-probability times the same weight x recency multiplier. The displayed
+With settings.rerank_prior on, the final order is the reranker score times
+the corpus rank weight. Recency decay stays before the reranker. The displayed
 similarity_pct stays the reranker's own number: downstream relevance floors
 were tuned on it.
 """
@@ -72,11 +72,12 @@ def test_the_weight_does_not_overturn_a_clear_reranker_verdict(corpora, monkeypa
     assert _order(corpora, hits, {"chat": 0.80, "note": 0.40}, monkeypatch) == ["chat", "note"]
 
 
-def test_an_old_transcript_yields_to_a_fresh_one_of_equal_relevance(corpora, monkeypatch):
+def test_recency_decay_is_not_applied_after_the_reranker(corpora, monkeypatch):
+    """Decay picks the pool; after the reranker it buried every older day."""
     monkeypatch.setattr(corpora.settings, "rerank_prior", True)
     now = time.time()
     hits = [_hit("old", "chats", now - 120 * DAY), _hit("new", "chats", now - 1 * DAY)]
-    assert _order(corpora, hits, {"old": 0.60, "new": 0.59}, monkeypatch) == ["new", "old"]
+    assert _order(corpora, hits, {"old": 0.60, "new": 0.59}, monkeypatch) == ["old", "new"]
 
 
 def test_the_displayed_percent_stays_the_reranker_value(corpora, monkeypatch):

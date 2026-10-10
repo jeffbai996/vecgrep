@@ -192,10 +192,10 @@ class Settings:
     # corpora out of the reranked pool and supplies most false positives on
     # queries with no answer. Naming one still searches it.
     unscoped_exclude: list[str] = field(default_factory=list)
-    # Re-apply each corpus's rank weight and recency decay to the reranker's
-    # score. Off, both only pick which candidates the cross-encoder sees, and
-    # it re-sorts on text alone, so a curated corpus loses close calls to an
-    # old transcript of the conversation that produced it.
+    # Re-apply each corpus's rank weight to the reranker's score. Off, the
+    # weight only picks which candidates the cross-encoder sees, and it
+    # re-sorts on text alone, so a curated corpus loses close calls to an old
+    # transcript of the conversation that produced it.
     rerank_prior: bool = False
     # Process-wide corpus-search worker bound shared by REST/MCP requests using
     # the same settings generation. The fan-out was serial, so latency was the
