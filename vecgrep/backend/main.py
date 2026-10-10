@@ -32,6 +32,7 @@ from .auth.approval import (
     verified_tailnet_login,
 )
 from .auth.rest import TokenlessRestHostMiddleware
+from .auth.throttle import UNLOCK_FAILURES, client_key
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
@@ -264,6 +265,7 @@ def create_app() -> FastAPI:
             error: bool = False,
             ctx: dict | None = None,
             tailnet_login: str | None = None,
+            throttled: int = 0,
         ) -> HTMLResponse:
             safe_next = html.escape(safe_authorize_target(next_target), quote=True)
             ctx = ctx or {"client": "", "scopes": ["read"]}
@@ -276,11 +278,12 @@ def create_app() -> FastAPI:
                 f'<small>{html.escape(_SCOPE_COPY.get(sc, (sc, ""))[1])}</small></span></li>'
                 for sc in ctx.get("scopes", ["read"])
             )
-            error_copy = (
-                "That approval expired. Review the request and try again."
-                if tailnet_login
-                else "That code wasn't accepted."
-            )
+            if throttled:
+                error_copy = "Too many attempts. Wait a minute and try again."
+            elif tailnet_login:
+                error_copy = "That approval expired. Review the request and try again."
+            else:
+                error_copy = "That code wasn't accepted."
             error_html = (
                 """<div class="err" role="alert">
 <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
@@ -288,7 +291,7 @@ def create_app() -> FastAPI:
 <path d="M7 4v3.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
 <circle cx="7" cy="9.6" r="0.8" fill="currentColor"/></svg>
 <span>""" + html.escape(error_copy) + """</span></div>"""
-                if error else ""
+                if error or throttled else ""
             )
             if tailnet_login:
                 intent = tailnet_approval_intent(
@@ -397,7 +400,7 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
 </body></html>"""
             response = HTMLResponse(
                 body,
-                status_code=401 if error else 200,
+                status_code=429 if throttled else 401 if error else 200,
                 headers={
                     "Cache-Control": "no-store",
                     "Content-Security-Policy": (
@@ -409,6 +412,8 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
                     "X-Content-Type-Options": "nosniff",
                 },
             )
+            if throttled:
+                response.headers["Retry-After"] = str(throttled)
             if tailnet_login:
                 response.set_cookie(
                     TAILNET_INTENT_COOKIE,
@@ -448,6 +453,15 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
             next_target = safe_authorize_target((fields.get("next") or [""])[0])
             expected = _gs().oauth_approval_token or ""
             tailnet_login = verified_tailnet_login(request.scope)
+            attempts_key = client_key(request.scope)
+            retry_after = UNLOCK_FAILURES.retry_after(attempts_key)
+            if retry_after:
+                return _unlock_form(
+                    next_target,
+                    throttled=retry_after,
+                    ctx=await _unlock_context(next_target),
+                    tailnet_login=tailnet_login,
+                )
             provided_intent = (fields.get("tailnet_intent") or [""])[0]
             cookie_intent = request.cookies.get(TAILNET_INTENT_COOKIE, "")
             expected_intent = (
@@ -466,6 +480,9 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
                 provided and hmac.compare_digest(provided, expected.strip())
             )
             if not tailnet_approved and not code_approved:
+                if provided:
+                    # Only a guessed code counts; a stale one-click intent is not a guess.
+                    UNLOCK_FAILURES.record_failure(attempts_key)
                 return _unlock_form(
                     next_target,
                     error=True,
