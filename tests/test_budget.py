@@ -151,12 +151,13 @@ def test_search_budgeted_widens_candidate_pool(svc, monkeypatch) -> None:
     orig = type(svc)._search_one
 
     def spy(
-        self, corpus, query, top_k, mode, explain=False, query_vectors=None
+        self, corpus, query, top_k, mode, explain=False, query_vectors=None,
+        timer=None,
     ):
         seen.append(top_k)
         return orig(
             self, corpus, query, top_k, mode, explain=explain,
-            query_vectors=query_vectors,
+            query_vectors=query_vectors, timer=timer,
         )
 
     monkeypatch.setattr(type(svc), "_search_one", spy)
