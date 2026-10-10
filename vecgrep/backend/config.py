@@ -74,6 +74,7 @@ EDITABLE_FIELDS = {
     "backup_retention",
     "cross_corpus_exclude",
     "unscoped_exclude",
+    "rerank_prior",
     "search_fanout_workers",
 }
 SECRET_FIELDS = {
@@ -191,6 +192,11 @@ class Settings:
     # corpora out of the reranked pool and supplies most false positives on
     # queries with no answer. Naming one still searches it.
     unscoped_exclude: list[str] = field(default_factory=list)
+    # Re-apply each corpus's rank weight and recency decay to the reranker's
+    # score. Off, both only pick which candidates the cross-encoder sees, and
+    # it re-sorts on text alone, so a curated corpus loses close calls to an
+    # old transcript of the conversation that produced it.
+    rerank_prior: bool = False
     # Process-wide corpus-search worker bound shared by REST/MCP requests using
     # the same settings generation. The fan-out was serial, so latency was the
     # SUM of per-corpus cost: measured 16.3s across 8 corpora where the slowest

@@ -2169,9 +2169,12 @@ class VecgrepService:
         # near-clones; selection order starts from the best hit, so the
         # reranked ordering survives for everything selected. Do NOT re-sort
         # by similarity_pct here (that would undo the rerank).
-        selected = mmr_select(
-            out, top_k, key=lambda r: r.explain.get("rerank_score", 0.0)
-        )
+        key = lambda r: r.explain.get("rerank_score", 0.0)  # noqa: E731
+        if getattr(self.settings, "rerank_prior", False):
+            self._apply_rerank_prior(out)
+            out.sort(key=lambda r: r.explain["rerank_ranked"], reverse=True)
+            key = lambda r: r.explain["rerank_ranked"]  # noqa: E731
+        selected = mmr_select(out, top_k, key=key)
         if tail and len(selected) < top_k:
             # Backfill from the unscored tail, in fusion order. These carry no
             # rerank_score and are NOT marked as reranked: the model never saw
@@ -2180,6 +2183,29 @@ class VecgrepService:
             # against a real one). They sit strictly below the reranked head.
             selected = selected + tail[:top_k - len(selected)]
         return selected
+
+    def _apply_rerank_prior(self, results: list[SearchResult]) -> None:
+        """Weight each reranker score by its corpus's rank weight and recency.
+
+        The same multiplier _search_one applies to the fused score. It goes on
+        the raw cross-encoder score, not similarity_pct: the calibrated percent
+        is steep around its centre, so a 1.25 weight on it would decide almost
+        nothing. similarity_pct is left as the reranker's own value.
+        """
+        now = time.time()
+        corpora: dict[str, Corpus | None] = {}
+        for r in results:
+            if r.corpus not in corpora:
+                try:
+                    corpora[r.corpus] = self.registry.get(r.corpus)
+                except Exception:  # noqa: BLE001 -- an unknown corpus gets no prior
+                    corpora[r.corpus] = None
+            corpus = corpora[r.corpus]
+            weight = (getattr(corpus, "rank_weight", 1.0) or 1.0) if corpus else 1.0
+            half_life = getattr(corpus, "decay_half_life_days", None) if corpus else None
+            prior = weight * _recency_factor(r.doc_timestamp, half_life, now)
+            r.explain["rerank_prior"] = prior
+            r.explain["rerank_ranked"] = r.explain.get("rerank_score", 0.0) * prior
 
     def _search_admission_timeout(self) -> float | None:
         """Seconds one corpus gets to admit a search; None waits."""
