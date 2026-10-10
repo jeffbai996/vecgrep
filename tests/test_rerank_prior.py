@@ -1,9 +1,9 @@
 """Corpus rank weight survives the reranker when asked to.
 
 Both were applied only to the fused score, which picks the reranker's pool. The
-cross-encoder then re-sorted on text alone, so `squad-store` at 1.25 and a
+cross-encoder then re-sorted on text alone, so a `notes` corpus at 1.25 and a
 45-day decay on `chats` changed which candidates were scored and nothing about
-the order the caller saw. On the 2026-10-10 eval, 9 of 11 squad-store misses
+the order the caller saw. On the 2026-10-10 eval, 9 of 11 notes-corpus misses
 were the curated memory losing to an old transcript of the conversation that
 produced it.
 

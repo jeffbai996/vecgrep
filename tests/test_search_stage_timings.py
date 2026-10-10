@@ -2,7 +2,7 @@
 
 On 2026-10-09 the only way to learn that the cross-encoder was 86% of a search
 was attaching py-spy to the server. The response now carries per-stage
-milliseconds, and squad-store records them so latency drift has a history.
+milliseconds, so a caller can record them and latency drift has a history.
 
 Retrieval runs one task per corpus in parallel, so embed/vector/bm25 are SUMS
 over corpora and can exceed the wall-clock `retrieve`; `retrieve`, `rerank`
