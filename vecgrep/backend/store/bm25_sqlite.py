@@ -29,6 +29,7 @@ from pathlib import Path
 
 from vecgrep.backend.store.bm25_store import (
     _coverage_factor,
+    query_tokens,
     tokenize,
 )
 
@@ -377,7 +378,7 @@ class BM25SqliteStore:
 
     # ── search ────────────────────────────────────────────────────────────
     def search(self, corpus: str, query: str, top_k: int) -> list[tuple[str, float, dict]]:
-        q_tokens = tokenize(query)
+        q_tokens = query_tokens(query)
         if not q_tokens:
             return []
         conn = self._conn(corpus)

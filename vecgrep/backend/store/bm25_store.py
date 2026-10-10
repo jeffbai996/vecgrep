@@ -84,6 +84,35 @@ def tokenize(text: str) -> list[str]:
     return out
 
 
+# English function words, dropped from the QUERY (never from the index).
+# Each query token becomes an OR clause, so one of these matched tens of
+# thousands of chunks and made FTS5 score them all: "ferry to bowen island"
+# hit 64-79k rows on "to" and took 13.6 s on a cold sidecar (2026-10-10).
+# Their IDF is near zero, so they decided cost, not ranking.
+QUERY_STOPWORDS = frozenset("""
+a about above after again all also am an and any are as at be because been
+before being below between both but by can could did do does doing down during
+each few for from further had has have having he her here hers herself him
+himself his how i if in into is it its itself just let me more most my myself
+no nor not of off on once only or other our ours ourselves out over own same
+she should so some such than that the their theirs them themselves then there
+these they this those through to too under until up very was we were what when
+where which while who whom why will with would you your yours yourself
+yourselves
+""".split())
+
+
+def query_tokens(query: str) -> list[str]:
+    """Tokens a BM25 query searches for: tokenize() minus stopwords.
+
+    A query of nothing but stopwords keeps them all, since an empty query
+    would match nothing at all.
+    """
+    tokens = tokenize(query)
+    content = [t for t in tokens if t not in QUERY_STOPWORDS]
+    return content or tokens
+
+
 def _required_coverage(n_query_tokens: int) -> int:
     """Number of distinct query tokens a doc must contain to be a candidate.
 
@@ -524,7 +553,7 @@ class BM25Store:
         idx = self._load(corpus)
         if not idx.docs:
             return []
-        q_tokens = tokenize(query)
+        q_tokens = query_tokens(query)
         if not q_tokens:
             return []
         
