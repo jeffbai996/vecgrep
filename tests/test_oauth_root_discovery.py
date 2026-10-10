@@ -489,6 +489,8 @@ def test_private_approval_posts_proof_to_public_origin(oauth_client):
     with TestClient(create_app(), base_url="https://127.0.0.1:8765") as private:
         page = private.get("/oauth/unlock", params={"next": target}, headers=TAILNET_HEADERS)
         assert 'action="https://127.0.0.1:8766/oauth/unlock"' in page.text
+        # no-referrer turns cross-origin form POST Origin into null in browsers.
+        assert page.headers["referrer-policy"] == "strict-origin"
         assert 'name="tailnet_login" value="owner@example.test"' in page.text
         intent = re.search(r'name="tailnet_intent" value="([a-f0-9]+)"', page.text).group(1)
         with TestClient(create_app(), base_url="https://127.0.0.1:8766") as public:

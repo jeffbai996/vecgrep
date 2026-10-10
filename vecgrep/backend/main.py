@@ -427,7 +427,12 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
                         f"form-action {form_action}; base-uri 'none'; "
                         "frame-ancestors 'none'"
                     ),
-                    "Referrer-Policy": "no-referrer",
+                    # Preserve the private Origin on the cross-port POST. Browsers
+                    # replace it with null under no-referrer; strict-origin still
+                    # withholds the authorization query and its state/PKCE values.
+                    "Referrer-Policy": (
+                        "strict-origin" if private_url and tailnet_login else "no-referrer"
+                    ),
                     "X-Content-Type-Options": "nosniff",
                 },
             )
