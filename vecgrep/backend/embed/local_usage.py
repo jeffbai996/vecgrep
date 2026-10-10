@@ -5,9 +5,13 @@ Two tables in one local database:
 - `usage`: one row per HTTP attempt that reported its tokens. Other local
   tools write this table with positional inserts, so its six columns are
   fixed.
-- `embed_route`: one row per bulk batch attempt: which endpoint role answered
-  (`primary` or `overflow`), whether the overflow fell back to the primary,
-  and a short reason code. A deployment maps the roles to its own host names.
+- `embed_route`: one row per bulk batch attempt: which endpoint role was
+  asked (`primary` or `overflow`), `ok` once its answer validated or
+  `fallback` when it did not, and a short reason code for a fallback
+  (`refused`, `timeout`, `unreachable`, `error`, `http_<code>`,
+  `bad_response`, `bad_vectors`). An overflow fallback sends the batch to the
+  primary; a primary fallback sends it to per-chunk requests. A deployment
+  maps the roles to its own host names.
 
 Neither table stores a prompt, an answer, a URL or a host address.
 """

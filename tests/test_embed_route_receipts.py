@@ -153,3 +153,71 @@ def test_no_test_writes_the_real_receipt_database(tmp_path):
     in the operator's real database.
     """
     assert local_usage._database().resolve().is_relative_to(tmp_path.resolve())
+
+
+def test_an_overflow_connection_that_breaks_mid_answer_records_error(receipt_db):
+    def overflow(req):
+        raise httpx.ReadError("connection reset")
+    _backend(overflow).embed(["a", "b"])
+    assert routes(receipt_db)[0] == ("overflow", "fallback", "error")
+
+
+def _primary_only(primary):
+    b = OllamaBackend("http://primary.invalid", "bge-m3", clock=Clock())
+    b._client.close()
+    b._client = httpx.Client(transport=httpx.MockTransport(primary))
+    return b
+
+
+def _bulk_only(bad):
+    """`bad` answers the multi-text batch; single-chunk retries succeed."""
+    def handler(req):
+        return bad(req) if isinstance(json.loads(req.content)["input"], list) else _answer(req)
+    return handler
+
+
+@pytest.mark.parametrize("bad,reason", [
+    (lambda req: httpx.Response(200, json={"embeddings": [[0.1] * DIM]}), "bad_vectors"),
+    (lambda req: httpx.Response(200, content=b'{"embeddings": [[NaN, 0.1], [0.1, 0.1]]}'), "bad_vectors"),
+    (lambda req: httpx.Response(200, text="not json"), "bad_response"),
+    (lambda req: httpx.Response(200, json=[1, 2]), "bad_response"),
+    (lambda req: httpx.Response(500, text="boom"), "http_500"),
+])
+def test_a_primary_batch_is_ok_only_after_its_answer_validates(receipt_db, bad, reason):
+    """A degraded primary batch goes to per-chunk requests; its route row
+    says so instead of reporting success or nothing."""
+    vectors = _primary_only(_bulk_only(bad)).embed(["a", "b"])
+    assert len(vectors) == 2
+    assert routes(receipt_db) == [("primary", "fallback", reason)]
+
+
+@pytest.mark.parametrize("error,reason", [
+    (httpx.ReadTimeout("slow"), "timeout"),
+    (httpx.ReadError("reset"), "error"),
+])
+def test_a_primary_batch_transport_failure_records_its_reason(receipt_db, error, reason):
+    def primary(req):
+        if isinstance(json.loads(req.content)["input"], list):
+            raise error
+        return _answer(req)
+    _primary_only(primary).embed(["a", "b"])
+    assert routes(receipt_db) == [("primary", "fallback", reason)]
+
+
+def test_an_unreachable_primary_records_the_batch_before_failing(receipt_db):
+    from vecgrep.backend.embed.base import EmbedBackendError
+
+    def primary(req):
+        raise httpx.ConnectError("down")
+    with pytest.raises(EmbedBackendError):
+        _primary_only(primary).embed(["a", "b"])
+    assert routes(receipt_db) == [("primary", "fallback", "unreachable")]
+
+
+def test_a_clean_primary_batch_is_ok_and_linked_to_its_tokens(receipt_db):
+    _primary_only(_answer).embed(["a", "b"])
+    assert routes(receipt_db) == [("primary", "ok", "")]
+    with sqlite3.connect(receipt_db) as db:
+        linked = db.execute("SELECT u.input_tokens FROM embed_route r JOIN usage u"
+                            " ON u.request_id = r.request_id").fetchall()
+    assert linked == [(9,)]

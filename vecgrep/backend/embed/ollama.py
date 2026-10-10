@@ -48,6 +48,19 @@ def _is_finite_vector(vec: list[float]) -> bool:
     return bool(vec) and all(math.isfinite(x) for x in vec)
 
 
+def _transport_reason(e: httpx.HTTPError) -> str:
+    """The route-receipt reason code for a request that never got an answer.
+
+    `error` covers a connection that broke mid-answer (read errors, protocol
+    errors): neither slow nor unreachable.
+    """
+    if isinstance(e, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(e, httpx.ConnectError):
+        return "unreachable"
+    return "error"
+
+
 class OllamaBackend(EmbedBackend):
     name = "ollama"
 
@@ -162,12 +175,8 @@ class OllamaBackend(EmbedBackend):
                 # The overflow host's gate answers 503 while its GPU is in use
                 # for something else; that is a refusal, not an outage.
                 reason = "refused" if r.status_code == 503 else f"http_{r.status_code}"
-        except httpx.TimeoutException:
-            reason = "timeout"
-        except httpx.ConnectError:
-            reason = "unreachable"
-        except httpx.HTTPError:
-            reason = "error"
+        except httpx.HTTPError as e:
+            reason = _transport_reason(e)
         except (ValueError, AttributeError):
             reason = "bad_response"
         if (
@@ -197,34 +206,49 @@ class OllamaBackend(EmbedBackend):
         nonsense search results. Re-embedding per chunk is cheap next to
         silently corrupting a corpus.
         """
+        def failed(reason: str, data: object = None) -> None:
+            # A bulk batch that degrades to per-chunk requests says so in its
+            # route row; a query (route None) records tokens only.
+            if route is not None or isinstance(data, dict):
+                record(data if isinstance(data, dict) else {}, model=self.model,
+                       route=route, outcome="fallback", reason=reason)
+
         try:
             r = self._client.post(
                 f"{self.base_url}/api/embed",
                 json=self._request_payload(texts),
             )
         except httpx.ConnectError as e:
+            failed("unreachable")
             # An unreachable backend is a whole-backend problem, not a batch
             # quirk — surface it now instead of retrying it len(texts) times.
             raise EmbedBackendError(
                 f"Could not reach Ollama at {self.base_url}. "
                 "Start it with `ollama serve` (or set VECGREP_OLLAMA_URL)."
             ) from e
-        except httpx.HTTPError:
+        except httpx.HTTPError as e:
+            failed(_transport_reason(e))
             return None
         if r.status_code != 200:
             # Let the per-chunk path decide: it already distinguishes a fatal
             # 404/4xx from a transient 5xx, so error messages stay identical.
+            failed(f"http_{r.status_code}")
             return None
         try:
             data = r.json()
-            record(data, model=self.model, route=route)
-            rows = data.get("embeddings")
         except ValueError:
+            failed("bad_response")
             return None
-        if not isinstance(rows, list) or len(rows) != len(texts):
+        if not isinstance(data, dict):
+            failed("bad_response")
             return None
-        if not all(_is_finite_vector(v) for v in rows):
+        rows = data.get("embeddings")
+        if (not isinstance(rows, list) or len(rows) != len(texts)
+                or not all(_is_finite_vector(v) for v in rows)):
+            # The tokens were still spent; the receipt keeps them.
+            failed("bad_vectors", data)
             return None
+        record(data, model=self.model, route=route)
         return rows
 
     def _embed_one_resilient(self, text: str) -> list[float]:

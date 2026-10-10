@@ -11,9 +11,12 @@ patch = fixes). The version is a single source of truth in
 - Bulk embedding batches record their route in the local receipt database's
   `embed_route` table: `primary` or `overflow`, `ok` or `fallback`, and a
   short reason code for a fallback (`refused`, `timeout`, `unreachable`,
-  `http_<code>`, `bad_response`, `bad_vectors`). Queries are not recorded
-  there. The shared `usage` table keeps its six columns, and no URL, host or
-  text is stored.
+  `error`, `http_<code>`, `bad_response`, `bad_vectors`). An overflow
+  fallback sends the batch to the primary; a primary fallback sends it to
+  per-chunk requests on the primary. `ok` is written only after the answer
+  validates. `error` is a connection that broke mid-answer. Queries are not
+  recorded there. The shared `usage` table keeps its six columns, and no URL,
+  host or text is stored.
 - `VECGREP_OLLAMA_OVERFLOW_URL` / `ollama_overflow_url`: an optional second
   Ollama endpoint for bulk embedding. Multi-text batches go there first;
   queries stay on the primary, and any unclean overflow answer sends the
