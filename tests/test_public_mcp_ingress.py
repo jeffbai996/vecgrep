@@ -12,7 +12,7 @@ from vecgrep.mcp import server
 
 HEADERS = {"Accept": "application/json, text/event-stream"}
 SPOOF = {
-    "X-Forwarded-For": "100.64.0.10",
+    "X-Forwarded-For": "192.0.2.10",
     "Tailscale-User-Login": "owner@example.test",
     "Tailscale-Headers-Info": "https://tailscale.com/s/serve-headers",
 }

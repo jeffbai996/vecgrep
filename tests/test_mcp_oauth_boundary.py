@@ -122,7 +122,7 @@ def test_verified_tailscale_serve_identity_can_list_tools(
         json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
         headers=MCP_HEADERS | {
             "Host": "example.com:10000",
-            "X-Forwarded-For": "100.64.0.10",
+            "X-Forwarded-For": "192.0.2.10",
             "X-Forwarded-Proto": "https",
             "Tailscale-User-Login": "owner@example.test",
             "Tailscale-Headers-Info": "https://tailscale.com/s/serve-headers",
@@ -170,7 +170,7 @@ def test_setting_false_gates_direct_loopback(vg_home, monkeypatch: pytest.Monkey
             "/mcp",
             json=INITIALIZE,
             headers=MCP_HEADERS | {
-                "X-Forwarded-For": "100.64.0.10",
+                "X-Forwarded-For": "192.0.2.10",
                 "Tailscale-User-Login": "owner@example.test",
                 "Tailscale-Headers-Info": "https://tailscale.com/s/serve-headers",
             },
@@ -225,31 +225,31 @@ def test_any_proxy_or_tailscale_marker_disables_loopback_bypass(marker) -> None:
 
 def test_tailscale_identity_requires_loopback_listener_and_forwarding_marker() -> None:
     identity = (b"tailscale-user-login", b"owner@example.test")
-    forwarded = (b"x-forwarded-for", b"100.64.0.10")
+    forwarded = (b"x-forwarded-for", b"192.0.2.10")
     info = (b"tailscale-headers-info", b"https://tailscale.com/s/serve-headers")
     assert _is_verified_tailnet_mcp({
         PRIVATE_INGRESS: True, "type": "http", "path": "/", "server": ("127.0.0.1", 8765),
-        "client": ("100.64.0.10", 1),
+        "client": ("192.0.2.10", 1),
         "headers": [identity, forwarded, info],
     }) is True
     assert _is_verified_tailnet_mcp({
         PRIVATE_INGRESS: True, "type": "http", "path": "/", "server": ("192.0.2.2", 8765),
-        "client": ("100.64.0.10", 1),
+        "client": ("192.0.2.10", 1),
         "headers": [identity, forwarded, info],
     }) is False
     assert _is_verified_tailnet_mcp({
         PRIVATE_INGRESS: True, "type": "http", "path": "/", "server": ("127.0.0.1", 8765),
-        "client": ("100.64.0.10", 1),
+        "client": ("192.0.2.10", 1),
         "headers": [identity],
     }) is False
     assert _is_verified_tailnet_mcp({
         PRIVATE_INGRESS: True, "type": "http", "path": "/", "server": ("127.0.0.1", 8765),
-        "client": ("100.64.0.10", 1),
+        "client": ("192.0.2.10", 1),
         "headers": [identity, forwarded],
     }) is False
     assert _is_verified_tailnet_mcp({
         PRIVATE_INGRESS: True, "type": "http", "path": "/", "server": ("127.0.0.1", 8765),
-        "client": ("100.64.0.10", 1),
+        "client": ("192.0.2.10", 1),
         "headers": [
             identity, forwarded, info, (b"tailscale-funnel-request", b"?1")
         ],

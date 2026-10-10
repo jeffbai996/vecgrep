@@ -17,6 +17,9 @@ VECGREP_OAUTH_ENABLED=1
 VECGREP_OAUTH_ISSUER_URL=https://<your-public-host>/mcp   # the URL clients dial
 VECGREP_OAUTH_APPROVAL_TOKEN=<strong random owner approval code>
 VECGREP_OAUTH_PUBLIC_PORT=8766   # public proxy upstream; private clients stay on 8765
+# Optional: offer public-browser requests a verified one-tap approval route.
+# Same HTTPS hostname as the issuer, a different private Serve port.
+VECGREP_OAUTH_TAILNET_APPROVAL_URL=https://<your-public-host>:8444/oauth/unlock
 # Optional master rollback: false requires OAuth for every MCP request.
 VECGREP_OAUTH_LOOPBACK_BYPASS=true
 # Optional: false also requires OAuth for authenticated Tailscale Serve users.
@@ -84,7 +87,14 @@ vecgrep owner. Before `/authorize` can mint a code, vecgrep therefore requires
 an explicit approval in a no-store browser form. A verified Tailscale Serve
 identity gets a one-click form protected by a request-bound, ten-minute,
 SameSite=Strict intent cookie. Funnel and unverified sessions must enter the
-separate `VECGREP_OAUTH_APPROVAL_TOKEN`. The resulting year-long approval cookie
+separate `VECGREP_OAUTH_APPROVAL_TOKEN`. With
+`VECGREP_OAUTH_TAILNET_APPROVAL_URL` configured, the public form offers
+**Approve with Tailscale** and keeps the code as a fallback. The private page
+posts its signed, request-bound intent back to the public origin. That origin
+accepts it only with the matching HttpOnly intent cookie and configured private
+Origin; it never trusts public identity headers. Cookies span ports, so the
+private page must share the issuer's HTTPS hostname. The original client,
+callback, PKCE challenge and state remain unchanged. The resulting year-long approval cookie
 is HttpOnly, Secure, SameSite=Strict, and contains only an HMAC verifier—not the
 approval token. The page's CSP permits form navigation only to vecgrep itself
 and the registered OAuth callback origin; this is required for Safari, which

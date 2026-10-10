@@ -31,7 +31,7 @@ from vecgrep.mcp.server import _oauth_resource
 TEST_APPROVAL = "a" * 40
 FORM_TOKEN_FIELD = "to" + "ken"
 TAILNET_HEADERS = {
-    "X-Forwarded-For": "100.64.0.10",
+    "X-Forwarded-For": "192.0.2.10",
     "X-Forwarded-Proto": "https",
     "Tailscale-User-Login": "owner@example.test",
     "Tailscale-Headers-Info": "https://tailscale.com/s/serve-headers",
@@ -470,3 +470,77 @@ def test_protected_resource_metadata_stays_public_over_non_loopback_client(oauth
     r = oauth_client.get("/.well-known/oauth-protected-resource/mcp")
     assert r.status_code == 200
     assert r.json()["resource"] == "https://example.com:10000/mcp"
+
+
+def test_public_oauth_offers_private_tailnet_approval(oauth_client):
+    cfg_mod.get_settings().oauth_tailnet_approval_url = "https://example.com:8444/oauth/unlock"
+    target = "/authorize?client_id=client&state=keep-me"
+    page = oauth_client.get("/oauth/unlock", params={"next": target})
+    assert "Approve with Tailscale" in page.text
+    assert "https://example.com:8444/oauth/unlock?next=" in page.text
+    assert "Use approval code" in page.text
+
+
+def test_private_approval_posts_proof_to_public_origin(oauth_client):
+    settings = cfg_mod.get_settings()
+    settings.oauth_issuer_url = "https://127.0.0.1:8766/mcp"
+    settings.oauth_tailnet_approval_url = "https://127.0.0.1:8765/oauth/unlock"
+    target = "/authorize?client_id=client&state=keep-me"
+    with TestClient(create_app(), base_url="https://127.0.0.1:8765") as private:
+        page = private.get("/oauth/unlock", params={"next": target}, headers=TAILNET_HEADERS)
+        assert 'action="https://127.0.0.1:8766/oauth/unlock"' in page.text
+        assert 'name="tailnet_login" value="owner@example.test"' in page.text
+        intent = re.search(r'name="tailnet_intent" value="([a-f0-9]+)"', page.text).group(1)
+        with TestClient(create_app(), base_url="https://127.0.0.1:8766") as public:
+            public.cookies.update(private.cookies)
+            approved = public.post("/oauth/unlock", data={
+                "next": target, "tailnet_intent": intent,
+                "tailnet_login": "owner@example.test",
+            }, headers={"Origin": "https://127.0.0.1:8765"}, follow_redirects=False)
+            assert approved.status_code == 303
+            assert approved.headers["location"] == target
+            assert APPROVAL_COOKIE in approved.cookies
+
+
+@pytest.mark.parametrize("change", ["origin", "target", "login", "cookie", "proof"])
+def test_public_handoff_rejects_unbound_or_forged_proof(oauth_client, change):
+    settings = cfg_mod.get_settings()
+    settings.oauth_issuer_url = "https://127.0.0.1:8766/mcp"
+    settings.oauth_tailnet_approval_url = "https://127.0.0.1:8765/oauth/unlock"
+    target = "/authorize?client_id=client&state=keep-me"
+    with TestClient(create_app(), base_url="https://127.0.0.1:8765") as private:
+        page = private.get("/oauth/unlock", params={"next": target}, headers=TAILNET_HEADERS)
+        intent = re.search(r'name="tailnet_intent" value="([a-f0-9]+)"', page.text).group(1)
+        with TestClient(create_app(), base_url="https://127.0.0.1:8766") as public:
+            public.cookies.update(private.cookies)
+            data = {"next": target, "tailnet_intent": intent, "tailnet_login": "owner@example.test"}
+            origin = "https://127.0.0.1:8765"
+            if change == "origin": origin = "https://evil.example"
+            if change == "target": data["next"] = "/authorize?client_id=other"
+            if change == "login": data["tailnet_login"] = "other@example.test"
+            if change == "cookie": public.cookies.clear()
+            if change == "proof":
+                data["tailnet_intent"] = "0" * 64
+                public.cookies.set(TAILNET_INTENT_COOKIE, "0" * 64)
+            denied = public.post("/oauth/unlock", data=data, headers={"Origin": origin}, follow_redirects=False)
+            assert denied.status_code == 401
+            assert APPROVAL_COOKIE not in denied.cookies
+            assert 'name="tailnet_intent"' not in denied.text
+
+
+@pytest.mark.parametrize("url", [
+    "http://example.com:8444/oauth/unlock", "https://other.example:8444/oauth/unlock",
+    "https://example.com:10000/oauth/unlock", "https://example.com:8444/authorize",
+    "https://example.com:8444/oauth/unlock?next=/authorize",
+    "https://user@example.com:8444/oauth/unlock", "https://example.com:bad/oauth/unlock",
+])
+def test_tailnet_approval_url_rejects_unsafe_configuration(oauth_client, url):
+    settings = cfg_mod.get_settings()
+    settings.oauth_tailnet_approval_url = url
+    with pytest.raises(cfg_mod.ConfigError):
+        cfg_mod.validate_settings(settings)
+
+
+def test_tailnet_approval_url_loads_from_environment(oauth_client, monkeypatch):
+    monkeypatch.setenv("VECGREP_OAUTH_TAILNET_APPROVAL_URL", "https://example.com:8444/oauth/unlock")
+    assert cfg_mod.load_settings().oauth_tailnet_approval_url == "https://example.com:8444/oauth/unlock"

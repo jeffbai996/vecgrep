@@ -271,13 +271,23 @@ def create_app() -> FastAPI:
             ctx = ctx or {"client": "", "scopes": ["read"]}
             client = html.escape(ctx.get("client") or "")
             heading = f"Connect {client} to vecgrep" if client else "Connect to vecgrep"
-            from urllib.parse import urlsplit as _us
+            from urllib.parse import urlsplit as _us, urlencode as _ue
             host = html.escape(_us(_gs().oauth_issuer_url or "").hostname or "")
             rows = "".join(
                 f'<li><span class="dot"></span><span><b>{html.escape(_SCOPE_COPY.get(sc, (sc, ""))[0])}</b>'
                 f'<small>{html.escape(_SCOPE_COPY.get(sc, (sc, ""))[1])}</small></span></li>'
                 for sc in ctx.get("scopes", ["read"])
             )
+            private_url = _gs().oauth_tailnet_approval_url
+            issuer = _us(_gs().oauth_issuer_url or "")
+            public_origin = f"{issuer.scheme}://{issuer.netloc}"
+            post_url = "/oauth/unlock"
+            tailnet_link = ""
+            if private_url and not tailnet_login:
+                href = html.escape(private_url + "?" + _ue({"next": safe_authorize_target(next_target)}), quote=True)
+                tailnet_link = f'<a class="tailnet-link" href="{href}">Approve with Tailscale</a>'
+            if private_url and tailnet_login:
+                post_url = public_origin + "/oauth/unlock"
             if throttled:
                 error_copy = "Too many attempts. Wait a minute and try again."
             elif tailnet_login:
@@ -302,6 +312,8 @@ def create_app() -> FastAPI:
                 approval_copy = "Approve this request from your verified Tailscale session."
                 controls = f"""<input type="hidden" name="tailnet_intent" value="{intent}">
 <button type="submit">Approve &amp; continue</button>"""
+                if private_url:
+                    controls += f'<input type="hidden" name="tailnet_login" value="{html.escape(tailnet_login, quote=True)}">'
             else:
                 approval_copy = "Enter the owner approval code to allow it."
                 controls = """<label for="token">Owner approval code</label>
@@ -309,6 +321,14 @@ def create_app() -> FastAPI:
 <button type="submit">Approve &amp; continue</button>"""
             callback_origin = oauth_callback_origin(next_target)
             form_action = "'self'" + (f" {callback_origin}" if callback_origin else "")
+            if private_url and tailnet_login:
+                form_action += f" {public_origin}"
+            form_html = f'<form method="post" action="{html.escape(post_url, quote=True)}"><input type="hidden" name="next" value="{safe_next}">{controls}</form>'
+            if tailnet_link:
+                opened = " open" if error or throttled else ""
+                form_html = tailnet_link + f'<details{opened}><summary>Use approval code</summary>{form_html}</details>'
+                if not error and not throttled:
+                    approval_copy = "Approve from your connected Tailscale device."
             # No <script> anywhere on purpose: the CSP below is default-src 'none'
             # with only style-src 'unsafe-inline' allowed, so this stays a plain
             # POST form with zero script surface on the one page that gates real
@@ -364,14 +384,16 @@ input[type="password"] {{
 }}
 input[type="password"]::placeholder {{ color: var(--muted); letter-spacing: 0.2em; }}
 input[type="password"]:focus-visible {{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }}
-button {{
+button, .tailnet-link {{
   width: 100%; margin-top: 14px; padding: 13px 16px; border-radius: 10px; border: none;
   background: var(--accent); color: #1c1033; font: inherit; font-weight: 650; font-size: 0.92rem; letter-spacing: 0.01em;
   cursor: pointer; transition: background-color 120ms ease, transform 60ms ease;
 }}
-button:hover {{ background: var(--accent-hi); }}
+button:hover, .tailnet-link:hover {{ background: var(--accent-hi); }}
 button:active {{ transform: scale(0.985); }}
-button:focus-visible {{ outline: 2px solid var(--accent); outline-offset: 3px; }}
+button:focus-visible, .tailnet-link:focus-visible {{ outline: 2px solid var(--accent); outline-offset: 3px; }}
+.tailnet-link {{ display: block; box-sizing: border-box; text-align: center; text-decoration: none; }}
+summary {{ margin-top: 18px; cursor: pointer; color: var(--fg-2); font-size: 0.8rem; }}
 .err {{ display: flex; gap: 8px; align-items: center; margin: 0 0 16px; background: var(--bad-soft); border: 1px solid var(--bad-border); color: var(--bad); border-radius: 10px; padding: 10px 12px; font-size: 0.8rem; }}
 .err svg {{ flex: none; }}
 footer {{ margin: 16px 4px 0; display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--muted); letter-spacing: 0.04em; }}
@@ -390,10 +412,7 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
 <h1>{html.escape(heading)}</h1>
 <p class="sub">{("<b>" + client + "</b> is asking for access. ") if client else ""}{html.escape(approval_copy)}</p>
 <ul class="scopes">{rows}</ul>
-{error_html}<form method="post" action="/oauth/unlock">
-<input type="hidden" name="next" value="{safe_next}">
-{controls}
-</form>
+{error_html}{form_html}
 </div>
 <footer><span>OAuth 2.1 · PKCE</span><span>approval lasts a year</span></footer>
 </main>
@@ -462,11 +481,21 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
                     ctx=await _unlock_context(next_target),
                     tailnet_login=tailnet_login,
                 )
+            # A private Serve page can post its signed approval to the public
+            # origin. Cookies span ports; identity headers never cross this boundary.
+            handoff_login = (fields.get("tailnet_login") or [""])[0]
+            private_url = _gs().oauth_tailnet_approval_url
+            approval_login = tailnet_login
+            if not tailnet_login and private_url and handoff_login:
+                from urllib.parse import urlsplit
+                private = urlsplit(private_url)
+                if request.headers.get("origin") == f"{private.scheme}://{private.netloc}":
+                    approval_login = handoff_login
             provided_intent = (fields.get("tailnet_intent") or [""])[0]
             cookie_intent = request.cookies.get(TAILNET_INTENT_COOKIE, "")
             expected_intent = (
-                tailnet_approval_intent(expected, tailnet_login, next_target)
-                if tailnet_login
+                tailnet_approval_intent(expected, approval_login, next_target)
+                if approval_login
                 else ""
             )
             tailnet_approved = bool(

@@ -37,6 +37,7 @@ ENV_MAP = {
     "VECGREP_BM25_BACKEND": "bm25_backend",
     "VECGREP_OAUTH_ENABLED": "oauth_enabled",
     "VECGREP_OAUTH_ISSUER_URL": "oauth_issuer_url",
+    "VECGREP_OAUTH_TAILNET_APPROVAL_URL": "oauth_tailnet_approval_url",
     "VECGREP_OAUTH_PUBLIC_PORT": "oauth_public_port",
     "VECGREP_OAUTH_LOOPBACK_BYPASS": "oauth_loopback_bypass",
     "VECGREP_OAUTH_TAILSCALE_IDENTITY_BYPASS": "oauth_tailscale_identity_bypass",
@@ -58,7 +59,7 @@ EDITABLE_FIELDS = {
     "rest_allowed_hosts",
     "default_top_k",
     "oauth_enabled",
-    "oauth_issuer_url",
+    "oauth_issuer_url", "oauth_tailnet_approval_url",
     "oauth_public_port",
     "oauth_loopback_bypass",
     "oauth_tailscale_identity_bypass",
@@ -82,7 +83,7 @@ SECRET_FIELDS = {
 }
 STRUCTURAL_FIELDS = {
     "api_host", "api_port", "rest_allowed_hosts", "qdrant_url", "bm25_backend", "oauth_enabled",
-    "oauth_issuer_url", "oauth_loopback_bypass", "oauth_tailscale_identity_bypass",
+    "oauth_issuer_url", "oauth_tailnet_approval_url", "oauth_loopback_bypass", "oauth_tailscale_identity_bypass",
     "oauth_public_port",
     "mcp_allowed_hosts", "mcp_allowed_origins",
 }
@@ -137,6 +138,8 @@ class Settings:
     # tailnet with no token (network-trust); OAuth gates proxied /mcp traffic.
     oauth_enabled: bool = False
     oauth_issuer_url: str | None = None
+    # Optional private approval page on the same HTTPS host (a different port).
+    oauth_tailnet_approval_url: str | None = None
     # Public proxies use this separate loopback listener.
     oauth_public_port: int = 8766
     # Preserve trusted direct-to-loopback MCP clients while OAuth protects
@@ -385,6 +388,19 @@ def validate_settings(settings: Settings) -> None:
     _validate_url("ollama_overflow_url", settings.ollama_overflow_url)
     _validate_url("qdrant_url", settings.qdrant_url)
     _validate_url("oauth_issuer_url", settings.oauth_issuer_url)
+    if settings.oauth_tailnet_approval_url:
+        try:
+            private = urlparse(settings.oauth_tailnet_approval_url)
+            issuer = urlparse(settings.oauth_issuer_url or "")
+            distinct_port = (private.port or 443) != (issuer.port or 443)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("oauth_tailnet_approval_url is invalid") from exc
+        if (private.scheme != "https" or issuer.scheme != "https"
+                or not private.hostname or private.hostname != issuer.hostname
+                or not distinct_port or private.username or private.password
+                or private.path != "/oauth/unlock" or private.query or private.fragment):
+            raise ConfigError("oauth_tailnet_approval_url must be an HTTPS /oauth/unlock URL "
+                              "on the issuer host with a different port")
     if not 1 <= int(settings.api_port) <= 65535:
         raise ConfigError("api_port must be between 1 and 65535")
     if not 1 <= int(settings.oauth_public_port) <= 65535:
@@ -499,7 +515,7 @@ def update_config(
         } and not isinstance(value, bool):
             raise ConfigError(f"{name} must be a boolean")
         if name in {
-            "ollama_fallback_url", "ollama_num_batch", "oauth_issuer_url",
+            "ollama_fallback_url", "ollama_num_batch", "oauth_issuer_url", "oauth_tailnet_approval_url",
             "qdrant_url", "backup_destination",
         } and value == "":
             value = None
@@ -509,7 +525,7 @@ def update_config(
     raw = _load_json(current.config_file)
     raw.update(updates)
     for nullable in (
-        "ollama_fallback_url", "ollama_num_batch", "oauth_issuer_url",
+        "ollama_fallback_url", "ollama_num_batch", "oauth_issuer_url", "oauth_tailnet_approval_url",
         "qdrant_url", "backup_destination",
     ):
         if raw.get(nullable) == "":
