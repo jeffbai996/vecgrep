@@ -37,4 +37,10 @@ class OAuthIngressMiddleware:
                     or path.startswith(("/mcp/", "/.well-known/"))):
                 await PlainTextResponse("Not found", status_code=404)(scope, receive, send)
                 return
+            # POST-only routes: a GET would otherwise fall through to the UI
+            # catch-all and answer with index.html.
+            if path in {"/token", "/register"} and scope.get("method") in {"GET", "HEAD"}:
+                await PlainTextResponse("Method Not Allowed", status_code=405,
+                                        headers={"Allow": "POST"})(scope, receive, send)
+                return
         await self.app(scope, receive, send)

@@ -2392,6 +2392,15 @@ class _RegistrationIngress:
             if not message.get("more_body", False):
                 break
 
+        try:
+            metadata = json.loads(bytes(body) or b"null")
+        except ValueError:
+            metadata = None
+        if not isinstance(metadata, dict):
+            # The SDK handler raises on a non-JSON body, which would surface as a 500.
+            await _registration_error(send, 400, "invalid_client_metadata")
+            return
+
         replayed = False
 
         async def replay():

@@ -65,6 +65,18 @@ def test_public_identity_cannot_unlock_owner_approval(ingress_app):
         assert denied.status_code == 401
 
 
+@pytest.mark.parametrize("path", ["/token", "/register"])
+def test_public_listener_answers_get_on_post_only_oauth_routes_with_405(ingress_app, path):
+    with TestClient(Listener(ingress_app, 8766), base_url="https://example.com",
+                    client=("127.0.0.1", 40000)) as client:
+        response = client.get(path)
+        assert response.status_code == 405
+        assert response.headers["allow"] == "POST"
+        assert "<!doctype html>" not in response.text.lower()
+        posted = client.post(path, data={})
+        assert posted.status_code in (400, 401)
+
+
 def test_public_and_private_share_tokens_and_private_access(ingress_app):
     with TestClient(Listener(ingress_app, 8766), base_url="https://example.com") as public:
         token = server._shared_provider().store.issue_access_token("test-client", ["read"], ttl_s=60)
