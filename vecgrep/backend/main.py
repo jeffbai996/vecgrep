@@ -36,6 +36,10 @@ from .auth.rest import TokenlessRestHostMiddleware
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 logger = logging.getLogger(__name__)
+# httpx logs every request at INFO, and the server makes one to qdrant for
+# each corpus of each search: ~18k journal lines per 6 h on fragserv, a share
+# of a 1 GB journal that then held only ~36 h of history. Failures still log.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def _try_build_mcp_http_app() -> Any | None:

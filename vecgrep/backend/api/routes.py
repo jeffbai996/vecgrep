@@ -329,6 +329,7 @@ def search(req: SearchRequest) -> SearchResponse:
         hits=[_hit_out(r) for r in outcome.results],
         calibration=Calibration(**svc.calibration(req.corpus)),
         warnings=[SearchWarningOut(**asdict(w)) for w in outcome.warnings],
+        timings_ms=getattr(outcome, "timings_ms", {}) or {},
     )
 
 

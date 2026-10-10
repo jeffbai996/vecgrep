@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 import weakref
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, get_args
@@ -133,6 +133,42 @@ class SearchWarning:
 class SearchOutcome:
     results: list["SearchResult"]
     warnings: list[SearchWarning]
+    # Milliseconds per stage; see _StageTimer for what each key means.
+    timings_ms: dict[str, float] = field(default_factory=dict)
+
+
+class _StageTimer:
+    """Per-search stage clock, shared by the corpus tasks of one fan-out.
+
+    embed / vector / bm25 are accumulated by every corpus task, so in an
+    unscoped search they are SUMS over corpora run in parallel and can exceed
+    the wall-clock `retrieve`. retrieve, rerank and total are wall-clock.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._seconds: dict[str, float] = {}
+
+    def add(self, stage: str, seconds: float) -> None:
+        with self._lock:
+            self._seconds[stage] = self._seconds.get(stage, 0.0) + seconds
+
+    @contextlib.contextmanager
+    def measure(self, stage: str):
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            self.add(stage, time.monotonic() - started)
+
+    def as_ms(self, *, total_s: float, corpora: int) -> dict[str, float]:
+        with self._lock:
+            out = {k: round(v * 1000, 1) for k, v in self._seconds.items()}
+        for stage in ("embed", "vector", "bm25", "retrieve"):
+            out.setdefault(stage, 0.0)
+        out["total"] = round(total_s * 1000, 1)
+        out["corpora"] = corpora
+        return out
 
 
 class _SearchRuntime:
@@ -1210,6 +1246,8 @@ class VecgrepService:
         workers = min(
             len(corpora), max(1, int(getattr(self.settings, "search_fanout_workers", 8) or 1))
         )
+        timer = _StageTimer()
+        retrieve_started = time.monotonic()
         if workers > 1 and len(corpora) > 1:
             # Serial fan-out made unscoped latency the SUM of per-corpus cost.
             # Each _search_one is an independent read (its own qdrant query and
@@ -1224,6 +1262,7 @@ class VecgrepService:
                     self._search_one, c, query, per_corpus_k, mode,
                     explain=explain,
                     query_vectors=query_vectors,
+                    timer=timer,
                 ))
                 for c in corpora
             ]
@@ -1240,11 +1279,13 @@ class VecgrepService:
                 try:
                     results.extend(self._search_one(
                         c, query, per_corpus_k, mode, explain=explain,
-                        query_vectors=query_vectors,
+                        query_vectors=query_vectors, timer=timer,
                     ))
                     successful.append(c.name)
                 except Exception as exc:
                     failures.append((c, exc))
+
+        timer.add("retrieve", time.monotonic() - retrieve_started)
 
         partial_allowed = corpus_name is None
         if failures and (not partial_allowed or not successful):
@@ -1292,8 +1333,9 @@ class VecgrepService:
         reranked = False
         if rerank and self._rerank_ready(rerank_model):
             try:
-                results = self._apply_rerank(
-                    query, results, top_k, rerank_model, explain=explain)
+                with timer.measure("rerank"):
+                    results = self._apply_rerank(
+                        query, results, top_k, rerank_model, explain=explain)
                 reranked = True
             except Exception as exc:
                 # Readiness only proves the model LOADED. predict() can still
@@ -1344,7 +1386,8 @@ class VecgrepService:
         # missing map = exact no-op). Applied here so every assembly built on
         # this — search, budget, timeline, incident — inherits the stamp.
         apply_labels(results, load_source_labels_cached(source_labels_path()))
-        return SearchOutcome(results, warnings)
+        return SearchOutcome(results, warnings, timings_ms=timer.as_ms(
+            total_s=time.monotonic() - started, corpora=len(corpora)))
 
     def search(
         self,
@@ -2230,6 +2273,7 @@ class VecgrepService:
         mode: SearchMode,
         explain: bool = False,
         query_vectors: _QueryVectorMemo | None = None,
+        timer: _StageTimer | None = None,
     ) -> list[SearchResult]:
         self._recover_if_pending(corpus.name)
         # LockTimeout leaves this corpus in search()'s failures list, which an
@@ -2246,7 +2290,7 @@ class VecgrepService:
             # selecting corpora. Re-resolve metadata inside admission.
             corpus = self.registry.get(corpus.name)
             return self._search_one_locked(
-                corpus, query, top_k, mode, explain, query_vectors
+                corpus, query, top_k, mode, explain, query_vectors, timer
             )
 
     def _search_one_locked(
@@ -2257,15 +2301,19 @@ class VecgrepService:
         mode: SearchMode,
         explain: bool = False,
         query_vectors: _QueryVectorMemo | None = None,
+        timer: _StageTimer | None = None,
     ) -> list[SearchResult]:
         collection = _collection_for(corpus.name)
+        timer = timer or _StageTimer()
 
         if mode in ("hybrid", "bm25") and isinstance(self.bm25, BM25SqliteStore):
-            expected = self.store.count(collection)
-            if expected and (
-                not self.bm25.exists(corpus.name)
-                or self.bm25.count(corpus.name) != expected
-            ):
+            with timer.measure("bm25"):
+                expected = self.store.count(collection)
+                consistent = not expected or (
+                    self.bm25.exists(corpus.name)
+                    and self.bm25.count(corpus.name) == expected
+                )
+            if not consistent:
                 raise CorpusError(
                     f"BM25 SQLite index missing or inconsistent for {corpus.name}; "
                     f"run vecgrep bm25 rebuild {corpus.name} before searching"
@@ -2278,12 +2326,14 @@ class VecgrepService:
             # Use the failover-aware embed so a backend that died mid-session
             # (primary Ollama down) re-resolves to the fallback instead of
             # raising forever on a stale cached backend.
-            qv = (
-                query_vectors.get(corpus)
-                if query_vectors is not None
-                else self._embed_query_singleflight(corpus, query)
-            )
-            vector_hits = self.store.search(collection, qv, top_k=CANDIDATE_POOL)
+            with timer.measure("embed"):
+                qv = (
+                    query_vectors.get(corpus)
+                    if query_vectors is not None
+                    else self._embed_query_singleflight(corpus, query)
+                )
+            with timer.measure("vector"):
+                vector_hits = self.store.search(collection, qv, top_k=CANDIDATE_POOL)
             # Drop sub-noise vector hits before they reach fusion (see
             # COSINE_FLOOR_MARGIN). Gentle by default; keeps the real signal band.
             floor = _cosine_floor(corpus.embed_model)
@@ -2291,7 +2341,8 @@ class VecgrepService:
                 vector_hits = [h for h in vector_hits if h.score >= floor]
 
         if mode in ("hybrid", "bm25"):
-            bm25_hits = self.bm25.search(corpus.name, query, top_k=CANDIDATE_POOL)
+            with timer.measure("bm25"):
+                bm25_hits = self.bm25.search(corpus.name, query, top_k=CANDIDATE_POOL)
 
         if mode == "vector":
             out: list[SearchResult] = []
