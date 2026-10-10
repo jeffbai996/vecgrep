@@ -514,11 +514,20 @@ def _run_list_corpora(include_hidden: bool = False) -> str:
             "description": getattr(c, "description", ""),
             "use_for": getattr(c, "use_for", []),
             "avoid_for": getattr(c, "avoid_for", []),
+            # False means a search that omits `corpus` skips it: name it.
+            "in_default_search": _in_default_search(svc, c.name),
         }
         for c in svc.list_corpora()
         if include_hidden or not svc.is_hidden_corpus(c.name)
     ]
     return json.dumps(corpora, indent=2)
+
+
+def _in_default_search(svc, name: str) -> bool:
+    check = getattr(svc, "in_default_search", None)
+    if callable(check):
+        return bool(check(name))
+    return not svc.is_hidden_corpus(name)
 
 
 def _run_get_corpus(name: str) -> str:
@@ -1283,7 +1292,9 @@ def build_mcp_server() -> Any:
                     "surrounding context. Use this instead of dumping documents into "
                     "context — index once, search per question. Do not guess corpus "
                     "names: call list_corpora when scope is uncertain, then search the "
-                    "smallest relevant set."
+                    "smallest relevant set. Large code and terminal-history corpora sit "
+                    "outside the default search (in_default_search: false); name them "
+                    "for questions about code or past commands."
                 ),
                 inputSchema={
                     "type": "object",
@@ -1294,7 +1305,11 @@ def build_mcp_server() -> Any:
                         },
                         "corpus": {
                             "type": "string",
-                            "description": "Limit to one corpus. Omit to search all corpora.",
+                            "description": (
+                                "Limit to one corpus. Omit to search the default set: "
+                                "list_corpora marks each corpus with in_default_search, "
+                                "and one marked false is searched only when named."
+                            ),
                         },
                         "corpora": {
                             "type": "array",

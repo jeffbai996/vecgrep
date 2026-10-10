@@ -66,3 +66,33 @@ def test_unscoped_exclude_loads_from_the_config_file(tmp_path, monkeypatch) -> N
 
 def test_unscoped_exclude_is_an_editable_setting() -> None:
     assert "unscoped_exclude" in config_mod.EDITABLE_FIELDS
+
+
+# ─── telling callers ────────────────────────────────────────────────────────
+# A bot that omits `corpus` silently misses an unscoped-excluded corpus, so
+# the tool surface has to say which corpora a bare query covers.
+
+def test_in_default_search_reflects_both_exclusion_settings(svc, monkeypatch) -> None:
+    monkeypatch.setattr(svc.settings, "unscoped_exclude", ["repos"])
+    assert svc.in_default_search("chats") is True
+    assert svc.in_default_search("repos") is False
+    assert svc.in_default_search("eval-chats-base") is False
+
+
+def test_list_corpora_marks_corpora_outside_the_default_search(svc, make_doc, monkeypatch) -> None:
+    from vecgrep.mcp import server as mcp_server
+    _index(svc, make_doc, "live.md", "chats")
+    _index(svc, make_doc, "code.md", "repos")
+    monkeypatch.setattr(svc.settings, "unscoped_exclude", ["repos"])
+    monkeypatch.setattr(mcp_server, "_svc", lambda: svc)
+
+    listed = {c["name"]: c["in_default_search"] for c in json.loads(mcp_server._run_list_corpora())}
+    assert listed == {"chats": True, "repos": False}
+
+
+def test_the_search_tool_no_longer_claims_omitting_corpus_searches_everything() -> None:
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[1] / "vecgrep" / "mcp" / "server.py"
+    text = src.read_text()
+    assert "Omit to search all corpora" not in text
+    assert "in_default_search" in text

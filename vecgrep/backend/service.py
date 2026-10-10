@@ -1118,10 +1118,14 @@ class VecgrepService:
         fnmatch patterns. Never applied to an explicitly named corpus -- see
         search().
         """
+        return [c for c in self.registry.list() if self.in_default_search(c.name)]
+
+    def in_default_search(self, name: str) -> bool:
+        """Does a search that names no corpus cover this one?"""
+        if self.is_hidden_corpus(name):
+            return False
         unscoped = list(getattr(self.settings, "unscoped_exclude", None) or [])
-        return [c for c in self.registry.list()
-                if not self.is_hidden_corpus(c.name)
-                and not any(fnmatch.fnmatch(c.name, pat) for pat in unscoped)]
+        return not any(fnmatch.fnmatch(name, pat) for pat in unscoped)
 
     def is_hidden_corpus(self, name: str) -> bool:
         """Is this corpus a build artifact rather than one someone curates?
