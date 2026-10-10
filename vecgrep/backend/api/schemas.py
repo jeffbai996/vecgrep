@@ -182,7 +182,7 @@ class SearchResponse(BaseModel):
     # act on (Jeff 2026-09-09). This is the server's own answer, so a gap
     # between it and what the page felt is the round trip, not the retrieval.
     took_ms: int | None = None
-    # Where took_ms went: embed / vector / bm25 (summed over corpora searched
+    # Where took_ms went: admit / embed / vector / bm25 (summed over corpora searched
     # in parallel), retrieve / rerank / total (wall clock), and corpora.
     # Budget mode leaves it empty.
     timings_ms: dict[str, float] = Field(default_factory=dict)

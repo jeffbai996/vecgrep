@@ -140,7 +140,7 @@ class SearchOutcome:
 class _StageTimer:
     """Per-search stage clock, shared by the corpus tasks of one fan-out.
 
-    embed / vector / bm25 are accumulated by every corpus task, so in an
+    admit / embed / vector / bm25 are accumulated by every corpus task, so in an
     unscoped search they are SUMS over corpora run in parallel and can exceed
     the wall-clock `retrieve`. retrieve, rerank and total are wall-clock.
     """
@@ -164,7 +164,7 @@ class _StageTimer:
     def as_ms(self, *, total_s: float, corpora: int) -> dict[str, float]:
         with self._lock:
             out = {k: round(v * 1000, 1) for k, v in self._seconds.items()}
-        for stage in ("embed", "vector", "bm25", "retrieve"):
+        for stage in ("admit", "embed", "vector", "bm25", "retrieve"):
             out.setdefault(stage, 0.0)
         out["total"] = round(total_s * 1000, 1)
         out["corpora"] = corpora
@@ -2282,6 +2282,10 @@ class VecgrepService:
         queued = time.monotonic()
         with self.locks.read(corpus.name, timeout=self._search_admission_timeout()):
             waited = time.monotonic() - queued
+            if timer is not None:
+                # Time spent queued behind an indexer's write lock: the gap
+                # between `retrieve` and the stage sums when a corpus is busy.
+                timer.add("admit", waited)
             if waited >= SLOW_ADMISSION_S:
                 logger.warning(
                     "corpus %s took %.1fs to admit a search", corpus.name, waited

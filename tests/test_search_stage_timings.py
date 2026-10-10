@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 
-STAGES = {"embed", "vector", "bm25", "retrieve", "total"}
+STAGES = {"admit", "embed", "vector", "bm25", "retrieve", "total"}
 
 
 def _index(svc, make_doc, name, corpus):
@@ -63,3 +63,20 @@ def test_per_request_http_client_logging_is_quiet() -> None:
     """httpx logs every qdrant call at INFO: ~18k journal lines per 6 h."""
     from vecgrep.backend import main  # noqa: F401 -- importing applies the level
     assert logging.getLogger("httpx").level >= logging.WARNING
+
+
+def test_time_queued_behind_a_write_lock_is_reported_as_admit(svc, make_doc, monkeypatch) -> None:
+    import contextlib
+    import time as _time
+    _index(svc, make_doc, "a.md", "notes")
+    real_read = svc.locks.read
+
+    @contextlib.contextmanager
+    def slow_read(name, timeout=None):
+        _time.sleep(0.05)
+        with real_read(name, timeout=timeout):
+            yield
+
+    monkeypatch.setattr(svc.locks, "read", slow_read)
+    t = svc.search_with_diagnostics("alpha", corpus_name="notes").timings_ms
+    assert t["admit"] >= 50
