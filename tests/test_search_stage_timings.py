@@ -49,6 +49,25 @@ def test_rerank_time_is_reported_only_when_the_reranker_ran(svc, make_doc, monke
     assert t["rerank"] >= 0
 
 
+def test_waiting_for_the_reranker_is_its_own_stage(svc, make_doc, monkeypatch) -> None:
+    """After a restart the readiness wait can take up to RERANK_WAIT_S; it must
+    show up as a stage rather than as unexplained time inside `total`."""
+    import time
+
+    _index(svc, make_doc, "a.md", "notes")
+    assert "rerank_wait" not in svc.search_with_diagnostics("alpha", corpus_name="notes").timings_ms
+
+    def slow_not_ready(model=None):
+        time.sleep(0.05)
+        return False
+
+    monkeypatch.setattr(svc, "_rerank_ready", slow_not_ready)
+    t = svc.search_with_diagnostics("alpha", corpus_name="notes", rerank=True).timings_ms
+    assert t["rerank_wait"] >= 40
+    assert "rerank" not in t
+    assert t["total"] >= t["rerank_wait"]
+
+
 def test_the_rest_search_response_carries_the_timings(svc, make_doc, monkeypatch) -> None:
     from vecgrep.backend.api import routes
     from vecgrep.backend.api.schemas import SearchRequest

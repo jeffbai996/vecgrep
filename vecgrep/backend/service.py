@@ -1331,7 +1331,13 @@ class VecgrepService:
         # through to the plain path costs accuracy on one search; blocking
         # costs the server.
         reranked = False
-        if rerank and self._rerank_ready(rerank_model):
+        ready = False
+        if rerank:
+            # Right after a restart this waits up to RERANK_WAIT_S for the
+            # model; timed apart so `total` still adds up from its stages.
+            with timer.measure("rerank_wait"):
+                ready = self._rerank_ready(rerank_model)
+        if ready:
             try:
                 with timer.measure("rerank"):
                     results = self._apply_rerank(
