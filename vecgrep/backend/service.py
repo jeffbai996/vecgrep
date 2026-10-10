@@ -1113,11 +1113,15 @@ class VecgrepService:
     def _searchable_corpora(self) -> list[Corpus]:
         """Corpora an unscoped search fans out over.
 
-        Skips names matching settings.cross_corpus_exclude (fnmatch). Never
-        applied to an explicitly named corpus -- see search().
+        Skips hidden corpora (settings.cross_corpus_exclude) and real corpora
+        kept out of the default fan-out (settings.unscoped_exclude), both as
+        fnmatch patterns. Never applied to an explicitly named corpus -- see
+        search().
         """
+        unscoped = list(getattr(self.settings, "unscoped_exclude", None) or [])
         return [c for c in self.registry.list()
-                if not self.is_hidden_corpus(c.name)]
+                if not self.is_hidden_corpus(c.name)
+                and not any(fnmatch.fnmatch(c.name, pat) for pat in unscoped)]
 
     def is_hidden_corpus(self, name: str) -> bool:
         """Is this corpus a build artifact rather than one someone curates?

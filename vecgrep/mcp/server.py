@@ -204,8 +204,8 @@ def _fanout_chunk_count(svc, args: dict) -> int:
 
     Mirrors service.search_with_diagnostics's scope resolution: an explicit
     `corpora` list is searched as given, and an omitted scope resolves to
-    _searchable_corpora() — the registry minus cross_corpus_exclude, so an
-    eval-* build copy never inflates the estimate. Falls back to list_corpora()
+    _searchable_corpora() — the registry minus cross_corpus_exclude and
+    unscoped_exclude, so a corpus the fan-out skips never inflates the estimate. Falls back to list_corpora()
     for service objects that predate the helper (and for the API dict mirror).
     """
     names = args.get("corpora")

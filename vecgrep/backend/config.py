@@ -73,6 +73,7 @@ EDITABLE_FIELDS = {
     "backup_destination",
     "backup_retention",
     "cross_corpus_exclude",
+    "unscoped_exclude",
     "search_fanout_workers",
 }
 SECRET_FIELDS = {
@@ -184,6 +185,12 @@ class Settings:
     # and doubles the fan-out cost. Naming a corpus explicitly always reaches
     # it, so the eval harness can still query its own build.
     cross_corpus_exclude: list[str] = field(default_factory=lambda: ["eval-*"])
+    # Real corpora a bare query leaves out, as fnmatch patterns. Unlike
+    # cross_corpus_exclude these are not hidden from any list: they are large
+    # corpora (source code, terminal transcripts) whose volume crowds curated
+    # corpora out of the reranked pool and supplies most false positives on
+    # queries with no answer. Naming one still searches it.
+    unscoped_exclude: list[str] = field(default_factory=list)
     # Process-wide corpus-search worker bound shared by REST/MCP requests using
     # the same settings generation. The fan-out was serial, so latency was the
     # SUM of per-corpus cost: measured 16.3s across 8 corpora where the slowest
