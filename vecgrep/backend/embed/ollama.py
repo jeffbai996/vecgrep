@@ -130,7 +130,7 @@ class OllamaBackend(EmbedBackend):
             window = texts[i : i + _MAX_BATCH]
             rows = self._embed_overflow(window) if bulk else None
             if rows is None:
-                rows = self._embed_batch(window)
+                rows = self._embed_batch(window, route="primary" if bulk else None)
             if rows is None:
                 rows = [self._embed_one_resilient(t) for t in window]
             out.extend(rows)
@@ -147,23 +147,38 @@ class OllamaBackend(EmbedBackend):
         """
         if self._overflow_client is None or self._clock() < self._overflow_benched_until:
             return None
+        data, rows, reason = None, None, ""
         try:
             r = self._overflow_client.post(
                 f"{self.overflow_url}/api/embed",
                 json=self._request_payload(texts),
             )
-            data = r.json() if r.status_code == 200 else None
-            if isinstance(data, dict):
-                record(data, model=self.model)
-            rows = data.get("embeddings") if isinstance(data, dict) else None
-        except (httpx.HTTPError, ValueError, AttributeError):
-            rows = None
+            if r.status_code == 200:
+                data = r.json()
+                rows = data.get("embeddings") if isinstance(data, dict) else None
+                if not isinstance(data, dict):
+                    reason = "bad_response"
+            else:
+                # The overflow host's gate answers 503 while its GPU is in use
+                # for something else; that is a refusal, not an outage.
+                reason = "refused" if r.status_code == 503 else f"http_{r.status_code}"
+        except httpx.TimeoutException:
+            reason = "timeout"
+        except httpx.ConnectError:
+            reason = "unreachable"
+        except httpx.HTTPError:
+            reason = "error"
+        except (ValueError, AttributeError):
+            reason = "bad_response"
         if (
             isinstance(rows, list)
             and len(rows) == len(texts)
             and all(_is_finite_vector(v) for v in rows)
         ):
+            record(data, model=self.model, route="overflow")
             return rows
+        record(data if isinstance(data, dict) else {}, model=self.model, route="overflow",
+               outcome="fallback", reason=reason or "bad_vectors")
         self._overflow_benched_until = self._clock() + self.overflow_cooldown_s
         logger.info(
             "Overflow embed endpoint %s did not answer cleanly; using the primary "
@@ -171,7 +186,7 @@ class OllamaBackend(EmbedBackend):
         )
         return None
 
-    def _embed_batch(self, texts: list[str]) -> list[list[float]] | None:
+    def _embed_batch(self, texts: list[str], route: str | None = None) -> list[list[float]] | None:
         """One request for the whole window. None means "use the slow path".
 
         Anything short of a clean, correctly-sized, all-finite answer returns
@@ -202,7 +217,7 @@ class OllamaBackend(EmbedBackend):
             return None
         try:
             data = r.json()
-            record(data, model=self.model)
+            record(data, model=self.model, route=route)
             rows = data.get("embeddings")
         except ValueError:
             return None
