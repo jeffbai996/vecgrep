@@ -475,10 +475,31 @@ def test_protected_resource_metadata_stays_public_over_non_loopback_client(oauth
 def test_public_oauth_offers_private_tailnet_approval(oauth_client):
     cfg_mod.get_settings().oauth_tailnet_approval_url = "https://example.com:8444/oauth/unlock"
     target = "/authorize?client_id=client&state=keep-me"
-    page = oauth_client.get("/oauth/unlock", params={"next": target})
+    page = oauth_client.get("/oauth/unlock", params={"next": target, "method": "code"})
     assert "Approve with Tailscale" in page.text
     assert "https://example.com:8444/oauth/unlock?next=" in page.text
     assert "Use approval code" in page.text
+
+
+def test_public_unlock_redirects_to_one_private_consent_screen(oauth_client):
+    from urllib.parse import parse_qs, urlsplit
+
+    cfg_mod.get_settings().oauth_tailnet_approval_url = "https://example.com:8444/oauth/unlock"
+    target = "/authorize?client_id=client&state=keep-me"
+    page = oauth_client.get("/oauth/unlock", params={"next": target}, follow_redirects=False)
+    assert page.status_code == 303
+    destination = urlsplit(page.headers["location"])
+    assert destination.netloc == "example.com:8444"
+    assert parse_qs(destination.query)["next"] == [target]
+    assert page.headers["cache-control"] == "no-store"
+    assert APPROVAL_COOKIE not in page.cookies
+
+
+def test_unverified_private_browser_gets_code_fallback_without_redirect_loop(oauth_client):
+    cfg_mod.get_settings().oauth_tailnet_approval_url = "https://example.com:10000/oauth/unlock"
+    page = oauth_client.get("/oauth/unlock", follow_redirects=False)
+    assert page.status_code == 200
+    assert 'name="token"' in page.text
 
 
 def test_private_approval_posts_proof_to_public_origin(oauth_client):

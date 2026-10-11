@@ -451,12 +451,26 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
             return response
 
         @app.get("/oauth/unlock", response_class=HTMLResponse)
-        async def oauth_unlock(request: Request, next: str = "/authorize") -> HTMLResponse:
+        async def oauth_unlock(request: Request, next: str = "/authorize", method: str = ""):
             target = safe_authorize_target(next)
+            login = verified_tailnet_login(request.scope)
+            private_url = _gs().oauth_tailnet_approval_url
+            if private_url and not login and method != "code":
+                from urllib.parse import urlencode, urlsplit
+
+                # Moving to the identity-bearing listener is routing, not
+                # consent. Ask once there, after the identity is verified.
+                private = urlsplit(private_url)
+                if request.url.netloc != private.netloc:
+                    return RedirectResponse(
+                        private_url + "?" + urlencode({"next": target}),
+                        status_code=303,
+                        headers={"Cache-Control": "no-store"},
+                    )
             return _unlock_form(
                 target,
                 ctx=await _unlock_context(target),
-                tailnet_login=verified_tailnet_login(request.scope),
+                tailnet_login=login,
             )
 
         @app.post("/oauth/unlock")

@@ -33,7 +33,7 @@ VECGREP_MCP_ALLOWED_ORIGINS=https://app.example
 # 3. Point the client at https://<your-public-host>/mcp and connect.
 #    claude.ai: Settings → Connectors → Add custom connector → paste the URL.
 #    It discovers the auth server, registers itself, and opens a browser prompt.
-#    Verified Tailscale Serve sessions get one-click approval; other sessions
+#    Browsers go directly to Tailscale Serve for one approval; other sessions
 #    use the owner approval code. There is no client ID to pre-provision.
 ```
 
