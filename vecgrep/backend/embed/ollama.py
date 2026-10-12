@@ -43,9 +43,15 @@ def _is_too_long(body: str) -> bool:
     return "exceeds the context length" in b or "input length" in b
 
 
-def _is_finite_vector(vec: list[float]) -> bool:
-    """True only if every component is a finite number (no NaN/inf)."""
-    return bool(vec) and all(math.isfinite(x) for x in vec)
+def _is_finite_vector(vec: object) -> bool:
+    """True only for a non-empty list of finite numbers (no NaN/inf).
+
+    The vector comes straight from a JSON response, so a malformed row (a
+    number, a string, nulls, booleans) is refused here instead of raising
+    TypeError outside the paths that fall back on a bad answer."""
+    return (isinstance(vec, list) and bool(vec)
+            and all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+                    for x in vec))
 
 
 def _transport_reason(e: httpx.HTTPError) -> str:

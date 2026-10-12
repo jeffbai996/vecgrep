@@ -100,6 +100,11 @@ def test_unreachable_overflow_falls_back_to_primary() -> None:
     lambda req: httpx.Response(200, json={"embeddings": [[float("nan")] * DIM] * 2}),
     lambda req: httpx.Response(200, text="not json"),
     lambda req: httpx.Response(500, text="unsupported value: NaN"),
+    # Malformed rows must fall back too, not raise TypeError out of the batch.
+    lambda req: httpx.Response(200, json={"embeddings": [1, 1]}),
+    lambda req: httpx.Response(200, json={"embeddings": ["ab", "cd"]}),
+    lambda req: httpx.Response(200, json={"embeddings": [[None] * DIM, [None] * DIM]}),
+    lambda req: httpx.Response(200, json={"embeddings": [[True] * DIM, [True] * DIM]}),
 ])
 def test_any_unclean_overflow_answer_uses_primary(bad) -> None:
     b, _ = _backend(bad)

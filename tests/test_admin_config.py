@@ -133,3 +133,12 @@ def test_admin_patch_reports_restart_and_model_warning(vg_home: Path, monkeypatc
     )
     assert body["restart_required"] is True
     assert any("existing corpora" in warning for warning in body["warnings"])
+
+
+def test_the_overflow_url_is_editable_and_clears_like_the_fallback(vg_home: Path) -> None:
+    assert "ollama_overflow_url" in config.EDITABLE_FIELDS
+    config.update_config({"ollama_overflow_url": "http://overflow:11434"})
+    assert config.load_settings().ollama_overflow_url == "http://overflow:11434"
+    updated = config.update_config({"ollama_overflow_url": ""})
+    assert updated["ollama_overflow_url"] is None
+    assert config.load_settings().ollama_overflow_url is None

@@ -51,6 +51,7 @@ ENV_MAP = {
 EDITABLE_FIELDS = {
     "ollama_url",
     "ollama_fallback_url",
+    "ollama_overflow_url",
     "ollama_num_batch",
     "embed_model",
     "openai_embed_model",
@@ -515,8 +516,8 @@ def update_config(
         } and not isinstance(value, bool):
             raise ConfigError(f"{name} must be a boolean")
         if name in {
-            "ollama_fallback_url", "ollama_num_batch", "oauth_issuer_url", "oauth_tailnet_approval_url",
-            "qdrant_url", "backup_destination",
+            "ollama_fallback_url", "ollama_overflow_url", "ollama_num_batch", "oauth_issuer_url",
+            "oauth_tailnet_approval_url", "qdrant_url", "backup_destination",
         } and value == "":
             value = None
         setattr(candidate, name, value)
@@ -525,8 +526,8 @@ def update_config(
     raw = _load_json(current.config_file)
     raw.update(updates)
     for nullable in (
-        "ollama_fallback_url", "ollama_num_batch", "oauth_issuer_url", "oauth_tailnet_approval_url",
-        "qdrant_url", "backup_destination",
+        "ollama_fallback_url", "ollama_overflow_url", "ollama_num_batch", "oauth_issuer_url",
+        "oauth_tailnet_approval_url", "qdrant_url", "backup_destination",
     ):
         if raw.get(nullable) == "":
             raw[nullable] = None
