@@ -15,6 +15,7 @@ class IndexResponse(BaseModel):
     docs: int
     chunks: int
     skipped: int = 0
+    failed: list[str] = []     # "<source_id>: <error>" per document the chunker raised on
 
 
 class SearchRequest(BaseModel):

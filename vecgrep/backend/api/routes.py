@@ -209,9 +209,11 @@ def delete_source(name: str, id: str) -> dict:
 @router.post("/index", response_model=IndexResponse)
 def index(req: IndexRequest) -> IndexResponse:
     svc = _service()
+    failed: list[str] = []
     try:
         docs, chunks, skipped = svc.index(
-            req.source, req.corpus, req.chunker, force=req.force, include=req.include
+            req.source, req.corpus, req.chunker, force=req.force, include=req.include,
+            failed=failed,
         )
     except AdapterError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -219,7 +221,7 @@ def index(req: IndexRequest) -> IndexResponse:
         raise HTTPException(status_code=503, detail=str(e))
     except CorpusError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return IndexResponse(docs=docs, chunks=chunks, skipped=skipped)
+    return IndexResponse(docs=docs, chunks=chunks, skipped=skipped, failed=failed)
 
 
 def _hit_out(r) -> SearchHit:

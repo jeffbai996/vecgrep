@@ -316,25 +316,30 @@ def index(
     Incremental by default: if a source's content hash matches the last
     index, it's skipped. Pass --force to re-embed unconditionally.
     """
-    def _format(out: dict | tuple) -> str:
+    def _format(out: dict | tuple, failed: list[str] | None = None) -> str:
         if isinstance(out, tuple):
             docs, chunks, skipped = out
         else:
             docs, chunks, skipped = out["docs"], out["chunks"], out.get("skipped", 0)
+            failed = out.get("failed") or []
         msg = f"indexed: {docs} doc(s), {chunks} chunk(s)"
         if skipped:
             msg += f", {skipped} unchanged (skipped)"
+        if failed:
+            msg += f"\n{len(failed)} source(s) could not be chunked and were skipped:"
+            msg += "".join(f"\n  {line}" for line in failed)
         return msg
 
     if ephemeral:
         # Ephemeral runs don't go through the API server (which has its own
         # persistent state). They're always in-process.
         svc = VecgrepService(ephemeral=True)
+        failed: list[str] = []
         try:
-            out = svc.index(source, corpus, chunker, force=force, include=include)
+            out = svc.index(source, corpus, chunker, force=force, include=include, failed=failed)
         except (AdapterError, CorpusError, EmbedBackendError) as e:
             raise click.ClickException(str(e))
-        click.echo(_format(out).replace("indexed", "indexed (ephemeral)"))
+        click.echo(_format(out, failed).replace("indexed", "indexed (ephemeral)", 1))
         return
 
     if _api_alive():
@@ -346,11 +351,12 @@ def index(
         return
 
     svc = VecgrepService(ephemeral=False)
+    failed = []
     try:
-        out = svc.index(source, corpus, chunker, force=force, include=include)
+        out = svc.index(source, corpus, chunker, force=force, include=include, failed=failed)
     except (AdapterError, CorpusError, EmbedBackendError) as e:
         raise click.ClickException(str(e))
-    click.echo(_format(out))
+    click.echo(_format(out, failed))
 
 
 @cli.command()

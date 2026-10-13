@@ -877,6 +877,7 @@ class VecgrepService:
         update_registry: bool = True,
         replace_existing: bool = True,
         resume_source_counts: dict[str, int] | None = None,
+        failed: list[str] | None = None,
     ) -> tuple[int, int, int]:
         """Index a source into a corpus. Returns (docs, chunks, skipped).
 
@@ -888,6 +889,11 @@ class VecgrepService:
 
         `include` is an optional filename glob applied when `source` is a
         directory — e.g. `*.md` to index only markdown and skip sibling raws.
+
+        A document the chunker raises on is skipped and logged, and appended
+        to `failed` as "<source_id>: <error>" when a list is passed. A list
+        rather than a fourth return value, so (docs, chunks, skipped) callers
+        keep working.
         """
         if corpus_name == EPHEMERAL_NAME and not self.ephemeral:
             raise CorpusError("Use --ephemeral to write to the ephemeral corpus.")
@@ -989,8 +995,18 @@ class VecgrepService:
                     continue
                 # doc-aware chunkers (code_symbol) see the source path for
                 # language detection; text-only chunkers keep the old contract
-                chunks = (chunker.chunk_doc(doc)
-                          if hasattr(chunker, "chunk_doc") else chunker.chunk(doc.text))
+                try:
+                    chunks = (chunker.chunk_doc(doc)
+                              if hasattr(chunker, "chunk_doc") else chunker.chunk(doc.text))
+                except Exception as exc:
+                    # One file the chunker cannot handle must not cost every
+                    # file after it. Its previous chunks and recorded hash stay,
+                    # so the next run tries it again.
+                    reason = f"{type(exc).__name__}: {exc}"
+                    logger.warning("chunking failed, source skipped: %s: %s", doc.source_id, reason)
+                    if failed is not None:
+                        failed.append(f"{doc.source_id}: {reason}")
+                    continue
                 if not chunks:
                     continue
 

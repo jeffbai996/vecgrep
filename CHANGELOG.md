@@ -57,6 +57,9 @@ patch = fixes). The version is a single source of truth in
   and corpus exploration views.
 
 ### Fixed
+- A document the chunker raises on is skipped and logged instead of ending the
+  index run. `/api/index` lists it in `failed`, `vecgrep index` prints it, and
+  the next run tries it again.
 - Length-aware reranker batches separate long outliers without shortening inputs.
   Scores are restored to candidate order; performance gains require uncached
   measurements rather than HTTP samples containing score-cache hits.
