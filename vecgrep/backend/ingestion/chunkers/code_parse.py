@@ -39,26 +39,53 @@ class ParsedFile:
     parser: str
     symbols: list[Symbol]                # top level, in source order
     imports: dict[str, str]              # bound name -> module
+    lines: list[str]                     # the text split where the parser counts a line, endings kept
 
 
 def parse_symbols(text: str, language: str | None, path: str = "") -> ParsedFile | None:
-    if language == "python":
-        return _parse_python(text)
-    if language == "typescript":
-        return _parse_typescript(text, tsx=path.lower().endswith(".tsx"))
+    # Both walks recurse once or twice per nesting level, so generated or
+    # bundled code nests past Python's recursion limit. That is a file the
+    # parser cannot handle, not a reason to stop indexing.
+    try:
+        if language == "python":
+            return _parse_python(text)
+        if language == "typescript":
+            return _parse_typescript(text, tsx=path.lower().endswith(".tsx"))
+    except RecursionError:
+        return None
     return None
+
+
+def _split_lines(text: str, newline: re.Pattern) -> list[str]:
+    """Lines with their endings, broken only where `newline` matches.
+
+    str.splitlines() also breaks on \\x0b, \\x0c, \\x1c-\\x1e, \\x85, U+2028 and
+    U+2029. A parser that does not count those would have its line numbers
+    index the wrong entries, so each parser's lines are split its own way.
+    """
+    lines: list[str] = []
+    start = 0
+    for match in newline.finditer(text):
+        lines.append(text[start:match.end()])
+        start = match.end()
+    if start < len(text):
+        lines.append(text[start:])
+    return lines
 
 
 # ── Python ────────────────────────────────────────────────────────────────
 _PY_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+_PY_NEWLINE = re.compile(r"\r\n|\r|\n")
 
 
 def _parse_python(text: str) -> ParsedFile | None:
     try:
-        tree = ast.parse(text)
+        # ast.parse drops a byte order mark from bytes but refuses one in a
+        # str. It is one character on line 1, so line numbers do not move.
+        tree = ast.parse(text[1:] if text.startswith("﻿") else text)
     except (SyntaxError, ValueError):
         return None
-    lines = text.splitlines()
+    lines = _split_lines(text, _PY_NEWLINE)
     imports: dict[str, str] = {}
     for node in tree.body:
         if isinstance(node, ast.Import):
@@ -69,7 +96,7 @@ def _parse_python(text: str) -> ParsedFile | None:
                 if alias.name != "*":
                     imports[alias.asname or alias.name] = f"{node.module or ''}.{alias.name}".lstrip(".")
     symbols = [_py_symbol(n, None, lines, in_class=False) for n in tree.body if isinstance(n, _PY_DEFS)]
-    return ParsedFile("python", "ast", symbols, imports)
+    return ParsedFile("python", "ast", symbols, imports, lines)
 
 
 def _py_symbol(node, parent: str | None, lines: list[str], *, in_class: bool) -> Symbol:
@@ -100,7 +127,7 @@ def _py_nested(node, parent: str, lines: list[str], *, in_class: bool) -> list[S
 
 def _leading_comments(lines: list[str], start: int, marker: str) -> int:
     """Extend a 1-based start line up over comment lines directly above it."""
-    while start > 1 and lines[start - 2].strip().startswith(marker):
+    while start > 1 and lines[start - 2].lstrip("﻿").strip().startswith(marker):
         start -= 1
     return start
 
@@ -126,6 +153,7 @@ _TS_FUNC = {"function_declaration", "generator_function_declaration"}
 _TS_SIMPLE = {"interface_declaration": "interface", "enum_declaration": "enum",
               "type_alias_declaration": "type"}
 _TS_FUNC_VALUE = {"arrow_function", "function_expression", "function", "generator_function"}
+_TS_NEWLINE = re.compile(r"\n")      # tree-sitter rows advance on \n alone
 
 
 def _parse_typescript(text: str, *, tsx: bool) -> ParsedFile | None:
@@ -136,7 +164,7 @@ def _parse_typescript(text: str, *, tsx: bool) -> ParsedFile | None:
     tree = parser.parse(source)
     if tree.root_node.has_error:
         return None
-    lines = text.splitlines()
+    lines = _split_lines(text, _TS_NEWLINE)
     imports: dict[str, str] = {}
     symbols: list[Symbol] = []
     for node in tree.root_node.named_children:
@@ -144,7 +172,7 @@ def _parse_typescript(text: str, *, tsx: bool) -> ParsedFile | None:
             imports.update(_ts_imports(node))
             continue
         symbols.extend(_ts_symbols(node, None, lines, exported=False))
-    return ParsedFile("typescript", "tree-sitter", symbols, imports)
+    return ParsedFile("typescript", "tree-sitter", symbols, imports, lines)
 
 
 def _name(node) -> str | None:

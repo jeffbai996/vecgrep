@@ -13,8 +13,12 @@ patch = fixes). The version is a single source of truth in
   member and nested class gets its own chunk with `qualname`, `kind`, `parent`
   and `lines` metadata; functions stay whole and list what they define in
   `nested`. Decorators and a comment block directly above a definition belong
-  to it. A file that fails to parse is chunked by the old heuristic and marked
-  `parse_error`, so no content is lost. Other languages are unchanged.
+  to it. A file that fails to parse, or nests deeper than the recursion limit,
+  is chunked by the old heuristic and marked `parse_error`, so no content is
+  lost. Line spans follow each parser's own line breaks, so a form feed,
+  U+2028 or bare carriage return no longer cuts a symbol short, and a Python
+  file that starts with a byte order mark parses. Other languages are
+  unchanged.
 - Chunks may carry a `search_text` (embedded and BM25-indexed in place of the
   chunk text): code chunks put their qualified name and the imports they use in
   front of the code. The stored `text` and its offsets still address the source

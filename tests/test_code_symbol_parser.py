@@ -121,3 +121,64 @@ def test_typescript_without_tree_sitter_uses_the_heuristic(monkeypatch):
     monkeypatch.setattr(code_symbol, "parser_available", lambda language: language == "python")
     _, chunks = chunks_for("api.ts")
     assert chunks and not any("qualname" in c.meta for c in chunks)
+
+
+def chunks_of(path, text):
+    return CodeSymbolChunker().chunk_doc(SimpleNamespace(text=text, source_id=f"/repo/{path}"))
+
+
+def assert_offsets_exact(text, chunks):
+    for c in chunks:
+        assert text[c.start:c.end] == c.text
+
+
+def test_python_nested_past_the_recursion_limit_falls_back_instead_of_raising():
+    text = "def total():\n    return " + " + ".join(["1"] * 3000) + "\n"
+    chunks = chunks_of("generated.py", text)
+    assert chunks and all(c.meta.get("parse_error") for c in chunks)
+    assert_offsets_exact(text, chunks)
+
+
+@requires_tree_sitter
+def test_typescript_nested_past_the_recursion_limit_falls_back_instead_of_raising():
+    depth = 2000
+    text = "".join(f"const f{i} = () => {{\n" for i in range(depth)) + "};\n" * depth
+    chunks = chunks_of("bundle.ts", text)
+    assert chunks and all(c.meta.get("parse_error") for c in chunks)
+    assert_offsets_exact(text, chunks)
+
+
+# str.splitlines() also breaks on \x0b, \x0c, \x1c-\x1e, \x85, U+2028 and
+# U+2029. ast breaks only on \r\n, \r and \n; tree-sitter only on \n.
+@pytest.mark.parametrize("path, text", [
+    ("form_feed.py", "x = 1\n\x0cdef f():\n    return 42\n"),
+    ("separator.py", 'x = "a b"\ndef f():\n    return 42\n'),
+    ("bare_cr.py", "x = 1\rdef f():\r    return 42\r"),
+])
+def test_python_symbol_lines_follow_the_parsers_line_breaks(path, text):
+    chunks = chunks_of(path, text)
+    f = by_qualname(chunks)["f"]
+    assert f.meta["lines"] == "2-3"
+    assert f.text.lstrip("\x0c").startswith("def f():") and "return 42" in f.text
+    assert_offsets_exact(text, chunks)
+
+
+@requires_tree_sitter
+@pytest.mark.parametrize("path, text, body", [
+    ("separator.ts", 'const s = "a b";\nfunction f() {\n  return 1;\n}\n', "  return 1;\n}\n"),
+    ("form_feed.ts", "const a = 1;\n\x0cfunction f() {\n  return 1;\n}\n", "  return 1;\n}\n"),
+    ("bare_cr.ts", "function f() {\r  return 1;\r}\r\nclass A {\r m() {}\r}\r", "return 1;\r}\r\n"),
+])
+def test_typescript_symbol_lines_follow_the_parsers_line_breaks(path, text, body):
+    chunks = chunks_of(path, text)
+    assert by_qualname(chunks)["f"].text.endswith(body)
+    assert_offsets_exact(text, chunks)
+
+
+def test_a_byte_order_mark_does_not_stop_python_parsing():
+    text = "﻿import helper\n\ndef f():\n    return helper.go()\n"
+    chunks = chunks_of("bom.py", text)
+    assert not any(c.meta.get("parse_error") for c in chunks)
+    assert by_qualname(chunks)["f"].meta["lines"] == "3-4"
+    assert chunks[0].start == 0 and chunks[0].text.startswith("﻿")
+    assert_offsets_exact(text, chunks)

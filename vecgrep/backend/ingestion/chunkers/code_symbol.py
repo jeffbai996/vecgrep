@@ -131,7 +131,8 @@ class CodeSymbolChunker(Chunker):
 
     # ── parser-backed chunks ─────────────────────────────────────────
     def _parsed_chunks(self, text: str, parsed: ParsedFile) -> list[Chunk]:
-        lines = text.splitlines(keepends=True)
+        # The parser's own line split: its line numbers index this table.
+        lines = parsed.lines
         offsets = [0]
         for line in lines:
             offsets.append(offsets[-1] + len(line))
