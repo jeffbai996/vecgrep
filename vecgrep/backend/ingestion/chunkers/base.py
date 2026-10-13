@@ -17,6 +17,10 @@ class Chunk:
     # code_symbol chunker's symbol name + language). Merged into the stored
     # payload metadata at index time.
     meta: dict | None = None
+    # Optional text to embed and index for BM25 instead of `text`, such as a
+    # code chunk with its qualified name and imports in front. `text`, `start`
+    # and `end` still address the source exactly.
+    search_text: str | None = None
 
 
 class Chunker(ABC):

@@ -412,7 +412,8 @@ class BackupManager:
                         service.bm25.upsert(
                             name,
                             [str(point.id) for point in points],
-                            [(point.payload or {}).get("text", "") for point in points],
+                            [(point.payload or {}).get("search_text") or (point.payload or {}).get("text", "")
+                             for point in points],
                             [point.payload or {} for point in points],
                         )
                     if offset is None:

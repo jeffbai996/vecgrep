@@ -8,11 +8,19 @@ function, class, top-level block — and never splits a symbol across chunks
 internal blank lines rather than embedded as one oversized blob, and every
 piece keeps the symbol's name in its metadata).
 
-Boundary detection is heuristic, not a parser: a column-0 line matching the
-language's declaration shapes starts a new block, and everything indented or
-brace-nested below it belongs to that block. Formatted code satisfies this;
-minified or deliberately perverse code degrades to coarse blocks, which is
-still strictly better than mid-function windows.
+Python and TypeScript are parsed (`code_parse.py`): every class member and
+nested class gets its own chunk, and each chunk names its qualified name
+(`Outer.Inner.method`), kind, parent and exact line span. Functions stay whole;
+the definitions nested inside them are listed in the chunk's metadata. The
+chunk's `search_text` puts that name and the imports it uses in front of the
+code, so embedding and BM25 can find `Outer.run` while the stored text and its
+offsets stay exactly the source. TypeScript needs the optional tree-sitter
+dependency; a file that fails to parse is chunked by the heuristic below, so
+no content is lost, and its chunks say `parse_error`.
+
+Other languages, and Python or TypeScript without a parser, use the heuristic:
+a column-0 line matching the language's declaration shapes starts a new block,
+and everything indented or brace-nested below it belongs to that block.
 
 Each chunk carries `meta = {"symbol": ..., "language": ...}` so a search hit
 names what it found and where it lives without the reader opening the file.
@@ -26,6 +34,7 @@ from __future__ import annotations
 import re
 
 from .base import Chunk, Chunker
+from .code_parse import ParsedFile, Symbol, parse_symbols, used_imports
 
 LANG_BY_EXT = {
     ".py": "python", ".pyi": "python",
@@ -82,12 +91,104 @@ def language_for_path(path: str) -> str | None:
     return LANG_BY_EXT.get(path[dot:].lower()) if dot != -1 else None
 
 
+PARSED_LANGUAGES = ("python", "typescript")
+
+
+def parser_available(language: str | None) -> bool:
+    if language == "python":
+        return True
+    if language == "typescript":
+        try:
+            import tree_sitter  # noqa: F401
+            import tree_sitter_typescript  # noqa: F401
+        except ImportError:
+            return False
+        return True
+    return False
+
+
 class CodeSymbolChunker(Chunker):
+    def __init__(self, parse: bool = True) -> None:
+        # parse=False keeps the heuristic everywhere (benchmarks, comparisons).
+        self.parse = parse
+
     def chunk(self, text: str) -> list[Chunk]:
         return self._chunk(text, language=None)
 
     def chunk_doc(self, doc) -> list[Chunk]:  # duck-typed: needs .source_id/.text
-        return self._chunk(doc.text, language=language_for_path(doc.source_id or ""))
+        path = doc.source_id or ""
+        language = language_for_path(path)
+        if self.parse and language in PARSED_LANGUAGES and parser_available(language):
+            parsed = parse_symbols(doc.text, language, path)
+            if parsed is None:
+                chunks = self._chunk(doc.text, language)
+                for c in chunks:
+                    c.meta = {**(c.meta or {}), "parse_error": True}
+                return chunks
+            if parsed.symbols:
+                return self._parsed_chunks(doc.text, parsed)
+        return self._chunk(doc.text, language)
+
+    # ── parser-backed chunks ─────────────────────────────────────────
+    def _parsed_chunks(self, text: str, parsed: ParsedFile) -> list[Chunk]:
+        lines = text.splitlines(keepends=True)
+        offsets = [0]
+        for line in lines:
+            offsets.append(offsets[-1] + len(line))
+        segments: list[tuple[int, int, Symbol | None, str]] = []   # (first, last+1, symbol, role)
+
+        def place(sym: Symbol, first: int, stop: int) -> None:
+            members = sorted(sym.children, key=lambda m: m.start_line) if sym.kind == "class" else []
+            if not members:
+                segments.append((first, stop, sym, "symbol"))
+                return
+            head_stop = members[0].start_line - 1
+            if head_stop > first:
+                segments.append((first, head_stop, sym, "header"))
+            for i, member in enumerate(members):
+                member_stop = members[i + 1].start_line - 1 if i + 1 < len(members) else stop
+                place(member, max(member.start_line - 1, first), member_stop)
+
+        cursor = 0
+        for sym in sorted(parsed.symbols, key=lambda s: s.start_line):
+            first = max(sym.start_line - 1, cursor)
+            if first > cursor:
+                segments.append((cursor, first, None, "module"))
+            place(sym, first, sym.end_line)
+            cursor = max(cursor, sym.end_line)
+        if cursor < len(lines):
+            segments.append((cursor, len(lines), None, "module"))
+
+        chunks: list[Chunk] = []
+        for first, stop, sym, role in segments:
+            body = "".join(lines[first:stop])
+            if not body.strip():
+                continue
+            meta: dict = {"language": parsed.language, "parser": parsed.parser}
+            header = ""
+            if sym is not None:
+                nested = [d.qualname for d in sym.walk() if d is not sym] if role == "symbol" else []
+                meta.update({"symbol": sym.name, "qualname": sym.qualname, "kind": sym.kind,
+                             "lines": f"{sym.start_line}-{sym.end_line}"})
+                if sym.parent:
+                    meta["parent"] = sym.parent
+                if role == "header":
+                    meta["role"] = "header"
+                if nested:
+                    meta["nested"] = ", ".join(nested)
+                header = f"{sym.kind} {sym.qualname} (lines {sym.start_line}-{sym.end_line})\n"
+                if nested:
+                    header += f"defines: {', '.join(nested)}\n"
+            uses = used_imports(body, parsed.imports)
+            if uses:
+                header += "imports: " + ", ".join(f"{n} from {parsed.imports[n]}" for n in uses) + "\n"
+            for piece_off, piece in self._bounded(body):
+                start = offsets[first] + piece_off
+                chunks.append(Chunk(
+                    text=piece, start=start, end=start + len(piece), index=len(chunks),
+                    meta=dict(meta), search_text=(header + piece) if header else None,
+                ))
+        return chunks
 
     # ── mechanics ────────────────────────────────────────────────────
     def _chunk(self, text: str, language: str | None) -> list[Chunk]:
