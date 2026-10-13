@@ -18,7 +18,8 @@ patch = fixes). The version is a single source of truth in
 - Chunks may carry a `search_text` (embedded and BM25-indexed in place of the
   chunk text): code chunks put their qualified name and the imports they use in
   front of the code. The stored `text` and its offsets still address the source
-  exactly; BM25 rebuilds read `search_text` back from the payload.
+  exactly. BM25 rebuilds and mutation-journal recovery index `search_text` read
+  back from the payload, and a cache sweep keeps the vectors embedded from it.
 - An identifier-shaped query (`run`, `Importer.run`, `Stats.run`) ranks and pins
   chunks whose metadata defines that symbol above chunks that only mention it.
   It reorders candidates already retrieved and is a no-op for prose queries and

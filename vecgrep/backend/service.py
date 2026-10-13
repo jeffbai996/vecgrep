@@ -631,7 +631,9 @@ class VecgrepService:
                 # Qdrant is the canonical source payload store. The scroll
                 # omits source_text, which would otherwise repeat the same
                 # large transcript once per chunk in both RAM and the pickle.
-                yield point_id, text, payload
+                # Index what ingest indexed: a code chunk's search_text carries
+                # its qualified name, which the display text does not.
+                yield point_id, payload.get("search_text") or text, payload
 
         rebuilt = self.bm25.replace(corpus.name, records())
         if rebuilt != expected:
@@ -721,7 +723,8 @@ class VecgrepService:
                 )
             compact_payload = dict(payload)
             compact_payload.pop("source_text", None)
-            bm25_records.append((point_id, text, compact_payload))
+            # Same document ingest indexed: search_text when the chunk has one.
+            bm25_records.append((point_id, payload.get("search_text") or text, compact_payload))
             sid = payload.get("source_id")
             if isinstance(sid, str):
                 # Dedup the source list on its own. Gating it on the hash
@@ -2519,19 +2522,22 @@ class VecgrepService:
 
     # ----- embed cache housekeeping ------------------------------------------------
     def cache_keep_set(self) -> dict[str, set[str]]:
-        """{embed identity: shas of every chunk text a REGISTERED corpus holds}.
+        """{embed identity: shas of every text a REGISTERED corpus embedded}.
 
         Derived from qdrant, not from the cache, so it is exactly the set a
         re-index of any live corpus would ask the cache for. Identity is the
-        backend's `name:model`, which is what CachedBackend keys rows under."""
+        backend's `name:model`, which is what CachedBackend keys rows under.
+        Ingest embeds a chunk's search_text when it has one, so that is the
+        text hashed here; hashing `text` let a sweep delete every code-chunk
+        vector."""
         keep: dict[str, set[str]] = {}
         for c in self.registry.list():
             ident = f"{c.embed_backend}:{c.embed_model}"
             shas = keep.setdefault(ident, set())
             for _pid, payload in self.store.iter_payloads(
-                _collection_for(c.name), include_payload_fields={"text"}
+                _collection_for(c.name), include_payload_fields={"text", "search_text"}
             ):
-                text = payload.get("text")
+                text = payload.get("search_text") or payload.get("text")
                 if text:
                     shas.add(EmbedCache._sha(text))
         return keep
