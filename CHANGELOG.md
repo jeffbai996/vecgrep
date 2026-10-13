@@ -8,6 +8,22 @@ patch = fixes). The version is a single source of truth in
 ## [Unreleased]
 
 ### Added
+- Parser-backed `code_symbol` chunks for Python (standard library `ast`) and
+  TypeScript/TSX (tree-sitter, the optional `vecgrep[code]` extra). Each class
+  member and nested class gets its own chunk with `qualname`, `kind`, `parent`
+  and `lines` metadata; functions stay whole and list what they define in
+  `nested`. Decorators and a comment block directly above a definition belong
+  to it. A file that fails to parse is chunked by the old heuristic and marked
+  `parse_error`, so no content is lost. Other languages are unchanged.
+- Chunks may carry a `search_text` (embedded and BM25-indexed in place of the
+  chunk text): code chunks put their qualified name and the imports they use in
+  front of the code. The stored `text` and its offsets still address the source
+  exactly; BM25 rebuilds read `search_text` back from the payload.
+- An identifier-shaped query (`run`, `Importer.run`, `Stats.run`) ranks and pins
+  chunks whose metadata defines that symbol above chunks that only mention it.
+  It reorders candidates already retrieved and is a no-op for prose queries and
+  for chunks without symbol metadata. `scripts/bench_code_symbols.py` compares
+  the heuristic with the parser on fixtures in `tests/fixtures/code_symbols`.
 - Bulk embedding batches record their route in the local receipt database's
   `embed_route` table: `primary` or `overflow`, `ok` or `fallback`, and a
   short reason code for a fallback (`refused`, `timeout`, `unreachable`,

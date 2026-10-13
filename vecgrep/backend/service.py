@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, get_args
 
+from .symbol_query import definition_boost, pin_definitions, symbol_query
 from .config import Settings, get_settings
 from .embed import EmbedBackend, EmbedBackendError, get_embed_backend
 from .aliases import aliases_path, expand_query, load_alias_map_cached
@@ -1036,7 +1037,7 @@ class VecgrepService:
                     self.bm25.delete_by_source(corpus_name, doc.source_id)
 
                 ids = [_chunk_id(corpus_name, doc.source_id, c.index) for c in chunks]
-                vectors = backend.embed([c.text for c in chunks])
+                vectors = backend.embed([c.search_text or c.text for c in chunks])
                 payloads = [
                     {
                         "corpus": corpus_name,
@@ -1053,6 +1054,9 @@ class VecgrepService:
                         "chunk_start": c.start,
                         "chunk_end": c.end,
                         "text": c.text,
+                        # What was embedded and BM25-indexed when it differs from text;
+                        # BM25 rebuilds read it back so names stay searchable.
+                        **({"search_text": c.search_text} if c.search_text else {}),
                         # Doc metadata + per-chunk enrichment (speakers, bot flag,
                         # content shapes) — powers speaker:/bot:/has: filters.
                         "metadata": {**doc.metadata, **chunk_enrichment(c.text),
@@ -1072,7 +1076,7 @@ class VecgrepService:
                     record["phase"] = "qdrant_done"
                     self.mutations.write(record)
                 if update_bm25:
-                    self.bm25.upsert(corpus_name, ids, [c.text for c in chunks], payloads)
+                    self.bm25.upsert(corpus_name, ids, [c.search_text or c.text for c in chunks], payloads)
                     # Browse metadata lands once per pass (see the flush after
                     # the loop): a commit per source rewrote the catalog for
                     # every document of every incremental pass.
@@ -1325,6 +1329,11 @@ class VecgrepService:
         # so adjacent sentence-windows and repeated messages (bot alert spam,
         # quoted replies) don't each eat a top_k slot.
         results = dedup_near_duplicates(results)
+        # An identifier-shaped query ("Importer.run") asks for a definition:
+        # keep the pre-selection pool so the definition is pinned first even
+        # when reranking or diversity selection would have left it out.
+        symbol = symbol_query(query)
+        definition_pool = list(results) if symbol else []
 
         # A cold cross-encoder takes minutes to load and would hold a sync
         # threadpool slot for all of it (see rerank.RERANK_WAIT_S). Falling
@@ -1374,6 +1383,7 @@ class VecgrepService:
             # lexical-only label and `explain` are how a consumer reconciles
             # a lower % ranked higher; the ordering itself must be the score.
             results.sort(key=lambda r: r.score, reverse=True)
+        results = pin_definitions(results, definition_pool, symbol, top_k)
         if corpus_name is None or plural_scope:
             counts = {name: 0 for name in successful}
             for result in results:
@@ -2427,11 +2437,13 @@ class VecgrepService:
         now = time.time()
         decay_by_id: dict[str, float] = {}
         decayed: dict[str, float] = {}
+        # A definition of the queried symbol outranks lines that only mention it.
+        symbol = symbol_query(query)
         for cid, raw in rrf.items():
             ts = payloads_by_id.get(cid, {}).get("doc_timestamp")
             factor = _recency_factor(ts, half_life, now)
             decay_by_id[cid] = factor
-            decayed[cid] = raw * factor * weight
+            decayed[cid] = raw * factor * weight * definition_boost(symbol, payloads_by_id.get(cid, {}))
 
         fused = sorted(decayed.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
         missing = [
@@ -3501,7 +3513,7 @@ class VecgrepService:
                 for pt in points:
                     pl = pt.payload or {}
                     ids.append(str(pt.id))
-                    texts.append(pl.get("text", ""))
+                    texts.append(pl.get("search_text") or pl.get("text", ""))
                     payloads.append(pl)
                 if offset is None:
                     break
