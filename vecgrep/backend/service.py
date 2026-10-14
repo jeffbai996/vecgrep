@@ -991,7 +991,7 @@ class VecgrepService:
         with _bulk:
             explorer_pending: list[dict] = []
             for doc in docs:
-                if "visual_state" in doc.metadata:
+                if doc.metadata.get("visual_state") in {"pending", "running", "done"}:
                     from .ingestion.visual_queue import VisualQueue
                     VisualQueue.default().target(Path(doc.source_id), corpus_name, chunker_name)
                 doc_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()

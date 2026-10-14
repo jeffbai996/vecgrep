@@ -8,6 +8,7 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
+from typing import Iterator
 
 PROCESSOR_VERSION = 'visual-v1'
 MAX_SOURCE_BYTES = 200 * 1024 * 1024
@@ -50,7 +51,7 @@ class VisualQueue:
         return cls(get_settings().home / 'visual' / 'queue.db')
 
     @contextmanager
-    def connect(self):
+    def connect(self) -> Iterator[sqlite3.Connection]:
         db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
         try:

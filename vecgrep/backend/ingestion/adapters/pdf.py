@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import Iterator
 
@@ -54,8 +55,12 @@ class PDFAdapter(Adapter):
                 }
                 if enrichment:
                     full += "\n\n[visual enrichment]\n" + enrichment
-            except (OSError, ValueError) as exc:
-                raise AdapterError(f"Could not queue PDF {source}: {exc}") from exc
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                # Enrichment is optional: its limits or queue failure must not
+                # make already-extracted native text unavailable.
+                if not full.strip():
+                    raise AdapterError(f"Could not queue PDF {source}: {exc}") from exc
+                visual_metadata = {"visual_state": "unavailable", "visual_error": str(exc)}
         if not full.strip() and not visual_metadata:
             raise AdapterError(
                 f"PDF {source} produced no extractable text. "

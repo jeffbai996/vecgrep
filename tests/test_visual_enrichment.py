@@ -224,3 +224,21 @@ def test_reverting_file_content_requeues_cancelled_work(tmp_path):
     source.write_bytes(b'first')
     assert q.enqueue(source) == original
     assert q.claim()['key'] == original
+
+
+def test_visual_size_limit_does_not_block_native_pdf_text(tmp_path, monkeypatch):
+    from vecgrep.backend.ingestion.adapters import pdf
+    from vecgrep.backend.ingestion import visual_queue
+    monkeypatch.setenv('VECGREP_VISUAL_ENABLED', '1')
+    class Page:
+        def extract_text(self): return 'Native report text'
+    class Reader:
+        pages = [Page()]
+    monkeypatch.setattr(pdf, 'PdfReader', lambda _: Reader())
+    monkeypatch.setattr(visual_queue, 'MAX_SOURCE_BYTES', 2)
+    source = tmp_path / 'report.pdf'
+    source.write_bytes(b'larger than the limit')
+    doc = next(pdf.PDFAdapter().load(str(source)))
+    assert 'Native report text' in doc.text
+    assert doc.metadata['visual_state'] == 'unavailable'
+    assert 'limit' in doc.metadata['visual_error']
