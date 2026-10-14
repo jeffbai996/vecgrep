@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class IndexRequest(BaseModel):
+    visual_key: str | None = None
     source: str = Field(..., description="File path, directory, or URL")
     corpus: str
     chunker: str = "sentence_window"

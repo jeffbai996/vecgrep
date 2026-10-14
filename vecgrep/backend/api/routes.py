@@ -213,7 +213,7 @@ def index(req: IndexRequest) -> IndexResponse:
     try:
         docs, chunks, skipped = svc.index(
             req.source, req.corpus, req.chunker, force=req.force, include=req.include,
-            failed=failed,
+            failed=failed, visual_key=req.visual_key,
         )
     except AdapterError as e:
         raise HTTPException(status_code=400, detail=str(e))

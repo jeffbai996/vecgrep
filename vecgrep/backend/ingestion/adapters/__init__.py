@@ -7,6 +7,7 @@ from .claude_export import ClaudeExportAdapter
 from .chatgpt_export import ChatGPTExportAdapter
 from .discord_jsonl import DiscordJSONLAdapter
 from .pdf import PDFAdapter
+from .image import ImageAdapter
 from .url import URLAdapter
 from .markdown import MarkdownAdapter
 from .plaintext import PlaintextAdapter
@@ -21,6 +22,7 @@ __all__ = [
     "PlaintextAdapter",
     "MarkdownAdapter",
     "PDFAdapter",
+    "ImageAdapter",
     "URLAdapter",
     "DiscordJSONLAdapter",
     "ClaudeExportAdapter",

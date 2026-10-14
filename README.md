@@ -607,3 +607,11 @@ care; the tooling itself doesn't require them.
 ## License
 
 MIT
+
+### Optional PDF and image enrichment
+
+With the optional `visual` extra, PDFs and local images can queue for CPU OCR
+and visual descriptions without blocking search. Native PDF text indexes
+immediately; completed enrichment uses the corpus's existing text embedding
+model. A remote vision worker is optional and can go offline without removing
+cached results. See [setup, limits and recovery](docs/VISUAL_ENRICHMENT.md).

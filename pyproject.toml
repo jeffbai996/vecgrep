@@ -48,6 +48,7 @@ watch = ["watchfiles>=1.2.0"]
 # Parser-backed TypeScript symbols for the code_symbol chunker; Python needs nothing.
 code = ["tree-sitter>=0.25", "tree-sitter-typescript>=0.23"]
 dev = ["pytest>=8.0"]
+visual = ["Pillow>=11.0", "pypdfium2>=4.30"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

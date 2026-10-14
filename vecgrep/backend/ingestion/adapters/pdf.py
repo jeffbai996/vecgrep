@@ -8,6 +8,7 @@ from pypdf.errors import PdfReadError
 
 from .base import Adapter, AdapterError, Document
 from .registry import register_adapter
+from ..visual_queue import VisualQueue, enabled
 
 
 @register_adapter
@@ -41,7 +42,21 @@ class PDFAdapter(Adapter):
                 parts.append(f"[page {i}]\n{txt.strip()}")
 
         full = "\n\n".join(parts)
-        if not full.strip():
+        visual_metadata = {}
+        if enabled():
+            try:
+                queue = VisualQueue.default()
+                enrichment = queue.result(p)
+                visual_metadata = {
+                    "visual_state": queue.state(p),
+                    "visual_original": str(p.resolve()),
+                    "visual_generated": bool(enrichment),
+                }
+                if enrichment:
+                    full += "\n\n[visual enrichment]\n" + enrichment
+            except (OSError, ValueError) as exc:
+                raise AdapterError(f"Could not queue PDF {source}: {exc}") from exc
+        if not full.strip() and not visual_metadata:
             raise AdapterError(
                 f"PDF {source} produced no extractable text. "
                 "It may be scanned/image-only — vecgrep does not OCR."
@@ -54,5 +69,6 @@ class PDFAdapter(Adapter):
                 "adapter": self.name,
                 "path": str(p.resolve()),
                 "pages": len(reader.pages),
+                **visual_metadata,
             },
         )

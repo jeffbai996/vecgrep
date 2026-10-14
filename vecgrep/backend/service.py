@@ -855,6 +855,12 @@ class VecgrepService:
         """Serialize one corpus mutation across every process and surface."""
         with self.locks.write(corpus_name):
             self._recover_corpus_locked(corpus_name)
+            visual_key = kwargs.pop("visual_key", None)
+            if visual_key is not None:
+                from .ingestion.visual_queue import VisualQueue
+                queue = VisualQueue(self.settings.home / "visual" / "queue.db")
+                if not queue.allows_delivery(source, corpus_name, visual_key):
+                    raise CorpusError("Visual delivery was cancelled or its source changed")
             return self._index_locked(
                 source,
                 corpus_name,
@@ -985,6 +991,9 @@ class VecgrepService:
         with _bulk:
             explorer_pending: list[dict] = []
             for doc in docs:
+                if "visual_state" in doc.metadata:
+                    from .ingestion.visual_queue import VisualQueue
+                    VisualQueue.default().target(Path(doc.source_id), corpus_name, chunker_name)
                 doc_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
                 matches_recorded_source = corpus.source_hashes.get(doc.source_id) == doc_hash
                 # Recovery still needs the chunk count below to verify that a
@@ -2605,6 +2614,7 @@ class VecgrepService:
     # ----- corpus management ----------------------------------------------------
     def delete_corpus(self, name: str) -> None:
         with self.locks.write(name):
+            self._cancel_visual_target(None, name)
             self._recover_corpus_locked(name)
             corpus = self.registry.get(name)
             self.mutations.write({
@@ -2741,8 +2751,15 @@ class VecgrepService:
             "window": window,
         }
 
+    def _cancel_visual_target(self, source: str | None, corpus: str) -> None:
+        queue_path = self.settings.home / "visual" / "queue.db"
+        if queue_path.exists():
+            from .ingestion.visual_queue import VisualQueue
+            VisualQueue(queue_path).cancel_target(source, corpus)
+
     def delete_source(self, corpus_name: str, source_id: str) -> None:
         with self.locks.write(corpus_name):
+            self._cancel_visual_target(source_id, corpus_name)
             self._recover_corpus_locked(corpus_name)
             corpus = self.registry.get(corpus_name)
             collection = _collection_for(corpus.name)
