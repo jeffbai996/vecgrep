@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from typing import Iterator
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -112,7 +113,8 @@ def test_owner_unlock_allows_authorize_flow(oauth_client):
         follow_redirects=False,
     )
     assert r.status_code == 303
-    assert r.headers["location"].startswith("/authorize?")
+    assert r.headers["location"].startswith("/oauth/continue?")
+    assert parse_qs(urlsplit(r.headers["location"]).query)["next"][0].startswith("/authorize?")
     cookie = r.cookies.get(APPROVAL_COOKIE)
     assert cookie
     assert cookie != TEST_APPROVAL
@@ -133,6 +135,42 @@ def test_owner_unlock_trims_pasted_whitespace(oauth_client):
     )
     assert r.status_code == 303
     assert APPROVAL_COOKIE in r.cookies
+
+
+def test_approved_browser_ends_form_submission_before_callback_navigation(oauth_client):
+    target = "/authorize?client_id=client&state=opaque%2Bstate%26value"
+    approved = oauth_client.post(
+        "/oauth/unlock",
+        data={FORM_TOKEN_FIELD: TEST_APPROVAL, "next": target},
+        follow_redirects=False,
+    )
+    assert approved.status_code == 303
+    location = approved.headers["location"]
+    assert urlsplit(location).path == "/oauth/continue"
+    assert parse_qs(urlsplit(location).query)["next"] == [target]
+    continuation = oauth_client.get(location, follow_redirects=False)
+    assert continuation.status_code == 200
+    assert 'http-equiv="refresh"' in continuation.text
+    assert 'url=/authorize?client_id=client&amp;state=opaque%2Bstate%26value' in continuation.text
+    assert '<script' not in continuation.text
+    assert continuation.headers["cache-control"] == "no-store"
+    assert continuation.headers["referrer-policy"] == "no-referrer"
+    assert "form-action 'none'" in continuation.headers["content-security-policy"]
+
+
+def test_callback_continuation_requires_browser_approval(oauth_client):
+    rejected = oauth_client.get("/oauth/continue", params={"next": "/authorize"})
+    assert rejected.status_code == 403
+    assert 'http-equiv="refresh"' not in rejected.text
+
+
+@pytest.mark.parametrize("target", ["https://evil.example/callback", "//evil.example/callback", "/api/search"])
+def test_callback_continuation_cannot_redirect_to_arbitrary_destinations(oauth_client, target):
+    oauth_client.post("/oauth/unlock", data={FORM_TOKEN_FIELD: TEST_APPROVAL}, follow_redirects=False)
+    continuation = oauth_client.get("/oauth/continue", params={"next": target})
+    assert continuation.status_code == 200
+    assert 'content="0;url=/authorize"' in continuation.text
+    assert target not in continuation.text
 
 
 def test_owner_unlock_rejects_whitespace_only_token(oauth_client):
@@ -187,7 +225,7 @@ def test_verified_tailnet_owner_gets_csrf_bound_one_click_approval(oauth_client)
             follow_redirects=False,
         )
         assert approved.status_code == 303
-        assert approved.headers["location"] == target
+        assert parse_qs(urlsplit(approved.headers["location"]).query)["next"] == [target]
         assert APPROVAL_COOKIE in approved.cookies
 
 
@@ -234,7 +272,7 @@ def test_unlock_refuses_external_redirect(oauth_client):
         follow_redirects=False,
     )
     assert r.status_code == 303
-    assert r.headers["location"] == "/authorize"
+    assert parse_qs(urlsplit(r.headers["location"]).query)["next"] == ["/authorize"]
 
 
 def test_approved_owner_can_reach_real_authorize_handler(oauth_client):
@@ -521,7 +559,7 @@ def test_private_approval_posts_proof_to_public_origin(oauth_client):
                 "tailnet_login": "owner@example.test",
             }, headers={"Origin": "https://127.0.0.1:8765"}, follow_redirects=False)
             assert approved.status_code == 303
-            assert approved.headers["location"] == target
+            assert parse_qs(urlsplit(approved.headers["location"]).query)["next"] == [target]
             assert APPROVAL_COOKIE in approved.cookies
 
 
@@ -554,7 +592,7 @@ def test_repeated_tailnet_handoff_requires_existing_approval_and_bound_proof(oau
             repeated = public.post("/oauth/unlock", data=data, headers={"Origin": origin}, follow_redirects=False)
             assert repeated.status_code == (303 if change is None else 401)
             if change is None:
-                assert repeated.headers["location"] == target
+                assert parse_qs(urlsplit(repeated.headers["location"]).query)["next"] == [target]
 
 
 @pytest.mark.parametrize("change", ["origin", "target", "login", "cookie", "proof"])

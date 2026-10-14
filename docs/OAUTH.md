@@ -57,7 +57,7 @@ socket ports matching the settings; unknown ingress gets no network bypass.
 If OAuth or the MCP app is unavailable, public ingress fails closed.
 
 The TLS proxy must expose the configured MCP path plus `/authorize`, `/token`,
-`/register`, `/oauth/unlock`, `/.well-known/oauth-authorization-server`, and
+`/register`, `/oauth/unlock`, `/oauth/continue`, `/.well-known/oauth-authorization-server`, and
 the protected-resource metadata path advertised by discovery. Keep `/api/*`
 private. Secret/path-prefixed MCP URLs are supported: the advertised resource
 preserves the complete configured public path.

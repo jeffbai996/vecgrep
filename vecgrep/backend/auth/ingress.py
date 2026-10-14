@@ -33,7 +33,7 @@ class OAuthIngressMiddleware:
                 await PlainTextResponse("OAuth ingress unavailable", status_code=503)(scope, receive, send)
                 return
             path = scope.get("path", "")
-            if not (path in {"/mcp", "/authorize", "/token", "/register", "/oauth/unlock"}
+            if not (path in {"/mcp", "/authorize", "/token", "/register", "/oauth/unlock", "/oauth/continue"}
                     or path.startswith(("/mcp/", "/.well-known/"))):
                 await PlainTextResponse("Not found", status_code=404)(scope, receive, send)
                 return

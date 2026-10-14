@@ -550,7 +550,14 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
                     ctx=await _unlock_context(next_target),
                     tailnet_login=tailnet_login,
                 )
-            response = RedirectResponse(next_target, status_code=303)
+            # Finish the form navigation on our origin. Otherwise browsers
+            # apply its form-action policy to the client's callback redirects.
+            from urllib.parse import urlencode
+
+            response = RedirectResponse(
+                "/oauth/continue?" + urlencode({"next": next_target}),
+                status_code=303,
+            )
             response.set_cookie(
                 APPROVAL_COOKIE,
                 approval_cookie_value(expected),
@@ -569,6 +576,42 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
             )
             response.headers["Cache-Control"] = "no-store"
             return response
+
+        @app.get("/oauth/continue", response_class=HTMLResponse)
+        async def oauth_continue(request: Request, next: str = "/authorize") -> HTMLResponse:
+            secret = _gs().oauth_approval_token or ""
+            approved = bool(
+                secret
+                and hmac.compare_digest(
+                    request.cookies.get(APPROVAL_COOKIE, ""),
+                    approval_cookie_value(secret),
+                )
+            )
+            headers = {
+                "Cache-Control": "no-store",
+                "Referrer-Policy": "no-referrer",
+                "Content-Security-Policy": (
+                    "default-src 'none'; form-action 'none'; "
+                    "base-uri 'none'; frame-ancestors 'none'"
+                ),
+                "X-Content-Type-Options": "nosniff",
+            }
+            if not approved:
+                return HTMLResponse(
+                    "Approval required. Please restart the connection.",
+                    status_code=403,
+                    headers=headers,
+                )
+            target = html.escape(safe_authorize_target(next), quote=True)
+            return HTMLResponse(
+                '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                '<title>Continue connection</title>'
+                f'<meta http-equiv="refresh" content="0;url={target}">'
+                '</head><body>'
+                f'<a href="{target}">Continue connection</a>'
+                '</body></html>',
+                headers=headers,
+            )
 
     if FRONTEND_DIR.is_dir():
         app.mount(
