@@ -525,6 +525,38 @@ def test_private_approval_posts_proof_to_public_origin(oauth_client):
             assert APPROVAL_COOKIE in approved.cookies
 
 
+@pytest.mark.parametrize("change", [None, "approval_cookie", "proof", "target", "login", "origin"])
+def test_repeated_tailnet_handoff_requires_existing_approval_and_bound_proof(oauth_client, change):
+    settings = cfg_mod.get_settings()
+    settings.oauth_issuer_url = "https://127.0.0.1:8766/mcp"
+    settings.oauth_tailnet_approval_url = "https://127.0.0.1:8765/oauth/unlock"
+    target = "/authorize?client_id=client&state=keep-me"
+    with TestClient(create_app(), base_url="https://127.0.0.1:8765") as private:
+        page = private.get("/oauth/unlock", params={"next": target}, headers=TAILNET_HEADERS)
+        intent = re.search(r'name="tailnet_intent" value="([a-f0-9]+)"', page.text).group(1)
+        with TestClient(create_app(), base_url="https://127.0.0.1:8766") as public:
+            public.cookies.update(private.cookies)
+            data = {"next": target, "tailnet_intent": intent, "tailnet_login": "owner@example.test"}
+            origin = "https://127.0.0.1:8765"
+            approved = public.post("/oauth/unlock", data=data, headers={"Origin": origin}, follow_redirects=False)
+            assert approved.status_code == 303
+            assert TAILNET_INTENT_COOKIE not in public.cookies
+            if change == "approval_cookie":
+                public.cookies.delete(APPROVAL_COOKIE)
+            elif change == "proof":
+                data["tailnet_intent"] = "0" * 64
+            elif change == "target":
+                data["next"] = "/authorize?client_id=other"
+            elif change == "login":
+                data["tailnet_login"] = "other@example.test"
+            elif change == "origin":
+                origin = "https://evil.example"
+            repeated = public.post("/oauth/unlock", data=data, headers={"Origin": origin}, follow_redirects=False)
+            assert repeated.status_code == (303 if change is None else 401)
+            if change is None:
+                assert repeated.headers["location"] == target
+
+
 @pytest.mark.parametrize("change", ["origin", "target", "login", "cookie", "proof"])
 def test_public_handoff_rejects_unbound_or_forged_proof(oauth_client, change):
     settings = cfg_mod.get_settings()

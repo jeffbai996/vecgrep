@@ -517,12 +517,25 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
                 if approval_login
                 else ""
             )
+            # Browsers can resubmit the consent form after returning from a
+            # callback. The first submission consumes its intent cookie, but
+            # the approved browser still has authority. Keep checking the
+            # signed target, identity and origin on a repeated submission.
+            browser_approved = bool(
+                expected
+                and hmac.compare_digest(
+                    request.cookies.get(APPROVAL_COOKIE, ""),
+                    approval_cookie_value(expected),
+                )
+            )
             tailnet_approved = bool(
                 provided_intent
-                and cookie_intent
                 and expected_intent
                 and hmac.compare_digest(provided_intent, expected_intent)
-                and hmac.compare_digest(cookie_intent, expected_intent)
+                and (
+                    hmac.compare_digest(cookie_intent, expected_intent)
+                    or browser_approved
+                )
             )
             code_approved = bool(
                 provided and hmac.compare_digest(provided, expected.strip())
