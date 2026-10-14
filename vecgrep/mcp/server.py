@@ -1953,11 +1953,13 @@ def _oauth_client_reg():
     """Dynamic Client Registration (RFC 7591): claude.ai self-registers instead
     of needing a pre-shared client_id."""
     from mcp.server.auth.settings import ClientRegistrationOptions
-    from ..backend.auth.scopes import DEFAULT_SCOPES, VALID_SCOPES
+    from ..backend.auth.scopes import VALID_SCOPES
     return ClientRegistrationOptions(
         enabled=True,
         valid_scopes=list(VALID_SCOPES),
-        default_scopes=list(DEFAULT_SCOPES),
+        # Registration lists what a client may later ask the owner to approve;
+        # it grants nothing. Authorization still defaults to read-only.
+        default_scopes=list(VALID_SCOPES),
     )
 
 

@@ -374,6 +374,62 @@ def test_unlock_and_issuance_both_default_omitted_scope_to_read(oauth_client):
     assert "Propose changes" not in page.text
 
 
+@pytest.mark.parametrize(
+    "registered_scope, requested_scope, granted_scope",
+    [(None, "read propose", "read propose"), (None, None, "read"), ("read", "read propose", None)],
+)
+def test_registration_capabilities_are_separate_from_consented_token_scopes(
+    oauth_client: TestClient, registered_scope: str | None,
+    requested_scope: str | None, granted_scope: str | None,
+) -> None:
+    import base64
+    import hashlib
+    import secrets
+
+    metadata = {
+        "client_name": "Example client",
+        "redirect_uris": ["https://example.test/callback"],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "_".join(("client", "secret", "post")),
+    }
+    if registered_scope is not None:
+        metadata["scope"] = registered_scope
+    registration = oauth_client.post("/register", json=metadata)
+    assert registration.status_code == 201
+    client = registration.json()
+    verifier = secrets.token_urlsafe(32)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    params = {
+        "client_id": client["client_id"], "response_type": "code",
+        "redirect_uri": metadata["redirect_uris"][0],
+        "code_challenge": challenge, "code_challenge_method": "S256",
+        "state": "opaque+state",
+    }
+    if requested_scope is not None:
+        params["scope"] = requested_scope
+    unauthorized = oauth_client.get("/authorize", params=params, follow_redirects=False)
+    assert unauthorized.status_code == 303
+    assert unauthorized.headers["location"].startswith("/oauth/unlock?")
+    oauth_client.post("/oauth/unlock", data={FORM_TOKEN_FIELD: TEST_APPROVAL}, follow_redirects=False)
+    authorization = oauth_client.get("/authorize", params=params, follow_redirects=False)
+    assert authorization.status_code == 302
+    callback = parse_qs(urlsplit(authorization.headers["location"]).query)
+    assert callback["state"] == ["opaque+state"]
+    if granted_scope is None:
+        assert callback["error"] == ["invalid_scope"]
+        assert "code" not in callback
+        return
+    assert "error" not in callback
+    token = oauth_client.post("/token", data={
+        "grant_type": "authorization_code", "client_id": client["client_id"],
+        "client_secret": client["client_secret"], "code": callback["code"][0],
+        "redirect_uri": metadata["redirect_uris"][0], "code_verifier": verifier,
+    })
+    assert token.status_code == 200
+    assert token.json()["scope"] == granted_scope
+
+
 def test_metadata_advertises_public_clients(oauth_client):
     """claude.ai registers with token_endpoint_auth_method=none; the advertised
     methods must include it or a careful client never attempts /token."""

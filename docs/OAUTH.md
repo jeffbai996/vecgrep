@@ -37,6 +37,11 @@ VECGREP_MCP_ALLOWED_ORIGINS=https://app.example
 #    use the owner approval code. There is no client ID to pre-provision.
 ```
 
+Registration without a scope allows a client to request any supported scope
+later. It grants no access: owner approval and PKCE remain required. Explicit
+registration scopes stay restricted, and authorization without a scope still
+grants only `read`.
+
 Point every public TLS proxy route at `127.0.0.1:8766`, including
 authorization and unlock routes. Keep private Tailscale Serve and local
 clients on `VECGREP_API_PORT` (default `8765`). Public and private listeners
