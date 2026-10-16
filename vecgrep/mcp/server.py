@@ -1893,11 +1893,13 @@ _REGISTRATION_RATE_LIMIT = 30
 _REGISTRATION_RATE_WINDOW_S = 60
 
 
-def _shared_provider():
+def _shared_provider(oauth_issuer_url: str | None = None):
     global _PROVIDER
     if _PROVIDER is None:
         from ..backend.auth.provider import VecgrepOAuthProvider
-        _PROVIDER = VecgrepOAuthProvider()
+        _PROVIDER = VecgrepOAuthProvider(
+            resource=str(_oauth_resource(oauth_issuer_url)) if oauth_issuer_url else None,
+        )
     return _PROVIDER
 
 
@@ -1976,7 +1978,7 @@ def build_oauth_root_routes(oauth_issuer_url: str) -> list:
     issuer = _oauth_issuer(oauth_issuer_url)
     resource = _oauth_resource(oauth_issuer_url)
     routes = create_auth_routes(
-        provider=_shared_provider(),
+        provider=_shared_provider(oauth_issuer_url),
         issuer_url=issuer,
         client_registration_options=_oauth_client_reg(),
     )
@@ -2588,10 +2590,11 @@ def build_http_app(
         fmcp_kwargs["auth"] = AuthSettings(
             issuer_url=_oauth_issuer(oauth_issuer_url),
             resource_server_url=_oauth_resource(oauth_issuer_url),
+            validate_token_resource=True,
             required_scopes=["read"],
             client_registration_options=_oauth_client_reg(),
         )
-        fmcp_kwargs["auth_server_provider"] = _shared_provider()
+        fmcp_kwargs["auth_server_provider"] = _shared_provider(oauth_issuer_url)
 
     fmcp_kwargs["icons"] = _server_icons()
     fmcp = FastMCP("vecgrep", **fmcp_kwargs)

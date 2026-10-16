@@ -32,10 +32,12 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
     never a scope — it stays a human action off-protocol.
     """
 
-    def __init__(self, valid_scopes: list[str] | None = None) -> None:
+    def __init__(self, valid_scopes: list[str] | None = None,
+                 *, resource: str | None = None) -> None:
         import os
         # persisted when VECGREP_OAUTH_STATE_FILE is set (the service env does)
         self.store = TokenStore(path=os.environ.get("VECGREP_OAUTH_STATE_FILE", "").strip() or None)
+        self.resource = resource
         self.valid_scopes = list(VALID_SCOPES if valid_scopes is None else valid_scopes)
 
     @property
@@ -53,6 +55,8 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
     async def authorize(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
+        if self.resource and params.resource not in (None, self.resource):
+            raise AuthorizeError("invalid_target", "wrong OAuth resource")
         try:
             scopes = effective_scopes(
                 params.scopes,
@@ -65,7 +69,7 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
             scopes=scopes,
             code_challenge=params.code_challenge,
             redirect_uri=str(params.redirect_uri),
-            resource=params.resource,
+            resource=params.resource or self.resource,
         )
         # Redirect the resource owner's browser back to the client with the
         # code (+ state for CSRF). The SDK helper builds the query correctly.
@@ -89,7 +93,7 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
             from mcp.server.auth.errors import TokenError
             raise TokenError("invalid_grant", "authorization code invalid or already used")
         at = self.store.issue_access_token(client.client_id, ac.scopes, resource=ac.resource)
-        rt = self.store.issue_refresh_token(client.client_id, ac.scopes)
+        rt = self.store.issue_refresh_token(client.client_id, ac.scopes, resource=ac.resource)
         return _oauth_token(at, rt)
 
     # ----- refresh token -----
@@ -104,6 +108,11 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
+        resource = getattr(refresh_token, "resource", None)
+        if self.resource and resource != self.resource:
+            from mcp.server.auth.provider import TokenError
+
+            raise TokenError("invalid_grant", "refresh grant has no matching resource")
         # Reject before minting; filtering an invalid request must never renew
         # the original authority. Successor refresh grants stay narrowed too.
         granted = list(scopes or refresh_token.scopes)
@@ -115,11 +124,11 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
             from mcp.server.auth.provider import TokenError
 
             raise TokenError("invalid_scope", "unsupported requested scope")
-        at = self.store.issue_access_token(client.client_id, granted)
+        at = self.store.issue_access_token(client.client_id, granted, resource=resource)
         # Rotate-and-revoke so replaying an already-used refresh token cannot
         # mint a second access token.
         self.store.revoke(refresh_token.token)
-        rt = self.store.issue_refresh_token(client.client_id, granted)
+        rt = self.store.issue_refresh_token(client.client_id, granted, resource=resource)
         return _oauth_token(at, rt)
 
     # ----- access token (also the verify path the bearer middleware uses) -----

@@ -186,3 +186,20 @@ The `auth/` module has no vecgrep-specific logic — token store + provider
 lift onto any MCP server built on the Python SDK. Implement nothing yourself:
 subclass the provider, hand the SDK `issuer_url`, `resource_server_url` and
 client-registration options, and respect the three gotchas above.
+
+
+## Resource-bound tokens
+
+The public MCP gate validates `AccessToken.resource` against the exact configured
+MCP endpoint using MCP SDK 1.30 or newer. The authorization server defaults an
+omitted authorization resource to that endpoint and rejects another resource.
+Authorization codes, access tokens, and persisted refresh grants retain this
+binding; refresh rotation must not change the audience or widen scopes.
+
+Tokens issued before resource binding was enforced need care during rollout:
+unbound access tokens fail the public gate, and unbound refresh grants return
+`invalid_grant`. Such clients require a fresh owner-approved authorization flow.
+Do not assign an audience to old grants or edit token state to bypass this check.
+Existing access tokens with the correct resource remain valid until their normal
+expiry or revocation. The private listener and owner-approval boundaries are
+unchanged. This change does not alter token lifetimes.

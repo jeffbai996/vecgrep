@@ -214,3 +214,59 @@ async def test_shared_refresh_scope_contract(provider, case):
     access = await provider.load_access_token(result.access_token)
     successor = await provider.load_refresh_token(client, result.refresh_token)
     assert access.scopes == successor.scopes == case["granted"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("requested_resource", [None, "https://resource.example/mcp"])
+async def test_resource_binding_survives_exchange_refresh_and_reload(tmp_path, monkeypatch, requested_resource):
+    from vecgrep.backend.auth.store import TokenStore
+
+    resource = "https://resource.example/mcp"
+    path = str(tmp_path / "state.json")
+    monkeypatch.setenv("VECGREP_OAUTH_STATE_FILE", path)
+    provider = VecgrepOAuthProvider(resource=resource)
+    client = _client()
+    await provider.register_client(client)
+    await provider.authorize(client, AuthorizationParams(
+        state="s", scopes=["read"], code_challenge="challenge",
+        redirect_uri=str(client.redirect_uris[0]),
+        redirect_uri_provided_explicitly=True, resource=requested_resource,
+    ))
+    code = next(iter(provider.store._codes.values()))
+    assert code.resource == resource
+    pair = await provider.exchange_authorization_code(client, code)
+    provider.store = TokenStore(path=path)
+    refresh = await provider.load_refresh_token(client, pair.refresh_token)
+    assert refresh.resource == resource
+    successor = await provider.exchange_refresh_token(client, refresh, ["read"])
+    assert (await provider.load_access_token(successor.access_token)).resource == resource
+    assert (await provider.load_refresh_token(client, successor.refresh_token)).resource == resource
+    assert await provider.load_refresh_token(client, pair.refresh_token) is None
+
+
+@pytest.mark.anyio
+async def test_configured_provider_rejects_authorization_for_another_resource():
+    provider = VecgrepOAuthProvider(resource="https://resource.example/mcp")
+    with pytest.raises(AuthorizeError) as error:
+        await provider.authorize(_client(), AuthorizationParams(
+            state="s", scopes=["read"], code_challenge="challenge",
+            redirect_uri="https://claude.ai/api/mcp/auth_callback",
+            redirect_uri_provided_explicitly=True, resource="https://other.example/mcp",
+        ))
+    assert error.value.error == "invalid_target"
+    assert not provider.store._codes
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("resource", [None, "https://other.example/mcp"])
+async def test_refresh_cannot_upgrade_an_unbound_or_wrong_resource_grant(resource):
+    from mcp.server.auth.provider import TokenError
+
+    provider = VecgrepOAuthProvider(resource="https://resource.example/mcp")
+    client = _client()
+    refresh = provider.store.issue_refresh_token(client.client_id, ["read"], resource=resource)
+    with pytest.raises(TokenError) as error:
+        await provider.exchange_refresh_token(client, refresh, ["read"])
+    assert error.value.error == "invalid_grant"
+    assert not provider.store._access
+    assert await provider.load_refresh_token(client, refresh.token) is not None

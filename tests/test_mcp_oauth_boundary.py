@@ -46,6 +46,7 @@ def loopback_client(vg_home, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     monkeypatch.setenv("VECGREP_OAUTH_APPROVAL_TOKEN", TEST_APPROVAL)
     monkeypatch.setenv("VECGREP_API_TOKEN", "r" * 40)
     monkeypatch.setattr(cfg_mod, "_settings", None)
+    monkeypatch.setattr(mcp_server, "_PROVIDER", None)
     with TestClient(
         create_app(),
         base_url="http://127.0.0.1:8765",
@@ -136,7 +137,7 @@ def test_valid_oauth_token_still_works_through_proxy(
     loopback_client: TestClient,
 ) -> None:
     access = mcp_server._shared_provider().store.issue_access_token(
-        "oauth-client", ["read"], ttl_s=60
+        "oauth-client", ["read"], ttl_s=60, resource=TEST_ISSUER
     )
     response = loopback_client.post(
         "/mcp",
@@ -160,6 +161,7 @@ def test_setting_false_gates_direct_loopback(vg_home, monkeypatch: pytest.Monkey
     monkeypatch.setenv("VECGREP_OAUTH_LOOPBACK_BYPASS", "false")
     monkeypatch.setenv("VECGREP_API_TOKEN", "r" * 40)
     monkeypatch.setattr(cfg_mod, "_settings", None)
+    monkeypatch.setattr(mcp_server, "_PROVIDER", None)
     with TestClient(
         create_app(),
         base_url="http://127.0.0.1:8765",
@@ -281,3 +283,75 @@ def test_loopback_bypass_config_defaults_true_and_parses_false(
     monkeypatch.setenv("VECGREP_OAUTH_TAILSCALE_IDENTITY_BYPASS", "false")
     assert cfg_mod.load_settings().oauth_loopback_bypass is False
     assert cfg_mod.load_settings().oauth_tailscale_identity_bypass is False
+
+
+@pytest.mark.parametrize("resource,expected", [
+    (TEST_ISSUER, 200),
+    ("https://other.example/mcp", 401),
+    (None, 401),
+])
+def test_public_mcp_enforces_token_resource(loopback_client, resource, expected):
+    access = mcp_server._shared_provider().store.issue_access_token(
+        "resource-client", ["read"], ttl_s=60, resource=resource,
+    )
+    for message in (INITIALIZE, {"jsonrpc": "2.0", "id": 2,
+                                 "method": "tools/list", "params": {}}):
+        response = loopback_client.post(
+            "/mcp", json=message,
+            headers=MCP_HEADERS | {"X-Forwarded-For": "203.0.113.10",
+                                   "Authorization": f"Bearer {access.token}"},
+        )
+        assert response.status_code == expected
+        if expected == 401:
+            assert 'error="invalid_token"' in response.headers["www-authenticate"]
+            assert access.token not in response.text
+
+
+@pytest.mark.parametrize("authorization_resource", [None, TEST_ISSUER])
+def test_http_code_and_refresh_tokens_initialize_and_list_tools(loopback_client, authorization_resource):
+    import base64
+    import hashlib
+    import anyio
+    from urllib.parse import parse_qs, urlsplit
+    from mcp.server.auth.provider import AuthorizationParams
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    provider = mcp_server._shared_provider()
+    client = OAuthClientInformationFull(
+        client_id="resource-flow", redirect_uris=["https://client.example/callback"],
+        grant_types=["authorization_code", "refresh_token"], response_types=["code"],
+        token_endpoint_auth_method="none", scope="read",
+    )
+    verifier = "v" * 64
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    anyio.run(provider.register_client, client)
+    params = AuthorizationParams(
+        state="s", scopes=["read"], code_challenge=challenge,
+        redirect_uri=str(client.redirect_uris[0]), redirect_uri_provided_explicitly=True,
+        resource=authorization_resource,
+    )
+    redirect = anyio.run(provider.authorize, client, params)
+    form = {
+        "grant_type": "authorization_code", "client_id": client.client_id,
+        "code": parse_qs(urlsplit(redirect).query)["code"][0],
+        "redirect_uri": str(client.redirect_uris[0]), "code_verifier": verifier,
+    }
+    response = loopback_client.post("/token", data=form)
+    assert response.status_code == 200
+    pair = response.json()
+    for grant in ("authorization_code", "refresh_token"):
+        if grant == "refresh_token":
+            response = loopback_client.post("/token", data={
+                "grant_type": grant, "client_id": client.client_id,
+                "refresh_token": pair["refresh_token"],
+            })
+            assert response.status_code == 200
+            pair = response.json()
+        for message in (INITIALIZE, {"jsonrpc": "2.0", "id": 2,
+                                     "method": "tools/list", "params": {}}):
+            accepted = loopback_client.post("/mcp", json=message, headers=MCP_HEADERS | {
+                "X-Forwarded-For": "203.0.113.10",
+                "Authorization": "Bearer " + pair["access_token"],
+            })
+            assert accepted.status_code == 200
+            assert "result" in accepted.json()

@@ -79,7 +79,9 @@ def test_public_listener_answers_get_on_post_only_oauth_routes_with_405(ingress_
 
 def test_public_and_private_share_tokens_and_private_access(ingress_app):
     with TestClient(Listener(ingress_app, 8766), base_url="https://example.com") as public:
-        token = server._shared_provider().store.issue_access_token("test-client", ["read"], ttl_s=60)
+        token = server._shared_provider().store.issue_access_token(
+            "test-client", ["read"], ttl_s=60, resource="https://example.com/mcp"
+        )
         accepted = public.post("/mcp", json=INITIALIZE,
                                headers=HEADERS | {"Authorization": f"Bearer {token.token}"})
         assert accepted.status_code == 200

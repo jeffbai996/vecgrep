@@ -45,6 +45,12 @@ def _new_secret(prefix: str) -> str:
     return f"{prefix}_{secrets.token_urlsafe(32)}"
 
 
+class ResourceRefreshToken(RefreshToken):
+    """Keep the audience with a refresh grant; the SDK base type omits it."""
+
+    resource: str | None = None
+
+
 class TokenStore:
     """Tokens and registered clients, optionally persisted to a 0600 JSON
     file so a service restart no longer revokes every connected client
@@ -78,7 +84,7 @@ class TokenStore:
             with open(self._path, encoding="utf-8") as fh:
                 raw = json.load(fh)
             self._access = {k: AccessToken.model_validate(v) for k, v in raw.get("access", {}).items()}
-            self._refresh = {k: RefreshToken.model_validate(v) for k, v in raw.get("refresh", {}).items()}
+            self._refresh = {k: ResourceRefreshToken.model_validate(v) for k, v in raw.get("refresh", {}).items()}
             self._clients = {k: OAuthClientInformationFull.model_validate(v) for k, v in raw.get("clients", {}).items()}
         except Exception:
             # a corrupt state file must not take the auth server down; it
@@ -173,12 +179,14 @@ class TokenStore:
 
     # ----- refresh tokens -----
     def issue_refresh_token(self, client_id: str, scopes: list[str],
-                            ttl_s: int = _REFRESH_TTL_S) -> RefreshToken:
-        rt = RefreshToken(
+                            ttl_s: int = _REFRESH_TTL_S,
+                            resource: str | None = None) -> RefreshToken:
+        rt = ResourceRefreshToken(
             token=_new_secret("vgrt"),
             client_id=client_id,
             scopes=list(scopes),
             expires_at=int(_now() + ttl_s),
+            resource=resource,
         )
         self._refresh[rt.token] = rt
         self._save()
