@@ -54,13 +54,17 @@ def test_wrong_code_is_refused_with_401(public):
     assert _attempt(client, "nope").status_code == 401
 
 
-def test_correct_code_below_the_limit_redirects_to_authorize(public):
+def test_correct_code_below_the_limit_redirects_through_approved_continuation(public):
     client, _ = public
     for _ in range(9):
         _attempt(client, "nope")
     ok = _attempt(client, CODE)
     assert ok.status_code == 303
-    assert ok.headers["location"] == "/authorize"
+    assert ok.headers["location"] == "/oauth/continue?next=%2Fauthorize"
+    continued = client.get(ok.headers["location"], follow_redirects=False)
+    assert continued.status_code == 200
+    assert 'content="0;url=/authorize"' in continued.text
+    assert "form-action 'none'" in continued.headers["content-security-policy"]
 
 
 def test_tenth_failure_in_a_minute_locks_that_client_even_for_the_right_code(public):
