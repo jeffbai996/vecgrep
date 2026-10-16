@@ -34,7 +34,7 @@ jobs:
           cache: npm
           cache-dependency-path: vecgrep/frontend/package-lock.json
       - name: Install Python dependencies
-        run: python -m pip install -e ".[dev,mcp]" build
+        run: python -m pip install -e ".[dev,mcp,visual]" build
       - name: Test
         run: python -m pytest tests
       - name: Build frontend
