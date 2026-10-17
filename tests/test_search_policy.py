@@ -146,3 +146,49 @@ def test_oversized_top_hit_does_not_displace_next_fitting_passage():
     data = json.loads(bounded_payload(original, 2000, {}))
     assert [r['chunk_id'] for r in data['full']] == ['full-1']
     assert data['stubs'][0]['chunk_id'] == 'full-0'
+
+
+def test_lookup_labels_weak_candidates_without_hiding_them(monkeypatch):
+    from types import SimpleNamespace
+    from vecgrep.mcp import server
+    class Service:
+        def search_with_diagnostics(self, *args, **kwargs):
+            return SimpleNamespace(results=[SimpleNamespace(matched_by=['vector'])], warnings=[])
+    monkeypatch.setattr(server, '_svc', lambda: Service())
+    monkeypatch.setattr(server, '_result_payload', lambda _: {
+        'chunk_id': 'weak', 'chunk': 'Unrelated example.', 'relevance_pct': 22.0})
+    result = json.loads(server._run_search({'query': 'unmatched question', 'profile': 'lookup'}))
+    assert result['evidence_status'] == 'insufficient_evidence'
+    assert result['hits'][0]['chunk_id'] == 'weak'
+    monkeypatch.setattr(server, '_result_payload', lambda _: {
+        'chunk_id': 'relevant', 'chunk': 'Relevant example.', 'relevance_pct': 85.0})
+    result = json.loads(server._run_search({'query': 'example', 'profile': 'lookup'}))
+    assert result['evidence_status'] == 'candidates_found'
+
+
+def test_http_and_stdio_advertise_same_search_controls_and_operation_hints(monkeypatch):
+    import asyncio
+    from mcp.types import ListToolsRequest
+    from mcp.server.fastmcp import FastMCP
+    from vecgrep.mcp.server import build_mcp_server, build_http_app
+    captured = []
+    original = FastMCP.streamable_http_app
+    def capture(self):
+        captured.append(self)
+        return original(self)
+    monkeypatch.setattr(FastMCP, 'streamable_http_app', capture)
+    build_http_app()
+    result = asyncio.run(build_mcp_server().request_handlers[ListToolsRequest](
+        ListToolsRequest(method='tools/list')))
+    stdio = {tool.name: tool for tool in result.root.tools}
+    http = {tool.name: tool for tool in asyncio.run(captured[0].list_tools())}
+    assert set(stdio) == set(http)
+    for name in stdio:
+        assert set(stdio[name].inputSchema['properties']) == set(http[name].inputSchema['properties']), name
+    for tools in (stdio, http):
+        for name, tool in tools.items():
+            assert tool.annotations is not None, name
+            assert tool.annotations.readOnlyHint == (name not in {
+                'write', 'edit', 'propose_write', 'propose_edit', 'propose_delete', 'propose_merge'})
+        assert tools['write'].annotations.idempotentHint is False
+        assert tools['propose_delete'].annotations.destructiveHint is False

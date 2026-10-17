@@ -69,3 +69,17 @@ def test_mcp_merge_surfaces_proposal_errors(home):
     out = json.loads(S._run_propose_merge("notes", ["notes-1"], "m"))
     assert "error" in out
     assert "at least two" in out["error"]
+
+
+def test_stdio_merge_dispatches_with_the_same_corpus_inference(monkeypatch):
+    import asyncio
+    from mcp.types import CallToolRequest, CallToolRequestParams
+    from vecgrep.mcp import server
+    calls = []
+    monkeypatch.setattr(server, '_run_propose_merge',
+                        lambda *args: calls.append(args) or '{"status":"pending"}')
+    request = CallToolRequest(method='tools/call', params=CallToolRequestParams(
+        name='propose_merge', arguments={'doc_ids': ['notes-1', 'notes-2'], 'content': 'Combined.'}))
+    result = asyncio.run(server.build_mcp_server().request_handlers[CallToolRequest](request))
+    assert not result.root.isError
+    assert calls == [('notes', ['notes-1', 'notes-2'], 'Combined.', None)]

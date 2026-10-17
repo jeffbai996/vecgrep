@@ -21,6 +21,16 @@ DEFAULT_RESPONSE_TOKEN_CEILING = 12000
 FULL_BUDGET_FRACTION = 0.7
 
 
+def lookup_evidence_status(hits: list[dict]) -> str:
+    """Label weak-only lookup results without hiding expansion candidates.
+
+    Forty is the existing related-result display boundary, not a probability
+    or proof of absence. Exploration retains the complete ranked result set.
+    """
+    return ('candidates_found' if any(hit.get('relevance_pct', 0) >= 40 for hit in hits)
+            else 'insufficient_evidence')
+
+
 def resolve_search(args: dict) -> dict:
     """Fill only omitted knobs; never infer or broaden scope."""
     profile = args.get('profile')

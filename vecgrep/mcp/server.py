@@ -91,6 +91,19 @@ def _require_mcp() -> None:
         ) from e
 
 
+def _tool_annotations(name: str) -> Any:
+    from mcp.types import ToolAnnotations
+
+    writes = {"write", "edit", "propose_write", "propose_edit",
+              "propose_delete", "propose_merge"}
+    return ToolAnnotations(
+        readOnlyHint=name not in writes,
+        destructiveHint=name == "edit",
+        idempotentHint=name not in writes,
+        openWorldHint=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Shared tool logic — called by both the stdio and HTTP handlers.
 # ---------------------------------------------------------------------------
@@ -288,7 +301,8 @@ def _should_budget(svc, args: dict) -> bool:
 
 
 def _run_search(args: dict) -> str:
-    from .search_policy import resolve_search, bounded_payload, DEFAULT_RESPONSE_TOKEN_CEILING
+    from .search_policy import (resolve_search, bounded_payload,
+                               DEFAULT_RESPONSE_TOKEN_CEILING, lookup_evidence_status)
 
     explicit_top_k = args.get("top_k") is not None
     args = resolve_search(args)
@@ -335,6 +349,8 @@ def _run_search(args: dict) -> str:
             ],
             "warnings": [asdict(w) for w in warnings],
         }
+        if args.get("profile") == "lookup":
+            payload["evidence_status"] = lookup_evidence_status(payload["full"] + payload["stubs"])
         return bounded_payload(
             payload, args.get("response_token_ceiling", DEFAULT_RESPONSE_TOKEN_CEILING),
             {"profile": args.get("profile"),
@@ -348,9 +364,12 @@ def _run_search(args: dict) -> str:
         args["query"], top_k=args.get("top_k"), **common
     )
     hits = [_result_payload(r) for r in outcome.results]
+    payload = {"hits": hits, "warnings": [asdict(w) for w in outcome.warnings]}
+    if args.get("profile") == "lookup":
+        payload["evidence_status"] = lookup_evidence_status(hits)
     if args.get("response_token_ceiling") is not None:
         return bounded_payload(
-            {"hits": hits, "warnings": [asdict(w) for w in outcome.warnings]},
+            payload,
             args["response_token_ceiling"],
             {"profile": args.get("profile"), "ignored_parameters": [],
              "rerank_requested": common["rerank"],
@@ -1284,7 +1303,7 @@ def build_mcp_server() -> Any:
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
-        return [
+        tools = [
             Tool(
                 name="search",
                 description=(
@@ -1340,6 +1359,10 @@ def build_mcp_server() -> Any:
                                 "chunks) and skip it on small ones; pass "
                                 "true/false to force."
                             ),
+                        },
+                        "include_superseded": {
+                            "type": "boolean", "default": False,
+                            "description": "Include replaced versions only when researching history.",
                         },
                         "filters": {
                             "type": "array",
@@ -1687,13 +1710,29 @@ def build_mcp_server() -> Any:
                 },
             ),
             Tool(
+                name="propose_merge",
+                description="Propose merging entries. Creates a pending proposal; confirmation is required.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "doc_ids": {"type": "array", "items": {"type": "string"}, "minItems": 2},
+                        "content": {"type": "string"},
+                        "corpus": {"type": "string"},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["doc_ids", "content"],
+                },
+            ),
+            Tool(
                 name="list_corpora",
                 description=(
                     "List vecgrep corpora with routing descriptions, use_for, "
                     "avoid_for, counts, and embedding models. Call this before "
                     "search when the right corpus scope is unclear."
                 ),
-                inputSchema={"type": "object", "properties": {}},
+                inputSchema={"type": "object", "properties": {
+                    "include_hidden": {"type": "boolean", "default": False},
+                }},
             ),
             Tool(
                 name="get_corpus",
@@ -1707,6 +1746,9 @@ def build_mcp_server() -> Any:
                 },
             ),
         ]
+        for tool in tools:
+            tool.annotations = _tool_annotations(tool.name)
+        return tools
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict | None) -> list[TextContent]:
@@ -1771,8 +1813,16 @@ def build_mcp_server() -> Any:
                     doc_id.rsplit("-", 1)[0] if "-" in doc_id else doc_id
                 )
                 text = _run_propose_delete(corpus, doc_id)
+            elif name == "propose_merge":
+                doc_ids = args.get("doc_ids") or []
+                corpus = args.get("corpus")
+                if corpus is None and doc_ids:
+                    first = doc_ids[0]
+                    corpus = first.rsplit("-", 1)[0] if "-" in first else first
+                text = _run_propose_merge(corpus or "", list(doc_ids),
+                                          args.get("content", ""), args.get("tags"))
             elif name == "list_corpora":
-                text = _run_list_corpora()
+                text = _run_list_corpora(include_hidden=bool(args.get("include_hidden", False)))
             elif name == "get_corpus":
                 text = _run_get_corpus(args.get("name", ""))
             else:
@@ -2618,7 +2668,8 @@ def build_http_app(
             "result is breadth mode: a few full hits plus a `stubs` list of "
             "one-line previews. The stubs are real results, not filler — scan "
             "them and call get_chunk on any that look right before concluding "
-            "something isn't there."
+            "something isn't there. Lookup reports evidence_status=insufficient_evidence "
+            "when only weak candidates remain; that is not proof of absence."
             " `relevance_pct` is the calibrated blended/reranked display score; "
             "`similarity_pct` is its legacy alias, not raw cosine. Inspect "
             "`scores.vector_cosine` when the vector signal itself matters."
@@ -2996,6 +3047,9 @@ def build_http_app(
             first = doc_ids[0]
             corpus = first.rsplit("-", 1)[0] if "-" in first else first
         return _run_propose_merge(corpus or "", list(doc_ids), content, tags)
+
+    for tool in fmcp._tool_manager.list_tools():
+        tool.annotations = _tool_annotations(tool.name)
 
     http_app = fmcp.streamable_http_app()
     if oauth_issuer_url:
