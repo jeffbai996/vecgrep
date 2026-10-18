@@ -16,21 +16,13 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 from contextlib import nullcontext
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
-from .proposal import Proposal, ProposalError, render_doc
-
-
-def _body_of(rendered: str) -> str:
-    """Extract the body below the YAML frontmatter of a rendered doc."""
-    fences = list(re.finditer(r"^---\r?$", rendered, flags=re.MULTILINE))
-    if len(fences) >= 2 and fences[0].start() == 0:
-        return rendered[fences[1].end():].strip()
-    return rendered.strip()
+from .proposal import Proposal, ProposalError, _body_of, render_doc
 
 
 def _writethrough_cmd(corpus: str) -> str | None:
@@ -338,6 +330,9 @@ def _confirm_locked(
     # Stamp the confirmer into the doc at WRITE time (it isn't known at propose
     # time) so the on-disk record carries who authorized it — audit provenance.
     final_meta = {**proposal.meta, "confirmed_by": confirmer}
+    if proposal.is_edit:
+        final_meta["edited_at"] = datetime.now(timezone.utc).isoformat(
+            timespec="seconds")
     try:
         rendered = render_doc(
             proposal.doc_id, _body_of(proposal.rendered), final_meta

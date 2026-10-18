@@ -156,6 +156,64 @@ def _validate_meta(meta: dict) -> None:
         raise ProposalError(f"source_kind must be one of {SOURCE_KINDS}")
 
 
+def _body_of(rendered: str) -> str:
+    """Extract the body below the YAML frontmatter of a rendered doc."""
+    fences = list(re.finditer(r"^---\r?$", rendered, flags=re.MULTILINE))
+    if len(fences) >= 2 and fences[0].start() == 0:
+        return rendered[fences[1].end():].strip()
+    return rendered.strip()
+
+
+def _derive_title(content: str) -> str:
+    """First non-empty line, leading markdown '#' stripped, capped at 80."""
+    for line in content.splitlines():
+        s = line.strip().lstrip("#").strip()
+        if s:
+            return s[:80]
+    return ""
+
+
+# Fields an edit stamps afresh rather than carrying forward: origin records who
+# produced the new text (as the direct-edit path does), confirm stamps
+# confirmed_by and edited_at, and a stale confirmed_at would misdate the
+# new confirmation.
+_EDIT_RESET_FIELDS = frozenset(
+    {"id", "origin", "confirmed_by", "confirmed_at", "edited_at"})
+
+
+def _existing_frontmatter(target: Path) -> dict:
+    """The frontmatter an edit carries forward from the doc it replaces.
+
+    Keeps created_at, status, tier, tags, source_kind and an explicitly chosen
+    title. A title equal to the one derived from the current body was
+    auto-derived, so it is dropped and re-derived from the edited body: a
+    retraction that rewrites the heading also retitles the doc. Enum values
+    this version would reject are dropped rather than making the doc
+    uneditable.
+    """
+    from ..ingestion.adapters.base import AdapterError
+    from ..ingestion.adapters.markdown import parse_frontmatter
+
+    try:
+        text = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise ProposalError(f"could not read edit target {target.name}: {exc}") from exc
+    try:
+        existing = parse_frontmatter(text)
+    except AdapterError as exc:
+        raise ProposalError(f"invalid frontmatter on {target.name}: {exc}") from exc
+    kept = {k: v for k, v in existing.items()
+            if k in FRONTMATTER_FIELDS and k not in _EDIT_RESET_FIELDS}
+    if kept.get("title") == _derive_title(_body_of(text)):
+        kept.pop("title")
+    for key, allowed in (("tier", TIERS), ("source_kind", SOURCE_KINDS)):
+        if key in kept and kept[key] not in allowed:
+            kept.pop(key)
+    return kept
+
+
 def validate_edit_id(edit_id: str) -> None:
     """Reject edit identifiers that cannot be one corpus-local filename."""
     if not _ID_RE.fullmatch(edit_id):
@@ -177,29 +235,13 @@ def propose(
     """Build a Proposal. WRITES NOTHING.
 
     - New entry: assigns the next sequential id under corpus_dir.
-    - Edit: targets edit_id and overwrites it on confirm (no versioning).
+    - Edit: targets edit_id and overwrites its body on confirm (no
+      versioning). The doc's existing frontmatter carries forward under the
+      caller's meta (see _existing_frontmatter).
     """
     if not content or not content.strip():
         raise ProposalError("content is empty")
     meta = dict(meta or {})
-    meta.setdefault("origin", "bot-suggested")
-    meta.setdefault("tier", "normal")
-    meta.setdefault("status", "active")
-    meta.setdefault("corpus", corpus)
-    # Auto-derive a short human-readable title from the first content line when
-    # the caller didn't supply one — a generated, scannable handle for the entry
-    # (vs the opaque timestamp id). First non-empty line, leading markdown '#'
-    # stripped, capped. Callers can still pass an explicit meta["title"].
-    if not (meta.get("title") or "").strip():
-        derived = ""
-        for line in content.splitlines():
-            s = line.strip().lstrip("#").strip()
-            if s:
-                derived = s[:80]
-                break
-        if derived:
-            meta["title"] = derived
-    _validate_meta(meta)
 
     is_edit = edit_id is not None
     if is_edit:
@@ -223,6 +265,22 @@ def propose(
         raise ProposalError(
             f"refusing target {target} outside corpus dir {base}"
         )
+
+    if is_edit:
+        meta = {**_existing_frontmatter(target), **meta}
+    meta.setdefault("origin", "bot-suggested")
+    meta.setdefault("tier", "normal")
+    meta.setdefault("status", "active")
+    meta.setdefault("corpus", corpus)
+    # Auto-derive a short human-readable title from the first content line when
+    # neither the caller nor the edited doc supplies one — a generated,
+    # scannable handle for the entry (vs the opaque timestamp id). Callers can
+    # still pass an explicit meta["title"].
+    if not (meta.get("title") or "").strip():
+        derived = _derive_title(content)
+        if derived:
+            meta["title"] = derived
+    _validate_meta(meta)
 
     rendered = render_doc(doc_id, content, meta)
     # proposal_id MUST be unique per proposal. Deriving it only from doc_id

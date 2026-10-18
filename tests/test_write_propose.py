@@ -115,3 +115,38 @@ def test_memory_and_todo_source_kinds_accepted(tmp_path):
         pr = P.propose("note", f"a {kind} entry", tmp_path,
                        meta={"origin": "human", "source_kind": kind})
         assert f"source_kind: {kind}" in pr.rendered
+
+
+def _seed_existing(tmp_path, title: str) -> None:
+    (tmp_path / "note-007.md").write_text(P.render_doc("note-007", "# Old heading\n\nold body", {
+        "title": title, "status": "active", "tier": "protected", "origin": "human",
+        "corpus": "note", "created_at": "2026-01-02T03:04:05+00:00",
+        "edited_at": "2026-02-01T00:00:00+00:00", "confirmed_by": "someone",
+        "source_kind": "fact", "tags": ["alpha"],
+    }))
+
+
+def test_edit_carries_forward_the_existing_frontmatter(tmp_path):
+    _seed_existing(tmp_path, title="Chosen title")
+    pr = P.propose("note", "# New heading\n\nnew body", tmp_path,
+                   meta={"origin": "bot-suggested"}, edit_id="note-007")
+    for line in ("title: Chosen title", "created_at: 2026-01-02T03:04:05+00:00",
+                 "tier: protected", "source_kind: fact", "tags: [alpha]",
+                 "origin: bot-suggested"):
+        assert line in pr.rendered
+    # confirm stamps these for the new edit; the old values must not linger
+    assert "edited_at" not in pr.rendered and "confirmed_by" not in pr.rendered
+
+
+def test_edit_rederives_a_title_that_followed_the_old_heading(tmp_path):
+    _seed_existing(tmp_path, title="Old heading")
+    pr = P.propose("note", "# RETRACTED: new heading\n\nnew body", tmp_path,
+                   meta={"origin": "bot-suggested"}, edit_id="note-007")
+    assert "title: RETRACTED: new heading" in pr.rendered
+
+
+def test_edit_meta_from_the_caller_overrides_the_existing_frontmatter(tmp_path):
+    _seed_existing(tmp_path, title="Chosen title")
+    pr = P.propose("note", "new body", tmp_path, edit_id="note-007",
+                   meta={"origin": "bot-suggested", "tags": ["beta"]})
+    assert "tags: [beta]" in pr.rendered

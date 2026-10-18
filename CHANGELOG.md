@@ -68,6 +68,11 @@ patch = fixes). The version is a single source of truth in
 - The post-confirm retrievability check queried the frontmatter fence instead
   of the document body, so every confirm reported "post-write verify did not
   retrieve it" and a confirmed merge never deleted the absorbed documents.
+- An edit carries the document's existing frontmatter forward (`created_at`,
+  `tier`, `status`, `tags`, `source_kind`, an explicitly chosen title) instead
+  of rebuilding it from proposal defaults. A title derived from the old heading
+  is re-derived from the new one. `origin` records who produced the new text
+  and confirm stamps `edited_at`.
 - A document the chunker raises on is skipped and logged instead of ending the
   index run. `/api/index` lists it in `failed`, `vecgrep index` prints it, and
   the next run tries it again.

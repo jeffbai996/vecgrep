@@ -663,8 +663,8 @@ def _doc_body(corpus: str, doc_id: str) -> str | None:
     except FileNotFoundError:
         return None
     # Strip a leading frontmatter block the same way parse_frontmatter detects
-    # one, so the patch operates on body only (frontmatter is regenerated from
-    # meta on render). No frontmatter → the whole file is body.
+    # one, so the patch operates on body only (propose() carries the existing
+    # frontmatter forward on render). No frontmatter → the whole file is body.
     if text.startswith("---") and parse_frontmatter(text):
         end = text[3:].find("\n---")
         if end != -1:

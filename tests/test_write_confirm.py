@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from vecgrep.backend.ingestion.adapters.markdown import parse_frontmatter
 from vecgrep.backend.write import proposal as P
 # Import the submodule explicitly — the package __init__ re-exports a `confirm`
 # FUNCTION, which would shadow the module name under `from ... import confirm`.
@@ -96,6 +97,20 @@ def test_edit_overwrites_in_place(corpus_dir, store):
     assert res.ok is True
     body = (corpus_dir / "notes-001.md").read_text()
     assert "new content" in body and "old" not in body
+
+
+def test_edit_confirm_stamps_edited_at_and_the_confirmer(corpus_dir, store):
+    (corpus_dir / "notes-001.md").write_text(
+        "---\nid: notes-001\ncreated_at: 2026-01-02\nconfirmed_by: someone\n---\nold\n")
+    pr = P.propose("notes", "new content", corpus_dir, edit_id="notes-001",
+                   meta={"origin": "human"})
+    store.put(pr)
+    svc = _FakeService(); svc._last_written = pr.target_path
+    C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir, confirmed_by="owner")
+    fm = parse_frontmatter((corpus_dir / "notes-001.md").read_text())
+    assert fm["created_at"] == "2026-01-02"
+    assert fm["confirmed_by"] == "owner"
+    assert fm["edited_at"]
 
 
 def test_edit_of_missing_target_rejected(corpus_dir, store):
