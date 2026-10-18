@@ -33,6 +33,38 @@ def _body_of(rendered: str) -> str:
     return rendered.strip()
 
 
+def _indexed_aliases(svc, corpus: str, path: Path) -> list[str]:
+    """Indexed source ids in `corpus` that name the same file as `path`.
+
+    A corpus directory reached through a symlink can hold one document under
+    two spellings: the path it was first indexed under and the resolved path
+    propose() targets. Matching on the resolved file keeps an edit, delete or
+    merge on the document's existing source instead of leaving the old chunks
+    searchable beside a second copy.
+    """
+    try:
+        sources = list(svc.registry.get(corpus).sources)
+        real = path.resolve()
+    except Exception:
+        return []
+    aliases = []
+    for source in sources:
+        if source.startswith(("http://", "https://")):
+            continue
+        try:
+            if Path(source).resolve() == real:
+                aliases.append(source)
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return aliases
+
+
+def _delete_indexed(svc, corpus: str, path: Path) -> None:
+    """De-index every spelling of `path`; the resolved one is always tried."""
+    for source in dict.fromkeys([*_indexed_aliases(svc, corpus, path), str(path)]):
+        svc.delete_source(corpus, source)
+
+
 def _writethrough_cmd(corpus: str) -> str | None:
     """A corpus may be a downstream MIRROR of some upstream store (e.g. a
     transcript dump). For such a corpus, writing the local mirror file is wrong —
@@ -286,7 +318,7 @@ def _confirm_locked(
         # reindex), not orphaned vectors pointing at a missing file.
         index_note = ""
         try:
-            svc.delete_source(corpus, str(target))
+            _delete_indexed(svc, corpus, target)
         except Exception as e:
             index_note = f" (de-index warning: {e}; a reindex will reconcile)"
         try:
@@ -346,9 +378,13 @@ def _confirm_locked(
         raise ConfirmError(f"unsafe proposal frontmatter: {exc}") from exc
     target.write_text(rendered)
 
-    # Re-embed just this file (incremental), then verify retrievability.
+    # Re-embed just this file (incremental) under the source id it already
+    # has, then verify retrievability. Other spellings of the same file are
+    # de-indexed so superseded text stops answering searches.
+    aliases = _indexed_aliases(svc, corpus, target)
+    index_id = str(target) if not aliases or str(target) in aliases else aliases[0]
     try:
-        svc.index(str(target), corpus)
+        svc.index(index_id, corpus)
     except Exception as e:
         # The file is on disk (truth); flag the embed failure rather than
         # pretending success. A re-index later recovers it.
@@ -357,6 +393,18 @@ def _confirm_locked(
             ok=False, doc_id=proposal.doc_id, path=str(target),
             message=f"written but re-embed failed: {e}",
         )
+
+    for stale in aliases:
+        if stale != index_id:
+            try:
+                svc.delete_source(corpus, stale)
+            except Exception as e:
+                store.delete(proposal_id)
+                return ConfirmResult(
+                    ok=False, doc_id=proposal.doc_id, path=str(target),
+                    message=f"written and embedded, but the old copy at "
+                            f"{stale} is still indexed: {e}",
+                )
 
     searchable = _verify_searchable(svc, corpus, proposal.doc_id,
                                     proposal.rendered)
@@ -370,7 +418,7 @@ def _confirm_locked(
             # Embeddings first, file second — a crash orphans a file (a
             # reindex reconciles), never vectors pointing at nothing.
             try:
-                svc.delete_source(corpus, str(p))
+                _delete_indexed(svc, corpus, p)
             except Exception as e:
                 index_notes.append(f"{did}: de-index warning: {e}")
             try:

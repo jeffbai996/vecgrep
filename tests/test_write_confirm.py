@@ -323,3 +323,78 @@ def test_writethrough_payload_carries_meta(corpus_dir, store, monkeypatch, tmp_p
     assert got["op"] == "write"
     assert got["meta"]["source_kind"] == "memory"
     assert got["meta"]["tags"] == ["infra", "vecgrep"]
+
+
+class _RegisteredService(_FakeService):
+    """Fake service that also exposes the corpus's registered source ids."""
+    def __init__(self, sources):
+        super().__init__()
+        corpus = type("Corpus", (), {})()
+        corpus.sources = list(sources)
+        self.registry = type("Registry", (), {"get": lambda _self, name: corpus})()
+
+
+@pytest.fixture
+def linked_corpus(tmp_path):
+    """notes/ reached through a symlinked home, as ~/.vecgrep is in production."""
+    real = tmp_path / "real-home" / "notes"
+    real.mkdir(parents=True)
+    (tmp_path / "home").symlink_to(tmp_path / "real-home")
+    return tmp_path / "home" / "notes"
+
+
+def _seed_doc(corpus_dir, store):
+    pr = P.propose("notes", "original text", corpus_dir, meta={"origin": "human"})
+    Path(pr.target_path).write_text(pr.rendered)
+    return pr.doc_id
+
+
+def test_edit_reindexes_a_symlinked_doc_under_its_existing_source(linked_corpus, store):
+    doc_id = _seed_doc(linked_corpus, store)
+    lexical = str(linked_corpus / f"{doc_id}.md")
+    edit = P.propose("notes", "revised text", linked_corpus, meta={"origin": "human"}, edit_id=doc_id)
+    assert edit.target_path != lexical  # propose targets the resolved path
+    store.put(edit)
+    svc = _RegisteredService([lexical])
+    svc._last_written = lexical
+    res = C.confirm(edit.proposal_id, store, svc, "notes", linked_corpus, confirmed_by="owner")
+    assert res.ok is True
+    assert svc.indexed == [(lexical, "notes")]
+    assert svc.deleted == []
+
+
+def test_edit_drops_a_second_spelling_of_the_same_doc(linked_corpus, store):
+    doc_id = _seed_doc(linked_corpus, store)
+    lexical = str(linked_corpus / f"{doc_id}.md")
+    edit = P.propose("notes", "revised text", linked_corpus, meta={"origin": "human"}, edit_id=doc_id)
+    store.put(edit)
+    svc = _RegisteredService([lexical, edit.target_path])
+    svc._last_written = edit.target_path
+    C.confirm(edit.proposal_id, store, svc, "notes", linked_corpus, confirmed_by="owner")
+    assert svc.indexed == [(edit.target_path, "notes")]
+    assert svc.deleted == [("notes", lexical)]
+
+
+def test_delete_deindexes_every_spelling_of_a_symlinked_doc(linked_corpus, store):
+    doc_id = _seed_doc(linked_corpus, store)
+    lexical = str(linked_corpus / f"{doc_id}.md")
+    pr = P.propose_delete("notes", doc_id, linked_corpus, meta={"origin": "human"})
+    store.put(pr)
+    svc = _RegisteredService([lexical])
+    C.confirm(pr.proposal_id, store, svc, "notes", linked_corpus, confirmed_by="owner")
+    assert ("notes", lexical) in svc.deleted
+    assert not Path(pr.target_path).exists()
+
+
+def test_a_different_file_with_a_similar_name_is_not_treated_as_an_alias(linked_corpus, store):
+    doc_id = _seed_doc(linked_corpus, store)
+    other = linked_corpus.parent / "elsewhere" / f"{doc_id}.md"
+    other.parent.mkdir()
+    other.write_text("unrelated")
+    edit = P.propose("notes", "revised text", linked_corpus, meta={"origin": "human"}, edit_id=doc_id)
+    store.put(edit)
+    svc = _RegisteredService([str(other)])
+    svc._last_written = edit.target_path
+    C.confirm(edit.proposal_id, store, svc, "notes", linked_corpus, confirmed_by="owner")
+    assert svc.indexed == [(edit.target_path, "notes")]
+    assert svc.deleted == []
