@@ -398,3 +398,13 @@ def test_a_different_file_with_a_similar_name_is_not_treated_as_an_alias(linked_
     C.confirm(edit.proposal_id, store, svc, "notes", linked_corpus, confirmed_by="owner")
     assert svc.indexed == [(edit.target_path, "notes")]
     assert svc.deleted == []
+
+
+def test_confirm_verifies_retrievability_with_the_body_not_the_frontmatter(svc, corpus_dir, store):
+    # The probe used to be the first line of the rendered doc, the `---` fence,
+    # which finds nothing, so every real confirm reported a failed verify.
+    pr = P.propose("notes", "# Harbour office move\n\nThe team moves in May.", corpus_dir,
+                   meta={"origin": "human"})
+    store.put(pr)
+    res = C.confirm(pr.proposal_id, store, svc, "notes", corpus_dir, confirmed_by="owner")
+    assert res.ok, res.message

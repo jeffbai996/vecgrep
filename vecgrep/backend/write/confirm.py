@@ -407,7 +407,7 @@ def _confirm_locked(
                 )
 
     searchable = _verify_searchable(svc, corpus, proposal.doc_id,
-                                    proposal.rendered)
+                                    _body_of(rendered))
     store.delete(proposal_id)
     if searchable and absorbs:
         # Only now — canonical written, embedded, and retrievable. Anything

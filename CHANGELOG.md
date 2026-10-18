@@ -57,6 +57,9 @@ patch = fixes). The version is a single source of truth in
   and corpus exploration views.
 
 ### Fixed
+- The post-confirm retrievability check queried the frontmatter fence instead
+  of the document body, so every confirm reported "post-write verify did not
+  retrieve it" and a confirmed merge never deleted the absorbed documents.
 - A document the chunker raises on is skipped and logged instead of ending the
   index run. `/api/index` lists it in `failed`, `vecgrep index` prints it, and
   the next run tries it again.
