@@ -57,6 +57,11 @@ patch = fixes). The version is a single source of truth in
   and corpus exploration views.
 
 ### Fixed
+- The embedding cache row cap is a setting, `embed_cache_max_rows` in config.json,
+  with `VECGREP_EMBED_CACHE_MAX_ROWS` still overriding it. It was read only
+  from the environment, so a deployment that raised it in its service unit
+  still had CLI runs, confirms and timers evict the shared cache back to the
+  500,000-row default on their next write. The README listed a stale default.
 - A confirmed edit, merge or delete reaches a document under whichever path
   spelling the corpus registry uses. A file registered before its directory
   became a symlink (for example a home directory moved to another disk) was

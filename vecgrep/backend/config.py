@@ -46,6 +46,7 @@ ENV_MAP = {
     OAUTH_APPROVAL_ENV: "oauth_approval_token",
     "VECGREP_THREAD_POOL_SIZE": "thread_pool_size",
     "VECGREP_SEARCH_LOCK_TIMEOUT_S": "search_lock_timeout_s",
+    "VECGREP_EMBED_CACHE_MAX_ROWS": "embed_cache_max_rows",
 }
 
 EDITABLE_FIELDS = {
@@ -88,6 +89,11 @@ STRUCTURAL_FIELDS = {
     "oauth_public_port",
     "mcp_allowed_hosts", "mcp_allowed_origins",
 }
+
+
+# Sizing rationale lives with the cache (embed/cache.py): the cap must exceed
+# the number of distinct chunk texts across every corpus, or a repair re-embeds.
+DEFAULT_EMBED_CACHE_MAX_ROWS = 500_000
 
 
 def _home() -> Path:
@@ -213,6 +219,11 @@ class Settings:
     # on a saturated disk plus one queued writer took that corpus offline for
     # every client until vecgrep-serve was restarted. 0 restores the wait.
     search_lock_timeout_s: float = 10.0
+    # Row cap on the shared embedding cache; <= 0 disables it. Every process
+    # that writes the cache evicts down to its own cap, so a deployment that
+    # raises it must do so here (or in every process environment), not only
+    # in the service unit.
+    embed_cache_max_rows: int = DEFAULT_EMBED_CACHE_MAX_ROWS
 
     @property
     def qdrant_path(self) -> Path:
@@ -266,7 +277,8 @@ def load_settings() -> Settings:
                 setattr(s, attr, None)
                 continue
             if attr in {"api_port", "default_top_k", "backup_weekday", "backup_retention",
-                        "thread_pool_size", "ollama_num_batch", "oauth_public_port"}:
+                        "thread_pool_size", "ollama_num_batch", "oauth_public_port",
+                        "embed_cache_max_rows"}:
                 val = int(val)
             elif attr in {"search_lock_timeout_s"}:
                 val = float(val)
@@ -412,6 +424,9 @@ def validate_settings(settings: Settings) -> None:
         raise ConfigError("default_top_k must be positive")
     if settings.ollama_num_batch is not None and int(settings.ollama_num_batch) <= 0:
         raise ConfigError("ollama_num_batch must be positive")
+    if isinstance(settings.embed_cache_max_rows, bool) or not isinstance(
+            settings.embed_cache_max_rows, int):
+        raise ConfigError("embed_cache_max_rows must be an integer (<= 0 disables the cap)")
     if settings.bm25_backend not in {"pickle", "sqlite"}:
         raise ConfigError("bm25_backend must be pickle or sqlite")
     for name in ("embed_model", "openai_embed_model"):

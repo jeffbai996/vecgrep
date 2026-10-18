@@ -22,6 +22,7 @@ import time
 from array import array
 from pathlib import Path
 
+from ..config import DEFAULT_EMBED_CACHE_MAX_ROWS
 from .base import EmbedBackend
 
 logger = logging.getLogger(__name__)
@@ -73,9 +74,9 @@ _LRU_INDEX = "CREATE INDEX IF NOT EXISTS idx_embed_cache_lru ON embed_cache (las
 # model, so 500k rows is roughly 7 GB on disk. That is a deliberate trade -- the
 # cache exists to make a full re-index cheap, and a cache too small to hold the
 # corpus buys nothing at all. Hosts short on disk should lower it explicitly via
-# VECGREP_EMBED_CACHE_MAX_ROWS rather than have a too-small default chosen for
-# them. Set VECGREP_EMBED_CACHE_MAX_ROWS <= 0 to disable the cap entirely.
-DEFAULT_MAX_ROWS = 500_000
+# embed_cache_max_rows (config.json, or VECGREP_EMBED_CACHE_MAX_ROWS) rather than
+# have a too-small default chosen for them. Set it <= 0 to disable the cap.
+DEFAULT_MAX_ROWS = DEFAULT_EMBED_CACHE_MAX_ROWS
 
 
 def _max_rows() -> int:
@@ -110,7 +111,8 @@ def _decode(raw) -> list[float]:
 
 
 class EmbedCache:
-    def __init__(self, db_path: Path, *, read_only: bool = False) -> None:
+    def __init__(self, db_path: Path, *, read_only: bool = False,
+                 max_rows: int | None = None) -> None:
         self._read_only = read_only
         if read_only:
             # A repair needs the warm vectors, not cache bookkeeping. Opening
@@ -144,7 +146,8 @@ class EmbedCache:
             self._conn.commit()
         self._lock = threading.Lock()
         # Resolved once per instance so tests can set the env before construction.
-        self._max_rows = _max_rows()
+        # The service passes its settings value (config.json, env override).
+        self._max_rows = _max_rows() if max_rows is None else int(max_rows)
         self._cap_warned = False
         # Deferred LRU bookkeeping. See _TOUCH_FLUSH_SECONDS: hits accumulate
         # here and reach sqlite on a timer instead of one COMMIT per lookup.
@@ -314,9 +317,10 @@ class EmbedCache:
             if not self._cap_warned:
                 self._cap_warned = True
                 logger.warning(
-                    "embed cache at %d rows, %.0f%% of VECGREP_EMBED_CACHE_MAX_ROWS=%d; "
-                    "a cap below the corpus size turns a repair into a full re-embed -- "
-                    "raise it before it binds",
+                    "embed cache at %d rows, %.0f%% of its cap of %d; a cap below the "
+                    "corpus size turns a repair into a full re-embed -- raise "
+                    "embed_cache_max_rows in config.json (or VECGREP_EMBED_CACHE_MAX_ROWS "
+                    "in every vecgrep process) before it binds",
                     count,
                     100.0 * count / self._max_rows,
                     self._max_rows,
@@ -328,7 +332,7 @@ class EmbedCache:
             return
         logger.warning(
             "embed cache over cap: evicting %d coldest of %d rows "
-            "(VECGREP_EMBED_CACHE_MAX_ROWS=%d)",
+            "(embed_cache_max_rows / VECGREP_EMBED_CACHE_MAX_ROWS=%d)",
             overage,
             count,
             self._max_rows,

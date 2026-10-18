@@ -274,7 +274,7 @@ Each corpus pins the embedding backend, model, and dimension at index time and r
 | `VECGREP_THREAD_POOL_SIZE` | `8` | AnyIO worker-thread cap for the HTTP service. |
 | `VECGREP_BM25_WEIGHT` | `1.5` | Weight on BM25 contribution to RRF fusion. >1 boosts literal-keyword matches over semantic noise on short queries. Set to `1.0` for pure RRF, higher for keyword-leaning ranking. |
 | `VECGREP_BM25_COVERAGE_MODE` | `penalty` | How BM25 treats docs that match only some query tokens. `penalty` keeps them but demotes the score by `(matched/total)²`; `filter` drops anything below a coverage threshold (higher precision, but can zero out the BM25 half of a multi-token query). |
-| `VECGREP_EMBED_CACHE_MAX_ROWS` | `50000` | Row cap on the sqlite embedding cache (~1 GB at a 1024-dim model). Oldest entries are evicted first once over the cap. Set `<= 0` to disable the cap. |
+| `VECGREP_EMBED_CACHE_MAX_ROWS` | `500000` | Row cap on the sqlite embedding cache (`embed_cache_max_rows` in config.json; about 4 KB per row at a 1024-dim model). Least recently used entries are evicted once over the cap. Keep it above the number of distinct chunk texts across all corpora, or a repair re-embeds what was evicted. Every process that writes the cache evicts to its own cap, so a multi-process deployment sets it in config.json rather than one unit's environment. Set `<= 0` to disable the cap. |
 
 Non-secret settings can also live in `~/.vecgrep/config.json`; environment
 variables override the file. `vecgrep config` shows the effective value and

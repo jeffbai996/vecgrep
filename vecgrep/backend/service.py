@@ -567,6 +567,7 @@ class VecgrepService:
             None if ephemeral else EmbedCache(
                 self.settings.home / "embed_cache.db",
                 read_only=embed_cache_read_only,
+                max_rows=self.settings.embed_cache_max_rows,
             )
         )
         if recover_pending:

@@ -191,6 +191,34 @@ def test_default_cap_fits_a_large_corpus():
     assert DEFAULT_MAX_ROWS >= 500_000
 
 
+def _service_cap(vg_home, monkeypatch, config: dict) -> int:
+    import json
+
+    from vecgrep.backend import config as cfg_mod
+    from vecgrep.backend.service import VecgrepService
+
+    vg_home.mkdir(parents=True, exist_ok=True)
+    (vg_home / "config.json").write_text(json.dumps(config))
+    monkeypatch.setattr(cfg_mod, "_settings", None)
+    svc = VecgrepService(ephemeral=False)
+    try:
+        return svc._embed_cache._max_rows
+    finally:
+        svc.store.client.close()
+
+
+def test_service_cache_cap_comes_from_config_json(vg_home, monkeypatch):
+    # Every process reads config.json; an env var reaches only the processes
+    # whose environment carries it, and any process left on the default evicts
+    # a shared cache back down to that default on its next write.
+    assert _service_cap(vg_home, monkeypatch, {"embed_cache_max_rows": 1_234_567}) == 1_234_567
+
+
+def test_env_cache_cap_overrides_config_json(vg_home, monkeypatch):
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "42")
+    assert _service_cap(vg_home, monkeypatch, {"embed_cache_max_rows": 1_234_567}) == 42
+
+
 def test_cap_disabled_when_nonpositive(tmp_path, monkeypatch):
     monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "0")
     cache = EmbedCache(tmp_path / "embed.db")
