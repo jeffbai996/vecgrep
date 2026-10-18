@@ -18,8 +18,8 @@ class FakeSvc:
         if self.fail_index:
             raise RuntimeError("embed down")
 
-    def delete_source(self, corpus, path):
-        self.calls.append(("delete_source", path))
+    def delete_file(self, corpus, path):
+        self.calls.append(("delete_file", path))
 
     def search(self, probe, corpus_name=None, top_k=10):
         class R:  # the canonical id is always "found"
@@ -53,9 +53,9 @@ def test_merge_writes_canonical_then_deletes_absorbed(tmp_path):
     assert "merged_from: [note-2]" in (corpus_dir / "note-1.md").read_text()
     assert not (corpus_dir / "note-2.md").exists()
     assert "note-2" in res.message
-    # Ordering: the canonical index() precedes the absorbed delete_source().
+    # Ordering: the canonical index() precedes the absorbed delete_file().
     ops = [op for op, _ in svc.calls]
-    assert ops.index("index") < ops.index("delete_source")
+    assert ops.index("index") < ops.index("delete_file")
     assert store.get(pr.proposal_id) is None  # consumed
 
 

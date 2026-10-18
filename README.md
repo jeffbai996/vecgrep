@@ -294,7 +294,10 @@ group, its resolved path, and whether that path is registered.
 `--require-healthy` exits nonzero while aliases remain. `--fix` does not choose
 which source to delete: first normalize the ingestion path and verify canonical
 coverage, then remove legacy IDs through `VecgrepService.delete_source` so both
-vector and keyword indexes are updated together.
+vector and keyword indexes are updated together. Indexing a single file does
+this for that file: once its resolved path is indexed, any other registered ID
+for the same file is removed. Directory indexes leave aliases for doctor to
+report.
 
 ## Backup and recovery
 

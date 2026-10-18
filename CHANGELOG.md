@@ -57,6 +57,14 @@ patch = fixes). The version is a single source of truth in
   and corpus exploration views.
 
 ### Fixed
+- A confirmed edit, merge or delete reaches a document under whichever path
+  spelling the corpus registry uses. A file registered before its directory
+  became a symlink (for example a home directory moved to another disk) was
+  indexed a second time on edit, leaving the old chunks searchable, and a
+  confirmed delete removed the file but none of its chunks. Indexing a single
+  file now retires any other registered spelling of that file, and confirmed
+  deletes and merges de-index every spelling (`VecgrepService.delete_file`).
+  `delete_source` still removes exactly the id it is given.
 - The post-confirm retrievability check queried the frontmatter fence instead
   of the document body, so every confirm reported "post-write verify did not
   retrieve it" and a confirmed merge never deleted the absorbed documents.

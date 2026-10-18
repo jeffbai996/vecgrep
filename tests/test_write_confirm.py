@@ -33,7 +33,7 @@ def store(tmp_path):
 
 
 class _FakeService:
-    """Stand-in for VecgrepService: records index()/delete_source() calls, fakes
+    """Stand-in for VecgrepService: records index()/delete_file() calls, fakes
     search verify."""
     def __init__(self, found=True):
         self.indexed = []
@@ -44,8 +44,8 @@ class _FakeService:
         self.indexed.append((source, corpus_name))
         return (1, 1, 0)
 
-    def delete_source(self, corpus_name, source_id):
-        self.deleted.append((corpus_name, source_id))
+    def delete_file(self, corpus_name, path):
+        self.deleted.append((corpus_name, path))
 
     def search(self, query, corpus_name=None, top_k=5, **kw):
         if not self._found:
@@ -149,7 +149,7 @@ def test_proposal_store_roundtrip(store, corpus_dir):
 # --- delete proposals: confirm removes the file + de-indexes (Jeff 2026-06-25) ---
 
 def test_confirm_delete_removes_file_and_deindexes(corpus_dir, store):
-    # Seed a doc, propose its delete, confirm → file gone + delete_source called.
+    # Seed a doc, propose its delete, confirm → file gone + delete_file called.
     pr_w = P.propose("notes", "to be deleted", corpus_dir, meta={"origin": "human"})
     store.put(pr_w)
     svc = _FakeService()
@@ -204,7 +204,7 @@ def test_confirm_delete_deindex_failure_still_removes_file(corpus_dir, store):
     store.put(pr)
 
     class _Boom(_FakeService):
-        def delete_source(self, corpus_name, source_id):
+        def delete_file(self, corpus_name, path):
             raise RuntimeError("qdrant down")
 
     res = C.confirm(pr.proposal_id, store, _Boom(), "notes", corpus_dir,
@@ -324,80 +324,6 @@ def test_writethrough_payload_carries_meta(corpus_dir, store, monkeypatch, tmp_p
     assert got["meta"]["source_kind"] == "memory"
     assert got["meta"]["tags"] == ["infra", "vecgrep"]
 
-
-class _RegisteredService(_FakeService):
-    """Fake service that also exposes the corpus's registered source ids."""
-    def __init__(self, sources):
-        super().__init__()
-        corpus = type("Corpus", (), {})()
-        corpus.sources = list(sources)
-        self.registry = type("Registry", (), {"get": lambda _self, name: corpus})()
-
-
-@pytest.fixture
-def linked_corpus(tmp_path):
-    """notes/ reached through a symlinked home, as ~/.vecgrep is in production."""
-    real = tmp_path / "real-home" / "notes"
-    real.mkdir(parents=True)
-    (tmp_path / "home").symlink_to(tmp_path / "real-home")
-    return tmp_path / "home" / "notes"
-
-
-def _seed_doc(corpus_dir, store):
-    pr = P.propose("notes", "original text", corpus_dir, meta={"origin": "human"})
-    Path(pr.target_path).write_text(pr.rendered)
-    return pr.doc_id
-
-
-def test_edit_reindexes_a_symlinked_doc_under_its_existing_source(linked_corpus, store):
-    doc_id = _seed_doc(linked_corpus, store)
-    lexical = str(linked_corpus / f"{doc_id}.md")
-    edit = P.propose("notes", "revised text", linked_corpus, meta={"origin": "human"}, edit_id=doc_id)
-    assert edit.target_path != lexical  # propose targets the resolved path
-    store.put(edit)
-    svc = _RegisteredService([lexical])
-    svc._last_written = lexical
-    res = C.confirm(edit.proposal_id, store, svc, "notes", linked_corpus, confirmed_by="owner")
-    assert res.ok is True
-    assert svc.indexed == [(lexical, "notes")]
-    assert svc.deleted == []
-
-
-def test_edit_drops_a_second_spelling_of_the_same_doc(linked_corpus, store):
-    doc_id = _seed_doc(linked_corpus, store)
-    lexical = str(linked_corpus / f"{doc_id}.md")
-    edit = P.propose("notes", "revised text", linked_corpus, meta={"origin": "human"}, edit_id=doc_id)
-    store.put(edit)
-    svc = _RegisteredService([lexical, edit.target_path])
-    svc._last_written = edit.target_path
-    C.confirm(edit.proposal_id, store, svc, "notes", linked_corpus, confirmed_by="owner")
-    assert svc.indexed == [(edit.target_path, "notes")]
-    assert svc.deleted == [("notes", lexical)]
-
-
-def test_delete_deindexes_every_spelling_of_a_symlinked_doc(linked_corpus, store):
-    doc_id = _seed_doc(linked_corpus, store)
-    lexical = str(linked_corpus / f"{doc_id}.md")
-    pr = P.propose_delete("notes", doc_id, linked_corpus, meta={"origin": "human"})
-    store.put(pr)
-    svc = _RegisteredService([lexical])
-    C.confirm(pr.proposal_id, store, svc, "notes", linked_corpus, confirmed_by="owner")
-    assert ("notes", lexical) in svc.deleted
-    assert not Path(pr.target_path).exists()
-
-
-def test_a_different_file_with_a_similar_name_is_not_treated_as_an_alias(linked_corpus, store):
-    doc_id = _seed_doc(linked_corpus, store)
-    other = linked_corpus.parent / "elsewhere" / f"{doc_id}.md"
-    other.parent.mkdir()
-    other.write_text("unrelated")
-    edit = P.propose("notes", "revised text", linked_corpus, meta={"origin": "human"}, edit_id=doc_id)
-    store.put(edit)
-    svc = _RegisteredService([str(other)])
-    svc._last_written = edit.target_path
-    C.confirm(edit.proposal_id, store, svc, "notes", linked_corpus, confirmed_by="owner")
-    assert svc.indexed == [(edit.target_path, "notes")]
-    assert svc.deleted == []
 
 
 def test_confirm_verifies_retrievability_with_the_body_not_the_frontmatter(svc, corpus_dir, store):

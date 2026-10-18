@@ -21,7 +21,9 @@ def _move_to_symlink(svc, tmp_path, *, index_canonical=True):
     old_root.symlink_to(real_root, target_is_directory=True)
     real = real_root / old.name
     if index_canonical:
-        svc.index(str(old), "fixture")
+        # A directory index registers the resolved path beside the old one.
+        # Indexing the single file would retire the old spelling instead.
+        svc.index(str(old_root), "fixture")
     return old, real
 
 

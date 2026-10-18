@@ -861,7 +861,7 @@ class VecgrepService:
                 queue = VisualQueue(self.settings.home / "visual" / "queue.db")
                 if not queue.allows_delivery(source, corpus_name, visual_key):
                     raise CorpusError("Visual delivery was cancelled or its source changed")
-            return self._index_locked(
+            result = self._index_locked(
                 source,
                 corpus_name,
                 chunker_name,
@@ -869,6 +869,65 @@ class VecgrepService:
                 include,
                 **kwargs,
             )
+            self._retire_other_spellings(source, corpus_name)
+            return result
+
+    def _other_spellings(self, corpus: Corpus, path: str) -> list[str]:
+        """Registered sources, other than `path` itself, naming the file at `path`.
+
+        Adapters register a file under its resolved path at index time. A
+        directory that later became a symlink (a home moved to another disk
+        and linked back) leaves older entries under the pre-move spelling,
+        while new index calls register the resolved one. Only same-named
+        entries are resolved, so the check costs one string comparison per
+        registered source plus a resolve for the few candidates.
+        """
+        real = str(Path(path).resolve())
+        name = os.path.basename(real)
+        return [
+            sid for sid in corpus.sources
+            if sid != real
+            and "://" not in sid
+            and os.path.basename(sid) == name
+            and str(Path(sid).resolve()) == real
+        ]
+
+    def _retire_other_spellings(self, source: str, corpus_name: str) -> None:
+        """Keep one registry entry per file after indexing a single file.
+
+        Without this, re-indexing a file registered under an older spelling
+        adds a second entry and both versions are served. The older entries go
+        only once the file's resolved entry exists, so a failed or skipped
+        index never leaves the file unindexed.
+        """
+        if source.startswith(("http://", "https://")) or not Path(source).is_file():
+            return
+        if not self.registry.has(corpus_name):
+            return
+        corpus = self.registry.get(corpus_name)
+        canonical = str(Path(source).resolve())
+        if canonical not in corpus.sources:
+            return
+        for alias in self._other_spellings(corpus, canonical):
+            self.delete_source(corpus_name, alias)
+
+    def delete_file(self, corpus_name: str, path: str) -> list[str]:
+        """De-index the file at `path` under every spelling registered for it.
+
+        delete_source removes exactly the id it is given. A confirmed delete
+        or merge must remove the file's chunks whichever spelling the registry
+        uses, or retracted text stays searchable after the file is gone. The
+        resolved path is always included so points stored under it are cleared
+        even if the registry has drifted. Returns the ids de-indexed.
+        """
+        with self.locks.write(corpus_name):
+            if not self.registry.has(corpus_name):
+                return []
+            canonical = str(Path(path).resolve())
+            ids = [canonical, *self._other_spellings(self.registry.get(corpus_name), canonical)]
+            for source_id in ids:
+                self.delete_source(corpus_name, source_id)
+            return ids
 
     def _index_locked(
         self,
