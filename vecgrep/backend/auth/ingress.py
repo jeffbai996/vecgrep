@@ -23,6 +23,31 @@ def has_exact_loopback_peer(scope: Scope) -> bool:
         return False
 
 
+def has_trusted_proxied_peer(scope: Scope) -> bool:
+    """True when uvicorn's proxy-headers middleware rewrote the client.
+
+    uvicorn replaces the client with the first ``X-Forwarded-For`` hop and port
+    0 only when the socket peer is in ``forwarded_allow_ips``, ``127.0.0.1``
+    alone by default. That shape therefore proves the request arrived through
+    the loopback proxy (Tailscale Serve); a forwarder on 127.0.0.2 keeps its
+    own address because its forwarded header is not trusted."""
+    client = scope.get("client")
+    if not client:
+        return False
+    try:
+        host, port = str(client[0]), int(client[1])
+    except (TypeError, IndexError, ValueError):
+        return False
+    if port != 0:
+        return False
+    first = b""
+    for key, value in scope.get("headers") or ():
+        if bytes(key).lower() == b"x-forwarded-for":
+            first = bytes(value).split(b",")[0].strip()
+            break
+    return bool(first) and first.decode("ascii", "replace") == host
+
+
 class OAuthIngressMiddleware:
     def __init__(self, app: ASGIApp, *, private_port: int, public_port: int,
                  oauth_ready: bool) -> None:

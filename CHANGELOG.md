@@ -8,6 +8,7 @@ patch = fixes). The version is a single source of truth in
 ## [Unreleased]
 
 ### Fixed
+- Tailscale Serve identity still counts after uvicorn rewrites the loopback peer to the forwarded address.
 - Same-machine trust now requires the client peer address to be exactly
   `127.0.0.1` or `::1`. It was any address in `127.0.0.0/8`, so a local TCP
   forwarder dialing from `127.0.0.2` was treated as a direct local MCP client,

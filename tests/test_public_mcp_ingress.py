@@ -221,6 +221,22 @@ def test_oauth_off_cli_port_override_remains_private(vg_home, monkeypatch):
     assert result.exit_code == 0, repr(result.exception)
 
 
+def test_private_trust_survives_the_proxy_rewrite_of_the_client():
+    # uvicorn's proxy-headers middleware rewrites a 127.0.0.1 peer to the
+    # forwarded address with port 0; that is how Serve traffic arrives.
+    from vecgrep.backend.auth.approval import verified_tailnet_login
+    from vecgrep.backend.auth.ingress import PRIVATE_INGRESS
+    headers = [(k.lower().encode(), v.encode()) for k, v in SPOOF.items()
+               if k.lower() != "x-forwarded-for"] + [(b"x-forwarded-for", b"192.0.2.10")]
+    scope = {"type": "http", "path": "/", PRIVATE_INGRESS: True, "client": ("192.0.2.10", 0),
+             "server": ("127.0.0.1", 8765), "headers": headers}
+    assert verified_tailnet_login(scope) is not None
+    assert server._is_direct_loopback_mcp({**scope, "headers": []}) is False
+    assert verified_tailnet_login({**scope, "client": ("192.0.2.10", 40000)}) is None
+    mismatch = [h for h in headers if h[0] != b"x-forwarded-for"] + [(b"x-forwarded-for", b"192.0.2.11")]
+    assert verified_tailnet_login({**scope, "headers": mismatch}) is None
+
+
 @pytest.mark.parametrize("peer,trusted", [("127.0.0.1", True), ("::1", True), ("127.0.0.2", False)])
 def test_private_trust_requires_an_exact_loopback_peer(peer, trusted):
     from vecgrep.backend.auth.approval import verified_tailnet_login

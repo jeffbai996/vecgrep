@@ -149,6 +149,8 @@ authenticated client still cannot commit writes by itself.
 - Private Tailscale Serve strips client-supplied identity headers and adds the logged-in
   tailnet user's identity. That verified header plus proxy transit, from a peer
   that is exactly `127.0.0.1` or `::1`, permits the
+  (or, for Serve traffic, a client uvicorn rewrote from a `127.0.0.1` peer to the
+  forwarded address with port 0)
   private tailnet bypass. Public listener requests always remain OAuth
   protected. Tagged nodes receive no user identity header and therefore need
   OAuth or an SSH tunnel to loopback.

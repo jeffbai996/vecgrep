@@ -15,7 +15,7 @@ from starlette.datastructures import Headers
 from starlette.responses import RedirectResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from .ingress import PRIVATE_INGRESS, has_exact_loopback_peer
+from .ingress import PRIVATE_INGRESS, has_exact_loopback_peer, has_trusted_proxied_peer
 
 
 APPROVAL_COOKIE = "__Host-vecgrep_oauth_approved"
@@ -85,7 +85,9 @@ def verified_tailnet_login(scope: Scope) -> str | None:
     """
     if scope.get("type") != "http" or scope.get(PRIVATE_INGRESS) is not True:
         return None
-    if not has_exact_loopback_peer(scope):
+    # tailscaled dials from 127.0.0.1 and uvicorn rewrites the client to the
+    # forwarded tailnet address; any other peer could have forged the headers.
+    if not (has_exact_loopback_peer(scope) or has_trusted_proxied_peer(scope)):
         return None
     server = scope.get("server")
     if not server:
