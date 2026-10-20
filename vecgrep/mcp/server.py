@@ -2458,9 +2458,14 @@ class _RegistrationIngress:
         replayed = False
 
         async def replay():
+            # Hand the app the already-read body once, then the client's own
+            # receive(). After the body, receive() must wait and report the
+            # client's disconnect; an instant synthetic reply makes any app loop
+            # that watches for the disconnect spin without yielding and starve
+            # the event loop.
             nonlocal replayed
             if replayed:
-                return {"type": "http.request", "body": b"", "more_body": False}
+                return await receive()
             replayed = True
             return {"type": "http.request", "body": bytes(body), "more_body": False}
 
