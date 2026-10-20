@@ -323,6 +323,13 @@ def create_app() -> FastAPI:
             form_action = "'self'" + (f" {callback_origin}" if callback_origin else "")
             if private_url and tailnet_login:
                 form_action += f" {public_origin}"
+            # Name where the approval sends the code. A registered client chooses
+            # its own client_name; the destination host is the one line on this
+            # page the client cannot dress up (2026-10-19).
+            destination = html.escape(_us(callback_origin).hostname or "") if callback_origin else ""
+            destination_copy = (
+                f"After approval the connection returns to <b>{destination}</b>. " if destination else ""
+            )
             form_html = f'<form method="post" action="{html.escape(post_url, quote=True)}"><input type="hidden" name="next" value="{safe_next}">{controls}</form>'
             if tailnet_link:
                 opened = " open" if error or throttled else ""
@@ -410,7 +417,7 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
 </div>
 <div class="card">
 <h1>{html.escape(heading)}</h1>
-<p class="sub">{("<b>" + client + "</b> is asking for access. ") if client else ""}{html.escape(approval_copy)}</p>
+<p class="sub">{("<b>" + client + "</b> is asking for access. ") if client else ""}{destination_copy}{html.escape(approval_copy)}</p>
 <ul class="scopes">{rows}</ul>
 {error_html}{form_html}
 </div>

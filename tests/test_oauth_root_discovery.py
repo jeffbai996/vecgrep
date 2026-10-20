@@ -359,6 +359,24 @@ def test_unlock_page_names_the_client_and_its_scopes(oauth_client):
     assert "Connect to vecgrep" in r.text
 
 
+def test_unlock_page_names_where_the_connection_returns(oauth_client):
+    """client_name is chosen by whoever registered; the callback host is not.
+    A phished owner who reads the page sees where the code will be sent."""
+    reg = oauth_client.post("/register", json={
+        "client_name": "Claude", "redirect_uris": ["https://evil.example/cb"],
+        "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    })
+    cid = reg.json()["client_id"]
+    target = f"/authorize?client_id={cid}&redirect_uri=https%3A%2F%2Fevil.example%2Fcb&scope=read"
+    r = oauth_client.get("/oauth/unlock", params={"next": target})
+    assert r.status_code == 200
+    assert "returns to <b>evil.example</b>" in r.text
+    assert "/cb" not in r.text, "only the host is named, never the path"
+    bare = oauth_client.get("/oauth/unlock?next=/authorize?client_id=nope")
+    assert "returns to" not in bare.text, "no destination line when the request names none"
+
+
 def test_unlock_and_issuance_both_default_omitted_scope_to_read(oauth_client):
     reg = oauth_client.post("/register", json={
         "client_name": "Example client",
