@@ -214,6 +214,47 @@ def test_pdf_render_has_page_anchors_and_rejects_excess_pages(tmp_path):
         list(page_images(source, max_pages=1))
 
 
+def test_pdf_ocr_preserves_each_page_when_vision_is_offline(tmp_path, monkeypatch):
+    import httpx
+    from pypdf import PdfWriter
+    from vecgrep.backend.ingestion import visual_processor as vp
+
+    source = tmp_path / 'report.pdf'
+    writer = PdfWriter()
+    for _ in range(2):
+        writer.add_blank_page(width=200, height=100)
+    with source.open('wb') as handle:
+        writer.write(handle)
+
+    pages = []
+    requests = []
+
+    def ocr(image, **kwargs):
+        assert image.startswith(b'\x89PNG\r\n\x1a\n')
+        pages.append(image)
+        return f'Invoice page {len(pages)}'
+
+    def offline(request):
+        requests.append(request)
+        raise httpx.ConnectError('worker offline', request=request)
+
+    monkeypatch.setattr(vp, 'ocr', ocr)
+    with httpx.Client(transport=httpx.MockTransport(offline)) as client:
+        processor = vp.VisualProcessor(
+            vision_url='http://example.test', model='test', scratch=tmp_path, client=client,
+        )
+        text, complete, error = processor(source)
+
+    assert text == (
+        '[page 1]\n[OCR text]\nInvoice page 1\n\n'
+        '[page 2]\n[OCR text]\nInvoice page 2'
+    )
+    assert not complete
+    assert error == 'Vision page 1: ConnectError'
+    assert len(pages) == 2
+    assert len(requests) == 1
+
+
 def test_reverting_file_content_requeues_cancelled_work(tmp_path):
     source = tmp_path / 'chart.png'
     source.write_bytes(b'first')

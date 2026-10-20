@@ -1,12 +1,15 @@
 """The public owner-approval form bounds failed code attempts per client."""
 from __future__ import annotations
 
+from urllib.parse import parse_qs, urlsplit
+
 import pytest
 from fastapi.testclient import TestClient
 
 pytest.importorskip("mcp")
 
 from vecgrep.backend import config
+from vecgrep.backend.auth.approval import APPROVAL_COOKIE, approval_cookie_value
 from vecgrep.backend.auth import throttle
 from vecgrep.backend.main import create_app
 from vecgrep.mcp import server
@@ -61,10 +64,26 @@ def test_correct_code_below_the_limit_redirects_through_approved_continuation(pu
     ok = _attempt(client, CODE)
     assert ok.status_code == 303
     assert ok.headers["location"] == "/oauth/continue?next=%2Fauthorize"
-    continued = client.get(ok.headers["location"], follow_redirects=False)
-    assert continued.status_code == 200
-    assert 'content="0;url=/authorize"' in continued.text
-    assert "form-action 'none'" in continued.headers["content-security-policy"]
+    location = urlsplit(ok.headers["location"])
+    assert location.path == "/oauth/continue"
+    assert parse_qs(location.query) == {"next": ["/authorize"]}
+    assert ok.cookies[APPROVAL_COOKIE] == approval_cookie_value(CODE)
+    assert ok.cookies[APPROVAL_COOKIE] != CODE
+    assert ok.headers["cache-control"] == "no-store"
+    cookie = next(cookie for cookie in ok.cookies.jar if cookie.name == APPROVAL_COOKIE)
+    assert cookie.secure
+    assert cookie.has_nonstandard_attr("HttpOnly")
+    assert cookie.get_nonstandard_attr("SameSite") == "strict"
+
+    continuation = client.get(ok.headers["location"], follow_redirects=False)
+    assert continuation.status_code == 200
+    assert 'content="0;url=/authorize"' in continuation.text
+    assert continuation.headers["cache-control"] == "no-store"
+    assert continuation.headers["referrer-policy"] == "no-referrer"
+    assert continuation.headers["content-security-policy"] == (
+        "default-src 'none'; form-action 'none'; "
+        "base-uri 'none'; frame-ancestors 'none'"
+    )
 
 
 def test_tenth_failure_in_a_minute_locks_that_client_even_for_the_right_code(public):

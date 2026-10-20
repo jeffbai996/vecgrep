@@ -1,6 +1,7 @@
 """Security and compatibility contracts for the release workflow."""
 
 from pathlib import Path
+import re
 
 
 WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "release.yml"
@@ -42,3 +43,20 @@ def test_release_event_and_publish_contract_is_preserved() -> None:
         "|| github.event_name == 'workflow_dispatch'"
     ) in workflow
     assert "RELEASE_TAG: ${{ inputs.tag || github.ref_name }}" in workflow
+
+
+def test_test_install_includes_visual_and_parser_dependencies() -> None:
+    workflow = _workflow_text()
+    install = re.search(r'pip install -e "\.\[([^]]+)\]" build', workflow)
+
+    assert install is not None
+    assert {"dev", "mcp", "visual", "code"} <= set(install.group(1).split(","))
+    assert "python -m pytest tests" in workflow
+
+
+def test_wheel_smoke_keeps_a_separate_base_only_environment() -> None:
+    workflow = _workflow_text()
+
+    assert "python -m venv /tmp/vecgrep-smoke" in workflow
+    assert "/tmp/vecgrep-smoke/bin/pip install dist/*.whl\n" in workflow
+    assert '/tmp/vecgrep-smoke/bin/python -I "$GITHUB_WORKSPACE/scripts/smoke_base_install.py"' in workflow
