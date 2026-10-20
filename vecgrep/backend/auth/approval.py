@@ -15,7 +15,7 @@ from starlette.datastructures import Headers
 from starlette.responses import RedirectResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from .ingress import PRIVATE_INGRESS
+from .ingress import PRIVATE_INGRESS, has_exact_loopback_peer
 
 
 APPROVAL_COOKIE = "__Host-vecgrep_oauth_approved"
@@ -84,6 +84,8 @@ def verified_tailnet_login(scope: Scope) -> str | None:
     its own on Serve requests; Funnel does not receive an identity header.
     """
     if scope.get("type") != "http" or scope.get(PRIVATE_INGRESS) is not True:
+        return None
+    if not has_exact_loopback_peer(scope):
         return None
     server = scope.get("server")
     if not server:

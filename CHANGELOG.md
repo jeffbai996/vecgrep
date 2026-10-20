@@ -8,6 +8,11 @@ patch = fixes). The version is a single source of truth in
 ## [Unreleased]
 
 ### Fixed
+- Same-machine trust now requires the client peer address to be exactly
+  `127.0.0.1` or `::1`. It was any address in `127.0.0.0/8`, so a local TCP
+  forwarder dialing from `127.0.0.2` was treated as a direct local MCP client,
+  and as a verified tailnet user when it carried Tailscale Serve headers. Such
+  peers now go through OAuth like any other remote caller.
 - OAuth access tokens live one hour, as the documentation always said; they had
   been issued for a year. The approval still lasts a year through the refresh
   token, which clients rotate silently. Access and refresh tokens already on

@@ -132,11 +132,13 @@ authenticated client still cannot commit writes by itself.
   Loopback and the configured issuer are admitted automatically; private proxy
   aliases and separate browser origins require the explicit allowlists above.
 - Local stdio MCP (`vecgrep mcp`) is untouched — no network, no auth.
-- On the private listener, direct HTTP from a loopback peer bypasses OAuth only when both
+- On the private listener, direct HTTP from a peer whose address is exactly `127.0.0.1` or `::1`
+  (not any other `127.0.0.0/8` address, such as `127.0.0.2`) bypasses OAuth only when both
   `X-Forwarded-For` and `X-Forwarded-Proto` are absent. Any proxy marker makes
   the request untrusted unless the verified Tailscale Serve rule below applies.
 - Private Tailscale Serve strips client-supplied identity headers and adds the logged-in
-  tailnet user's identity. That verified header plus proxy transit permits the
+  tailnet user's identity. That verified header plus proxy transit, from a peer
+  that is exactly `127.0.0.1` or `::1`, permits the
   private tailnet bypass. Public listener requests always remain OAuth
   protected. Tagged nodes receive no user identity header and therefore need
   OAuth or an SSH tunnel to loopback.

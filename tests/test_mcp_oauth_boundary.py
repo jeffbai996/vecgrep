@@ -231,9 +231,14 @@ def test_tailscale_identity_requires_loopback_listener_and_forwarding_marker() -
     info = (b"tailscale-headers-info", b"https://tailscale.com/s/serve-headers")
     assert _is_verified_tailnet_mcp({
         PRIVATE_INGRESS: True, "type": "http", "path": "/", "server": ("127.0.0.1", 8765),
-        "client": ("192.0.2.10", 1),
+        "client": ("127.0.0.1", 1),
         "headers": [identity, forwarded, info],
     }) is True
+    assert _is_verified_tailnet_mcp({
+        PRIVATE_INGRESS: True, "type": "http", "path": "/", "server": ("127.0.0.1", 8765),
+        "client": ("192.0.2.10", 1),
+        "headers": [identity, forwarded, info],
+    }) is False
     assert _is_verified_tailnet_mcp({
         PRIVATE_INGRESS: True, "type": "http", "path": "/", "server": ("192.0.2.2", 8765),
         "client": ("192.0.2.10", 1),
@@ -355,3 +360,74 @@ def test_http_code_and_refresh_tokens_initialize_and_list_tools(loopback_client,
             })
             assert accepted.status_code == 200
             assert "result" in accepted.json()
+
+
+TAILSCALE_SERVE = {
+    "Host": "example.com:10000",
+    "X-Forwarded-For": "192.0.2.10",
+    "X-Forwarded-Proto": "https",
+    "Tailscale-User-Login": "owner@example.test",
+    "Tailscale-Headers-Info": "https://tailscale.com/s/serve-headers",
+}
+LIST_TOOLS = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+
+
+def _scope(peer: str, headers: dict[str, str] | None = None) -> dict:
+    return {
+        "type": "http",
+        "path": "/",
+        PRIVATE_INGRESS: True,
+        "client": (peer, 50000),
+        "server": ("127.0.0.1", 8765),
+        "headers": [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()],
+    }
+
+
+@pytest.mark.parametrize("peer", ["127.0.0.1", "::1"])
+def test_exact_loopback_peers_keep_the_direct_bypass(peer: str) -> None:
+    assert _is_direct_loopback_mcp(_scope(peer)) is True
+
+
+@pytest.mark.parametrize("peer", ["127.0.0.2", "127.1.2.3", "::ffff:127.0.0.1", "testclient", "10.0.0.5"])
+def test_other_peers_are_not_direct_loopback_clients(peer: str) -> None:
+    assert _is_direct_loopback_mcp(_scope(peer)) is False
+
+
+@pytest.mark.parametrize("peer", ["127.0.0.1", "::1"])
+def test_exact_loopback_peers_keep_the_tailnet_identity(peer: str) -> None:
+    assert _is_verified_tailnet_mcp(_scope(peer, TAILSCALE_SERVE)) is True
+
+
+@pytest.mark.parametrize("peer", ["127.0.0.2", "127.1.2.3"])
+def test_tailnet_identity_needs_an_exact_loopback_peer(peer: str) -> None:
+    assert _is_verified_tailnet_mcp(_scope(peer, TAILSCALE_SERVE)) is False
+
+
+def test_serve_headers_from_127_0_0_2_are_routed_to_oauth(vg_home, monkeypatch) -> None:
+    monkeypatch.setenv("VECGREP_OAUTH_ENABLED", "1")
+    monkeypatch.setenv("VECGREP_OAUTH_ISSUER_URL", TEST_ISSUER)
+    monkeypatch.setenv("VECGREP_OAUTH_APPROVAL_TOKEN", TEST_APPROVAL)
+    monkeypatch.setenv("VECGREP_API_TOKEN", "r" * 40)
+    monkeypatch.setattr(cfg_mod, "_settings", None)
+    monkeypatch.setattr(mcp_server, "_PROVIDER", None)
+    with TestClient(create_app(), base_url="http://127.0.0.1:8765",
+                    client=("127.0.0.2", 50000)) as client:
+        served = client.post("/mcp", json=LIST_TOOLS, headers=MCP_HEADERS | TAILSCALE_SERVE)
+        assert served.status_code == 401
+        assert served.headers["www-authenticate"].startswith("Bearer ")
+        unproxied = client.post("/mcp", json=INITIALIZE, headers=MCP_HEADERS)
+        assert unproxied.status_code == 401
+
+
+def test_serve_headers_from_ipv6_loopback_keep_the_tailnet_bypass(vg_home, monkeypatch) -> None:
+    monkeypatch.setenv("VECGREP_OAUTH_ENABLED", "1")
+    monkeypatch.setenv("VECGREP_OAUTH_ISSUER_URL", TEST_ISSUER)
+    monkeypatch.setenv("VECGREP_OAUTH_APPROVAL_TOKEN", TEST_APPROVAL)
+    monkeypatch.setenv("VECGREP_API_TOKEN", "r" * 40)
+    monkeypatch.setattr(cfg_mod, "_settings", None)
+    monkeypatch.setattr(mcp_server, "_PROVIDER", None)
+    with TestClient(create_app(), base_url="http://127.0.0.1:8765",
+                    client=("::1", 50000)) as client:
+        assert client.post("/mcp", json=INITIALIZE, headers=MCP_HEADERS).status_code == 200
+        served = client.post("/mcp", json=LIST_TOOLS, headers=MCP_HEADERS | TAILSCALE_SERVE)
+        assert served.status_code == 200

@@ -2504,14 +2504,10 @@ def _mcp_request_headers(scope: dict) -> dict[bytes, bytes]:
 
 
 def _has_loopback_peer(scope: dict) -> bool:
-    client = scope.get("client")
-    if not client:
-        return False
-    try:
-        peer = str(client[0]).split("%", 1)[0]
-        return ipaddress.ip_address(peer).is_loopback
-    except (ValueError, TypeError, IndexError):
-        return False
+    """The client peer is exactly 127.0.0.1 or ::1, not any 127.0.0.0/8 address."""
+    from ..backend.auth.ingress import has_exact_loopback_peer
+
+    return has_exact_loopback_peer(scope)
 
 
 def _has_loopback_server(scope: dict) -> bool:

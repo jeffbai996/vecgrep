@@ -6,6 +6,22 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 PRIVATE_INGRESS = "vecgrep.private_ingress"
 
+# The only socket peers that count as "this machine". Not ipaddress.is_loopback:
+# that admits all of 127.0.0.0/8, so a local forwarder bound to 127.0.0.2 would
+# inherit the same-machine trust of the real client.
+_SAME_MACHINE_PEERS = frozenset({"127.0.0.1", "::1"})
+
+
+def has_exact_loopback_peer(scope: Scope) -> bool:
+    """True only when the accepted socket's client address is 127.0.0.1 or ::1."""
+    client = scope.get("client")
+    if not client:
+        return False
+    try:
+        return str(client[0]) in _SAME_MACHINE_PEERS
+    except (TypeError, IndexError):
+        return False
+
 
 class OAuthIngressMiddleware:
     def __init__(self, app: ASGIApp, *, private_port: int, public_port: int,

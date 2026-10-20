@@ -219,3 +219,14 @@ def test_oauth_off_cli_port_override_remains_private(vg_home, monkeypatch):
     monkeypatch.setattr(uvicorn, "run", run)
     result = CliRunner().invoke(cli, ["serve", "--port", "8766"])
     assert result.exit_code == 0, repr(result.exception)
+
+
+@pytest.mark.parametrize("peer,trusted", [("127.0.0.1", True), ("::1", True), ("127.0.0.2", False)])
+def test_private_trust_requires_an_exact_loopback_peer(peer, trusted):
+    from vecgrep.backend.auth.approval import verified_tailnet_login
+    from vecgrep.backend.auth.ingress import PRIVATE_INGRESS
+    scope = {"type": "http", "path": "/", PRIVATE_INGRESS: True, "client": (peer, 1),
+             "server": ("127.0.0.1", 8765), "headers": []}
+    assert server._is_direct_loopback_mcp(scope) is trusted
+    scope["headers"] = [(k.lower().encode(), v.encode()) for k, v in SPOOF.items()]
+    assert (verified_tailnet_login(scope) is not None) is trusted

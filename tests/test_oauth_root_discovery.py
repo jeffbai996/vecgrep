@@ -207,7 +207,8 @@ def test_callback_csp_origin_rejects_unsafe_urls(target):
 
 def test_verified_tailnet_owner_gets_csrf_bound_one_click_approval(oauth_client):
     target = "/authorize?response_type=code&client_id=x"
-    with TestClient(create_app(), base_url="https://127.0.0.1:8765") as client:
+    with TestClient(create_app(), base_url="https://127.0.0.1:8765",
+                    client=("127.0.0.1", 50000)) as client:
         page = client.get(
             "/oauth/unlock", params={"next": target}, headers=TAILNET_HEADERS
         )
@@ -231,7 +232,8 @@ def test_verified_tailnet_owner_gets_csrf_bound_one_click_approval(oauth_client)
 
 def test_tailnet_one_click_rejects_missing_or_cross_site_intent(oauth_client):
     target = "/authorize?response_type=code&client_id=x"
-    with TestClient(create_app(), base_url="https://127.0.0.1:8765") as client:
+    with TestClient(create_app(), base_url="https://127.0.0.1:8765",
+                    client=("127.0.0.1", 50000)) as client:
         page = client.get(
             "/oauth/unlock", params={"next": target}, headers=TAILNET_HEADERS
         )
@@ -619,7 +621,8 @@ def test_private_approval_posts_proof_to_public_origin(oauth_client):
     settings.oauth_issuer_url = "https://127.0.0.1:8766/mcp"
     settings.oauth_tailnet_approval_url = "https://127.0.0.1:8765/oauth/unlock"
     target = "/authorize?client_id=client&state=keep-me"
-    with TestClient(create_app(), base_url="https://127.0.0.1:8765") as private:
+    with TestClient(create_app(), base_url="https://127.0.0.1:8765",
+                    client=("127.0.0.1", 50000)) as private:
         page = private.get("/oauth/unlock", params={"next": target}, headers=TAILNET_HEADERS)
         assert 'action="https://127.0.0.1:8766/oauth/unlock"' in page.text
         # no-referrer turns cross-origin form POST Origin into null in browsers.
@@ -643,7 +646,8 @@ def test_repeated_tailnet_handoff_requires_existing_approval_and_bound_proof(oau
     settings.oauth_issuer_url = "https://127.0.0.1:8766/mcp"
     settings.oauth_tailnet_approval_url = "https://127.0.0.1:8765/oauth/unlock"
     target = "/authorize?client_id=client&state=keep-me"
-    with TestClient(create_app(), base_url="https://127.0.0.1:8765") as private:
+    with TestClient(create_app(), base_url="https://127.0.0.1:8765",
+                    client=("127.0.0.1", 50000)) as private:
         page = private.get("/oauth/unlock", params={"next": target}, headers=TAILNET_HEADERS)
         intent = re.search(r'name="tailnet_intent" value="([a-f0-9]+)"', page.text).group(1)
         with TestClient(create_app(), base_url="https://127.0.0.1:8766") as public:
@@ -675,7 +679,8 @@ def test_public_handoff_rejects_unbound_or_forged_proof(oauth_client, change):
     settings.oauth_issuer_url = "https://127.0.0.1:8766/mcp"
     settings.oauth_tailnet_approval_url = "https://127.0.0.1:8765/oauth/unlock"
     target = "/authorize?client_id=client&state=keep-me"
-    with TestClient(create_app(), base_url="https://127.0.0.1:8765") as private:
+    with TestClient(create_app(), base_url="https://127.0.0.1:8765",
+                    client=("127.0.0.1", 50000)) as private:
         page = private.get("/oauth/unlock", params={"next": target}, headers=TAILNET_HEADERS)
         intent = re.search(r'name="tailnet_intent" value="([a-f0-9]+)"', page.text).group(1)
         with TestClient(create_app(), base_url="https://127.0.0.1:8766") as public:
@@ -711,3 +716,29 @@ def test_tailnet_approval_url_rejects_unsafe_configuration(oauth_client, url):
 def test_tailnet_approval_url_loads_from_environment(oauth_client, monkeypatch):
     monkeypatch.setenv("VECGREP_OAUTH_TAILNET_APPROVAL_URL", "https://example.com:8444/oauth/unlock")
     assert cfg_mod.load_settings().oauth_tailnet_approval_url == "https://example.com:8444/oauth/unlock"
+
+
+def test_protected_resource_metadata_stays_public_for_other_loopback_addresses(oauth_client):
+    # Only 127.0.0.1 and ::1 are the same-machine client; a peer dialing from
+    # another address in 127.0.0.0/8 keeps the public resource identity.
+    for peer, expected_loopback in (("127.0.0.2", False), ("::1", True)):
+        with TestClient(
+            create_app(), base_url="http://127.0.0.1:8765", client=(peer, 50000)
+        ) as client:
+            r = client.get("/.well-known/oauth-protected-resource/mcp")
+            assert r.status_code == 200
+            want = "http://127.0.0.1:8765/mcp" if expected_loopback else "https://example.com:10000/mcp"
+            assert r.json()["resource"] == want
+
+
+def test_tailnet_one_click_is_withheld_from_other_loopback_peers(oauth_client):
+    target = "/authorize?response_type=code&client_id=x"
+    for peer, offered in (("127.0.0.2", False), ("::1", True), ("127.0.0.1", True)):
+        with TestClient(
+            create_app(), base_url="https://127.0.0.1:8765", client=(peer, 50000)
+        ) as client:
+            page = client.get(
+                "/oauth/unlock", params={"next": target}, headers=TAILNET_HEADERS
+            )
+            assert page.status_code == 200
+            assert ('name="tailnet_intent"' in page.text) is offered
