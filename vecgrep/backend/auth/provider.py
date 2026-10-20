@@ -147,10 +147,12 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
 
 
 def _oauth_token(at: AccessToken, rt: RefreshToken) -> OAuthToken:
+    from .store import _now
+    expires_in = max(1, round(at.expires_at - _now())) if at.expires_at is not None else _ACCESS_TTL_S
     return OAuthToken(
         access_token=at.token,
         token_type="Bearer",
-        expires_in=_ACCESS_TTL_S,
+        expires_in=expires_in,
         scope=" ".join(at.scopes),
         refresh_token=rt.token,
     )

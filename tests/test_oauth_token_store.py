@@ -361,3 +361,24 @@ def test_revoke_client_drops_its_families(store):
     store.issue_token_pair("c2", ["read"])
     store.revoke_client("c1")
     assert store.counts()["families"] == 1
+
+
+def test_google_connector_access_tokens_match_refresh_lifetime(tmp_path):
+    """Google's Gemini web MCP proxy caches bearer tokens across worker pools
+    without refreshing 1-hour access tokens on chat turns."""
+    path = tmp_path / "oauth_state.json"
+    store = TokenStore(path=str(path))
+    google = OAuthClientInformationFull(
+        client_id="google-1",
+        client_name="Google",
+        redirect_uris=["https://oauth-redirect.googleusercontent.com/r/custom-mcp"],
+    )
+    store.save_client(google)
+    before = time.time()
+    at, rt = store.issue_token_pair("google-1", ["read"])
+    assert at.expires_at >= before + 365 * 86400 - 5
+    rotated_at, _ = store.rotate_refresh_token("google-1", rt.token, ["read"])
+    assert rotated_at.expires_at >= before + 365 * 86400 - 5
+    reloaded = TokenStore(path=str(path))
+    assert reloaded.load_access_token(rotated_at.token).expires_at >= before + 365 * 86400 - 5
+

@@ -320,3 +320,28 @@ async def test_revoking_a_refresh_token_revokes_its_access_tokens(provider):
     await provider.revoke_token(refresh)
     assert await provider.load_access_token(pair.access_token) is None
     assert await provider.load_refresh_token(c, pair.refresh_token) is None
+
+
+@pytest.mark.anyio
+async def test_google_connector_oauth_token_advertises_long_expires_in(provider):
+    google = OAuthClientInformationFull(
+        client_id="google-ai",
+        client_name="Google",
+        redirect_uris=["https://oauth-redirect.googleusercontent.com/r/custom-mcp"],
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        scope="read propose",
+    )
+    await provider.register_client(google)
+    await provider.authorize(google, AuthorizationParams(
+        state="s", scopes=["read"], code_challenge="chal",
+        redirect_uri="https://oauth-redirect.googleusercontent.com/r/custom-mcp",
+        redirect_uri_provided_explicitly=True, resource=None,
+    ))
+    code_obj = next(iter(provider.store._codes.values()))
+    pair = await provider.exchange_authorization_code(google, code_obj)
+    assert pair.expires_in >= 365 * 86400 - 5
+    refresh = await provider.load_refresh_token(google, pair.refresh_token)
+    rotated = await provider.exchange_refresh_token(google, refresh, ["read"])
+    assert rotated.expires_in >= 365 * 86400 - 5
+

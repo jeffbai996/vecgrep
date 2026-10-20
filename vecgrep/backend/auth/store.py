@@ -74,6 +74,19 @@ def _legacy_key(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _is_google_connector(client: OAuthClientInformationFull | None) -> bool:
+    """Google's Gemini web MCP proxy caches issued bearer tokens across worker
+    tasks and does not refresh expired 1-hour access tokens on chat turns."""
+    if client is None:
+        return False
+    if (getattr(client, "client_name", None) or "").strip() == "Google":
+        return True
+    for uri in getattr(client, "redirect_uris", None) or ():
+        if ".googleusercontent.com/" in str(uri):
+            return True
+    return False
+
+
 class TokenStore:
     """Tokens and registered clients, optionally persisted to a 0600 JSON
     file so a service restart no longer revokes every connected client
@@ -163,14 +176,19 @@ class TokenStore:
                 changed = True
         return changed
 
+    def _access_ttl_for_client(self, client_id: str) -> int:
+        if _is_google_connector(self._clients.get(client_id)):
+            return _REFRESH_TTL_S
+        return _ACCESS_TTL_S
+
     def _clamp_loaded_lifetimes(self, changed: bool = False) -> None:
         """Tokens issued under an older, longer lifetime keep working only up to
         the current maximum, counted from this load. A lifetime is never
         extended. Clients hold refresh tokens and renew silently."""
         now = _now()
-        access_limit = int(now + _ACCESS_TTL_S)
         refresh_limit = int(now + _REFRESH_TTL_S)
         for token, at in list(self._access.items()):
+            access_limit = int(now + self._access_ttl_for_client(at.client_id))
             if at.expires_at is None or at.expires_at > access_limit:
                 self._access[token] = at.model_copy(update={"expires_at": access_limit})
                 changed = True
@@ -374,7 +392,8 @@ class TokenStore:
                          resource: str | None = None) -> tuple[AccessToken, RefreshToken]:
         """An approval: a new family holding one access and one refresh token."""
         family = self._new_family(client_id)
-        at = self._new_access(client_id, scopes, _ACCESS_TTL_S, resource, family)
+        access_ttl = self._access_ttl_for_client(client_id)
+        at = self._new_access(client_id, scopes, access_ttl, resource, family)
         rt = self._new_refresh(client_id, scopes, _REFRESH_TTL_S, resource, family)
         self._save()
         return at, rt
@@ -417,7 +436,8 @@ class TokenStore:
         if self._signed_family(client_id, token) != family:
             # a pre-family token has no signature to recognise it by later
             self._retired_legacy[_legacy_key(token)] = {"client_id": client_id, "family": family}
-        at = self._new_access(client_id, granted, _ACCESS_TTL_S, old.resource, family)
+        access_ttl = self._access_ttl_for_client(client_id)
+        at = self._new_access(client_id, granted, access_ttl, old.resource, family)
         rt = self._new_refresh(client_id, granted, _REFRESH_TTL_S, old.resource, family)
         self._save()
         return at, rt
