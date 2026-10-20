@@ -54,6 +54,40 @@ def test_unknown_access_token_is_none(store):
     assert store.load_access_token("never-issued") is None
 
 
+def test_access_tokens_default_to_one_hour(store):
+    """A leaked access token stops working within the hour; the year-long
+    approval lives in the refresh token, which rotates it silently."""
+    before = time.time()
+    at = store.issue_access_token(client_id="c1", scopes=["read"])
+    assert 3600 - 5 <= at.expires_at - before <= 3600 + 5
+
+
+def test_refresh_tokens_default_to_a_year(store):
+    before = time.time()
+    rt = store.issue_refresh_token(client_id="c1", scopes=["read"])
+    assert 365 * 86400 - 5 <= rt.expires_at - before <= 365 * 86400 + 5
+
+
+def test_loading_clamps_legacy_access_tokens_to_the_current_lifetime(tmp_path):
+    """State written while access tokens lived a year loads with every access
+    token due within the hour; nothing is extended, and the file is rewritten
+    so a restart cannot bring the old lifetime back."""
+    import json
+    path = tmp_path / "oauth_state.json"
+    first = TokenStore(path=str(path))
+    at = first.issue_access_token(client_id="c1", scopes=["read"], ttl_s=300 * 86400)
+    rt = first.issue_refresh_token(client_id="c1", scopes=["read"], ttl_s=400 * 86400)
+    short = first.issue_access_token(client_id="c1", scopes=["read"], ttl_s=60)
+    before = time.time()
+    second = TokenStore(path=str(path))
+    loaded = second.load_access_token(at.token)
+    assert loaded is not None and loaded.expires_at <= before + 3600 + 5
+    assert second.load_refresh_token("c1", rt.token).expires_at <= before + 365 * 86400 + 5
+    assert second.load_access_token(short.token).expires_at <= before + 60 + 5, "never extended"
+    on_disk = json.loads(path.read_text())
+    assert on_disk["access"][at.token]["expires_at"] <= before + 3600 + 5
+
+
 # --- refresh tokens ---
 
 def test_issue_and_load_refresh_token(store):

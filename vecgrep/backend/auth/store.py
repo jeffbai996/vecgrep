@@ -28,9 +28,13 @@ from mcp.shared.auth import OAuthClientInformationFull
 
 # Default lifetimes. Access tokens are short (the whole point of OAuth); refresh
 # tokens are long-lived but revocable; codes are seconds-scale (used immediately).
-# A year: the owner approves a client once and expects it to stay connected
-# (Jeff 2026-08-22: "indefinite or like a year"); revocation is the lever.
-_ACCESS_TTL_S = 365 * 86400
+# The approval lasts a year through the refresh token: the owner approves a
+# client once and expects it to stay connected (Jeff 2026-08-22: "indefinite or
+# like a year"), and rotation keeps that alive without a new approval. The
+# access token a client actually presents on every call lives one hour, so a
+# token that leaks from a client, a log or a trace stops working within the
+# hour instead of a year (security review 2026-10-19).
+_ACCESS_TTL_S = 60 * 60
 _REFRESH_TTL_S = 365 * 86400
 _CODE_TTL_S = 300           # 5 minutes
 _MAX_UNAPPROVED_CLIENTS = 32
@@ -90,6 +94,27 @@ class TokenStore:
             # a corrupt state file must not take the auth server down; it
             # simply means every client re-approves once
             self._access, self._refresh, self._clients = {}, {}, {}
+            return
+        self._clamp_loaded_lifetimes()
+
+    def _clamp_loaded_lifetimes(self) -> None:
+        """Tokens issued under an older, longer lifetime keep working only up to
+        the current maximum, counted from this load. A lifetime is never
+        extended. Clients hold refresh tokens and renew silently."""
+        now = _now()
+        access_limit = int(now + _ACCESS_TTL_S)
+        refresh_limit = int(now + _REFRESH_TTL_S)
+        changed = False
+        for token, at in list(self._access.items()):
+            if at.expires_at is None or at.expires_at > access_limit:
+                self._access[token] = at.model_copy(update={"expires_at": access_limit})
+                changed = True
+        for token, rt in list(self._refresh.items()):
+            if rt.expires_at is None or rt.expires_at > refresh_limit:
+                self._refresh[token] = rt.model_copy(update={"expires_at": refresh_limit})
+                changed = True
+        if changed:
+            self._save()
 
     def _save(self) -> None:
         if not self._path:

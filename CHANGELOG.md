@@ -7,6 +7,18 @@ patch = fixes). The version is a single source of truth in
 
 ## [Unreleased]
 
+### Fixed
+- OAuth access tokens live one hour, as the documentation always said; they had
+  been issued for a year. The approval still lasts a year through the refresh
+  token, which clients rotate silently. Access and refresh tokens already on
+  disk are clamped to the current lifetimes when the store loads, so a restart
+  retires the year-long access tokens within the hour.
+- The OAuth unlock page names the host the connection returns to, next to the
+  client's own name, so an owner can tell a client that registered a callback
+  elsewhere.
+- The registration ingress hands the application the client's own `receive()`
+  after replaying the buffered body, instead of synthetic empty bodies.
+
 ### Added
 - Parser-backed `code_symbol` chunks for Python (standard library `ast`) and
   TypeScript/TSX (tree-sitter, the optional `vecgrep[code]` extra). Each class
