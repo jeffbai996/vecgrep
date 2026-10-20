@@ -196,3 +196,168 @@ def test_revoke_client_kills_all_its_tokens(store):
     assert store.load_access_token(a1.token) is None
     assert store.load_refresh_token("c1", r1.token) is None
     assert store.load_access_token(a2.token) is not None
+
+
+# ----- refresh-token families (replay of a rotated token revokes the approval) -----
+
+def test_rotated_refresh_token_replacement_works(store):
+    at, rt = store.issue_token_pair("c1", ["read", "propose"])
+    pair = store.rotate_refresh_token("c1", rt.token, ["read"])
+    assert pair is not None
+    new_at, new_rt = pair
+    assert store.load_access_token(new_at.token).scopes == ["read"]
+    assert store.load_refresh_token("c1", new_rt.token).scopes == ["read"]
+    assert store.load_access_token(at.token) is not None, "rotation leaves access tokens alone"
+    second = store.rotate_refresh_token("c1", new_rt.token, ["read"])
+    assert second is not None, "the replacement rotates in turn"
+    # presenting the retired token again is a replay (pinned below)
+    assert store.load_refresh_token("c1", rt.token) is None
+
+
+def test_replaying_a_rotated_refresh_token_revokes_its_family(store):
+    at, rt = store.issue_token_pair("c1", ["read"])
+    new_at, new_rt = store.rotate_refresh_token("c1", rt.token, ["read"])
+    other_at, other_rt = store.issue_token_pair("c1", ["read"])
+
+    assert store.rotate_refresh_token("c1", rt.token, ["read"]) is None
+    assert store.load_access_token(at.token) is None
+    assert store.load_access_token(new_at.token) is None
+    assert store.load_refresh_token("c1", new_rt.token) is None
+    # a second approval of the same client is a separate family
+    assert store.load_access_token(other_at.token) is not None
+    assert store.load_refresh_token("c1", other_rt.token) is not None
+
+
+def test_loading_a_rotated_refresh_token_revokes_its_family(store):
+    """The SDK loads the presented token before it exchanges it, so the replay
+    signal is acted on at load time too."""
+    _at, rt = store.issue_token_pair("c1", ["read"])
+    new_at, new_rt = store.rotate_refresh_token("c1", rt.token, ["read"])
+    assert store.load_refresh_token("c1", rt.token) is None
+    assert store.load_access_token(new_at.token) is None
+    assert store.load_refresh_token("c1", new_rt.token) is None
+
+
+def test_replay_by_another_client_revokes_nothing(store):
+    _at, rt = store.issue_token_pair("c1", ["read"])
+    new_at, new_rt = store.rotate_refresh_token("c1", rt.token, ["read"])
+    assert store.rotate_refresh_token("c2", rt.token, ["read"]) is None
+    assert store.load_refresh_token("c2", rt.token) is None
+    assert store.load_access_token(new_at.token) is not None
+    assert store.load_refresh_token("c1", new_rt.token) is not None
+
+
+def test_rotation_cannot_widen_scopes(store):
+    _at, rt = store.issue_token_pair("c1", ["read"])
+    assert store.rotate_refresh_token("c1", rt.token, ["read", "propose"]) is None
+    assert store.load_refresh_token("c1", rt.token) is not None, "a refused widening consumes nothing"
+
+
+def test_revoking_a_refresh_token_revokes_its_family_access_tokens(store):
+    at, rt = store.issue_token_pair("c1", ["read"])
+    new_at, new_rt = store.rotate_refresh_token("c1", rt.token, ["read"])
+    other_at, other_rt = store.issue_token_pair("c1", ["read"])
+    store.revoke(new_rt.token)
+    assert store.load_refresh_token("c1", new_rt.token) is None
+    assert store.load_access_token(at.token) is None
+    assert store.load_access_token(new_at.token) is None
+    assert store.load_access_token(other_at.token) is not None
+    assert store.load_refresh_token("c1", other_rt.token) is not None
+
+
+def test_revoking_an_access_token_leaves_its_family(store):
+    at, rt = store.issue_token_pair("c1", ["read"])
+    store.revoke(at.token)
+    assert store.load_access_token(at.token) is None
+    assert store.load_refresh_token("c1", rt.token) is not None
+
+
+def test_access_token_loads_are_unchanged(store):
+    at = store.issue_access_token("c1", ["read", "propose"], ttl_s=3600, resource="https://r.test/mcp")
+    _pair_at, rt = store.issue_token_pair("c1", ["read"])
+    store.rotate_refresh_token("c1", rt.token, ["read"])
+    loaded = store.load_access_token(at.token)
+    assert loaded is not None
+    assert (loaded.token, loaded.client_id, loaded.scopes, loaded.expires_at, loaded.resource) == (
+        at.token, "c1", ["read", "propose"], at.expires_at, "https://r.test/mcp")
+    assert store.token_has_scope(at.token, "propose") is True
+
+
+def test_replay_is_detected_after_a_restart(tmp_path):
+    path = str(tmp_path / "oauth_state.json")
+    first = TokenStore(path=path)
+    _at, rt = first.issue_token_pair("c1", ["read"])
+    new_at, new_rt = first.rotate_refresh_token("c1", rt.token, ["read"])
+    second = TokenStore(path=path)
+    assert second.load_refresh_token("c1", new_rt.token) is not None
+    assert second.rotate_refresh_token("c1", rt.token, ["read"]) is None
+    assert second.load_access_token(new_at.token) is None
+    assert second.load_refresh_token("c1", new_rt.token) is None
+    third = TokenStore(path=path)
+    assert third.load_refresh_token("c1", new_rt.token) is None, "the revocation is persisted"
+
+
+def _legacy_state(path, now):
+    """The state shape written before families existed."""
+    import json
+
+    def tok(token, client, ttl):
+        return {"token": token, "client_id": client, "scopes": ["read"],
+                "expires_at": int(now + ttl), "resource": None}
+
+    state = {
+        "access": {"vgat_legacy-a": tok("vgat_legacy-a", "c1", 1800)},
+        "refresh": {
+            "vgrt_legacy-1": tok("vgrt_legacy-1", "c1", 400 * 86400),
+            "vgrt_legacy-2": tok("vgrt_legacy-2", "c2", 30 * 86400),
+        },
+        "clients": {},
+    }
+    path.write_text(json.dumps(state))
+
+
+def test_legacy_state_without_families_loads_rotates_and_is_rewritten(tmp_path):
+    import json
+    path = tmp_path / "oauth_state.json"
+    before = time.time()
+    _legacy_state(path, before)
+
+    store = TokenStore(path=str(path))
+    assert store.load_access_token("vgat_legacy-a") is not None
+    legacy = store.load_refresh_token("c1", "vgrt_legacy-1")
+    assert legacy is not None
+    assert legacy.expires_at <= before + 365 * 86400 + 5, "the lifetime clamp still applies"
+    assert store.load_refresh_token("c2", "vgrt_legacy-2") is not None
+
+    on_disk = json.loads(path.read_text())
+    families = on_disk["families"]
+    assert len(families) == 2, "each legacy refresh token gets its own family"
+    assert {r["family"] for r in on_disk["refresh"].values()} == set(families)
+    assert on_disk["access"]["vgat_legacy-a"]["family"] == on_disk["refresh"]["vgrt_legacy-1"]["family"]
+
+    new_at, new_rt = store.rotate_refresh_token("c1", "vgrt_legacy-1", ["read"])
+    assert store.load_refresh_token("c1", new_rt.token) is not None
+
+    restarted = TokenStore(path=str(path))
+    assert restarted.rotate_refresh_token("c1", "vgrt_legacy-1", ["read"]) is None
+    assert restarted.load_access_token(new_at.token) is None
+    assert restarted.load_refresh_token("c1", new_rt.token) is None
+    assert restarted.load_access_token("vgat_legacy-a") is None
+    assert restarted.load_refresh_token("c2", "vgrt_legacy-2") is not None, "other families untouched"
+
+
+def test_legacy_load_keeps_every_live_token(tmp_path):
+    path = tmp_path / "oauth_state.json"
+    _legacy_state(path, time.time())
+    store = TokenStore(path=str(path))
+    counts = store.counts()
+    assert (counts["access"], counts["refresh"], counts["families"]) == (1, 2, 2)
+    again = TokenStore(path=str(path)).counts()
+    assert (again["access"], again["refresh"], again["families"]) == (1, 2, 2)
+
+
+def test_revoke_client_drops_its_families(store):
+    store.issue_token_pair("c1", ["read"])
+    store.issue_token_pair("c2", ["read"])
+    store.revoke_client("c1")
+    assert store.counts()["families"] == 1

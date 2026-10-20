@@ -111,12 +111,22 @@ Token lifecycle (the store's invariants):
 |---|---|---|
 | authorization code | 5 min | **single-use** — a replayed code cannot mint a second token |
 | access token | 1 hour | checked on every request; expired never loads |
-| refresh token | 30 days | bound to the client_id that minted it; revocable |
+| refresh token | 1 year | bound to the client_id that minted it; **single-use** — each refresh retires it and issues a replacement |
+| token family | while any of its tokens lives | one per approval; every access and refresh token descended from that approval belongs to it |
 
-Tokens live **in memory**. A server restart wipes them and the client
-silently re-runs the flow (it holds a refresh token → gets a clean 401 →
-re-auths). For a single-user deployment this is a feature: revoking
-everything is `systemctl restart`.
+Each approval starts a token family, and every rotation stays in it. Presenting
+a refresh token that was already rotated means a second copy of it exists, so
+the store revokes every access and refresh token of that family and answers
+`invalid_grant`; the client re-approves once. Revoking a refresh token likewise
+revokes its whole family; revoking an access token revokes only that token.
+Refresh tokens carry their family under an HMAC keyed by a secret in the state
+file, so a retired token is recognised without a record per rotation.
+
+With `VECGREP_OAUTH_STATE_FILE` set, tokens, clients and families persist in a
+0600 JSON file, so a restart keeps every client connected. A state file written
+before families existed loads with one family per refresh token, and lifetimes
+longer than the current maximum are clamped on load, never extended. Without
+the setting tokens live in memory and a restart revokes everything.
 
 Scopes are `read` and `propose` only, and write-shaped tools enforce `propose`
 at execution. The write path stays

@@ -12,16 +12,22 @@ Security invariants enforced here:
   - authorization codes are single-use (consume removes them) — a replayed
     code can't mint a second token
   - refresh tokens are bound to their client_id
+  - every token descends from one approval (a family); rotation retires the
+    presented refresh token, and presenting a retired one again revokes every
+    access and refresh token of its family, because only a copy of a token the
+    client already rotated can still hold the retired value
   - anonymous dynamic registrations have a TTL and count cap, while clients
     with issued tokens are never evicted automatically
 """
 from __future__ import annotations
 
-import secrets
-import time
-
+import base64
+import hashlib
+import hmac
 import json
 import os
+import secrets
+import time
 
 from mcp.server.auth.provider import AccessToken, AuthorizationCode, RefreshToken
 from mcp.shared.auth import OAuthClientInformationFull
@@ -50,9 +56,22 @@ def _new_secret(prefix: str) -> str:
 
 
 class ResourceRefreshToken(RefreshToken):
-    """Keep the audience with a refresh grant; the SDK base type omits it."""
+    """Keep the audience with a refresh grant; the SDK base type omits it.
+    family names the approval the token descends from."""
 
     resource: str | None = None
+    family: str | None = None
+
+
+class FamilyAccessToken(AccessToken):
+    """An access token that knows the approval it descends from, so revoking
+    the approval revokes it too. Tokens minted outside an approval have none."""
+
+    family: str | None = None
+
+
+def _legacy_key(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 class TokenStore:
@@ -71,8 +90,15 @@ class TokenStore:
             raise ValueError("max_unapproved_clients must be positive")
         if unapproved_client_ttl_s < 1:
             raise ValueError("unapproved_client_ttl_s must be positive")
-        self._access: dict[str, AccessToken] = {}
-        self._refresh: dict[str, RefreshToken] = {}
+        self._access: dict[str, FamilyAccessToken] = {}
+        self._refresh: dict[str, ResourceRefreshToken] = {}
+        # family id -> {"client_id", "created_at"}
+        self._families: dict[str, dict] = {}
+        # sha256 of a rotated pre-family refresh token -> {"client_id", "family"}.
+        # Refresh tokens minted with a family carry it under an HMAC, so a
+        # retired one is recognised without keeping a record per rotation.
+        self._retired_legacy: dict[str, dict] = {}
+        self._signing_key = secrets.token_urlsafe(32)
         self._codes: dict[str, AuthorizationCode] = {}
         self._clients: dict[str, OAuthClientInformationFull] = {}
         self._path = path
@@ -87,24 +113,63 @@ class TokenStore:
         try:
             with open(self._path, encoding="utf-8") as fh:
                 raw = json.load(fh)
-            self._access = {k: AccessToken.model_validate(v) for k, v in raw.get("access", {}).items()}
-            self._refresh = {k: ResourceRefreshToken.model_validate(v) for k, v in raw.get("refresh", {}).items()}
-            self._clients = {k: OAuthClientInformationFull.model_validate(v) for k, v in raw.get("clients", {}).items()}
+            access = {k: FamilyAccessToken.model_validate(v) for k, v in raw.get("access", {}).items()}
+            refresh = {k: ResourceRefreshToken.model_validate(v) for k, v in raw.get("refresh", {}).items()}
+            clients = {k: OAuthClientInformationFull.model_validate(v) for k, v in raw.get("clients", {}).items()}
+            families = {str(k): dict(v) for k, v in raw.get("families", {}).items()}
+            retired = {str(k): dict(v) for k, v in raw.get("retired_legacy", {}).items()}
+            key = raw.get("refresh_signing_key")
         except Exception:
             # a corrupt state file must not take the auth server down; it
             # simply means every client re-approves once
-            self._access, self._refresh, self._clients = {}, {}, {}
             return
-        self._clamp_loaded_lifetimes()
+        self._access, self._refresh, self._clients = access, refresh, clients
+        self._families, self._retired_legacy = families, retired
+        changed = False
+        if isinstance(key, str) and key:
+            self._signing_key = key
+        else:
+            changed = True
+        changed = self._assign_legacy_families() or changed
+        self._clamp_loaded_lifetimes(changed)
 
-    def _clamp_loaded_lifetimes(self) -> None:
+    def _assign_legacy_families(self) -> bool:
+        """State written before families existed: each refresh token becomes
+        its own family (each one came from a separate approval or rotation
+        chain). A legacy access token joins its client's family when the
+        client holds exactly one; otherwise it stays unattached and expires
+        within the hour as before."""
+        now = _now()
+        changed = False
+        for token, rt in list(self._refresh.items()):
+            if rt.family is None:
+                rt = rt.model_copy(update={"family": self._new_family(rt.client_id)})
+                self._refresh[token] = rt
+                changed = True
+            elif rt.family not in self._families:
+                self._families[rt.family] = {"client_id": rt.client_id, "created_at": now}
+                changed = True
+        by_client: dict[str, set[str]] = {}
+        for rt in self._refresh.values():
+            by_client.setdefault(rt.client_id, set()).add(rt.family)
+        for token, at in list(self._access.items()):
+            if at.family is None:
+                owned = by_client.get(at.client_id, set())
+                if len(owned) == 1:
+                    self._access[token] = at.model_copy(update={"family": next(iter(owned))})
+                    changed = True
+            elif at.family not in self._families:
+                self._families[at.family] = {"client_id": at.client_id, "created_at": now}
+                changed = True
+        return changed
+
+    def _clamp_loaded_lifetimes(self, changed: bool = False) -> None:
         """Tokens issued under an older, longer lifetime keep working only up to
         the current maximum, counted from this load. A lifetime is never
         extended. Clients hold refresh tokens and renew silently."""
         now = _now()
         access_limit = int(now + _ACCESS_TTL_S)
         refresh_limit = int(now + _REFRESH_TTL_S)
-        changed = False
         for token, at in list(self._access.items()):
             if at.expires_at is None or at.expires_at > access_limit:
                 self._access[token] = at.model_copy(update={"expires_at": access_limit})
@@ -116,16 +181,35 @@ class TokenStore:
         if changed:
             self._save()
 
+    def _prune_families(self) -> None:
+        """A family lives while any token of it does; its retired-token
+        records go with it."""
+        live = {t.family for t in (*self._access.values(), *self._refresh.values())
+                if t.family is not None}
+        for family in list(self._families):
+            if family not in live:
+                self._families.pop(family, None)
+        self._retired_legacy = {k: v for k, v in self._retired_legacy.items()
+                                if v.get("family") in self._families}
+
     def _save(self) -> None:
         if not self._path:
             return
         now = _now()
+        self._prune_families()
+        access = {k: v for k, v in self._access.items()
+                  if v.expires_at is None or v.expires_at > now}
+        refresh = {k: v for k, v in self._refresh.items()
+                   if v.expires_at is None or v.expires_at > now}
+        live = {t.family for t in (*access.values(), *refresh.values())}
         data = {
-            "access": {k: v.model_dump(mode="json") for k, v in self._access.items()
-                       if v.expires_at is None or v.expires_at > now},
-            "refresh": {k: v.model_dump(mode="json") for k, v in self._refresh.items()
-                        if v.expires_at is None or v.expires_at > now},
+            "access": {k: v.model_dump(mode="json") for k, v in access.items()},
+            "refresh": {k: v.model_dump(mode="json") for k, v in refresh.items()},
             "clients": {k: v.model_dump(mode="json") for k, v in self._clients.items()},
+            "families": {k: v for k, v in self._families.items() if k in live},
+            "retired_legacy": {k: v for k, v in self._retired_legacy.items()
+                               if v.get("family") in live},
+            "refresh_signing_key": self._signing_key,
         }
         os.makedirs(os.path.dirname(self._path) or ".", mode=0o700, exist_ok=True)
         tmp = self._path + ".tmp"
@@ -175,18 +259,76 @@ class TokenStore:
     def clients(self) -> dict[str, OAuthClientInformationFull]:
         return self._clients
 
+    # ----- families -----
+    def _new_family(self, client_id: str) -> str:
+        family = _new_secret("vgrf")
+        self._families[family] = {"client_id": client_id, "created_at": _now()}
+        return family
+
+    def _signature(self, client_id: str, family: str, nonce: str) -> str:
+        message = f"{client_id}\0{family}\0{nonce}".encode()
+        digest = hmac.new(self._signing_key.encode(), message, hashlib.sha256).digest()
+        return base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+    def _signed_family(self, client_id: str, token: str) -> str | None:
+        """The family a signed refresh token was minted for, if the signature
+        holds for this client and the family is still alive."""
+        parts = token.split(".")
+        if len(parts) != 4 or parts[0] != "vgrt" or not all(parts):
+            return None
+        _prefix, family, nonce, signature = parts
+        if not hmac.compare_digest(signature, self._signature(client_id, family, nonce)):
+            return None
+        meta = self._families.get(family)
+        if meta is None or meta.get("client_id") != client_id:
+            return None
+        return family
+
+    def _replayed_family(self, client_id: str, token: str) -> str | None:
+        """The live family of a refresh token this client already rotated."""
+        record = self._retired_legacy.get(_legacy_key(token))
+        if record is not None:
+            family = record.get("family")
+            meta = self._families.get(family)
+            if record.get("client_id") == client_id and meta and meta.get("client_id") == client_id:
+                return family
+            return None
+        return self._signed_family(client_id, token)
+
+    def _revoke_family(self, family: str) -> None:
+        self._access = {k: v for k, v in self._access.items() if v.family != family}
+        self._refresh = {k: v for k, v in self._refresh.items() if v.family != family}
+        self._families.pop(family, None)
+        self._retired_legacy = {k: v for k, v in self._retired_legacy.items()
+                                if v.get("family") != family}
+
+    def _revoke_if_replayed(self, client_id: str, token: str) -> bool:
+        family = self._replayed_family(client_id, token)
+        if family is None:
+            return False
+        self._revoke_family(family)
+        self._save()
+        return True
+
     # ----- access tokens -----
-    def issue_access_token(self, client_id: str, scopes: list[str],
-                           ttl_s: int = _ACCESS_TTL_S,
-                           resource: str | None = None) -> AccessToken:
-        at = AccessToken(
+    def _new_access(self, client_id: str, scopes: list[str], ttl_s: int,
+                    resource: str | None, family: str | None) -> FamilyAccessToken:
+        at = FamilyAccessToken(
             token=_new_secret("vgat"),
             client_id=client_id,
             scopes=list(scopes),
             expires_at=int(_now() + ttl_s),
             resource=resource,
+            family=family,
         )
         self._access[at.token] = at
+        return at
+
+    def issue_access_token(self, client_id: str, scopes: list[str],
+                           ttl_s: int = _ACCESS_TTL_S,
+                           resource: str | None = None,
+                           family: str | None = None) -> AccessToken:
+        at = self._new_access(client_id, scopes, ttl_s, resource, family)
         self._save()
         return at
 
@@ -203,27 +345,82 @@ class TokenStore:
         return bool(at and scope in at.scopes)
 
     # ----- refresh tokens -----
-    def issue_refresh_token(self, client_id: str, scopes: list[str],
-                            ttl_s: int = _REFRESH_TTL_S,
-                            resource: str | None = None) -> RefreshToken:
+    def _new_refresh(self, client_id: str, scopes: list[str], ttl_s: int,
+                     resource: str | None, family: str) -> ResourceRefreshToken:
+        nonce = secrets.token_urlsafe(32)
         rt = ResourceRefreshToken(
-            token=_new_secret("vgrt"),
+            token=f"vgrt.{family}.{nonce}.{self._signature(client_id, family, nonce)}",
             client_id=client_id,
             scopes=list(scopes),
             expires_at=int(_now() + ttl_s),
             resource=resource,
+            family=family,
         )
         self._refresh[rt.token] = rt
+        return rt
+
+    def issue_refresh_token(self, client_id: str, scopes: list[str],
+                            ttl_s: int = _REFRESH_TTL_S,
+                            resource: str | None = None,
+                            family: str | None = None) -> RefreshToken:
+        """Without a family this starts a new one, as an approval does."""
+        if family is None or family not in self._families:
+            family = self._new_family(client_id)
+        rt = self._new_refresh(client_id, scopes, ttl_s, resource, family)
         self._save()
         return rt
 
+    def issue_token_pair(self, client_id: str, scopes: list[str],
+                         resource: str | None = None) -> tuple[AccessToken, RefreshToken]:
+        """An approval: a new family holding one access and one refresh token."""
+        family = self._new_family(client_id)
+        at = self._new_access(client_id, scopes, _ACCESS_TTL_S, resource, family)
+        rt = self._new_refresh(client_id, scopes, _REFRESH_TTL_S, resource, family)
+        self._save()
+        return at, rt
+
     def load_refresh_token(self, client_id: str, token: str) -> RefreshToken | None:
+        """A retired token of this client revokes its family and loads as
+        nothing."""
         rt = self._refresh.get(token)
-        if rt is None or rt.client_id != client_id:
+        if rt is None:
+            self._revoke_if_replayed(client_id, token)
+            return None
+        if rt.client_id != client_id:
             return None
         if rt.expires_at is not None and rt.expires_at <= _now():
             return None
         return rt
+
+    def rotate_refresh_token(
+        self, client_id: str, token: str, scopes: list[str],
+    ) -> tuple[AccessToken, RefreshToken] | None:
+        """Consume one refresh token and issue its replacement pair in the same
+        family, in one step and one save. A token this client already rotated
+        revokes the family. A request for scopes beyond the token's consumes
+        nothing."""
+        old = self._refresh.get(token)
+        if old is None:
+            self._revoke_if_replayed(client_id, token)
+            return None
+        if old.client_id != client_id:
+            return None
+        if old.expires_at is not None and old.expires_at <= _now():
+            return None
+        granted = list(scopes or old.scopes)
+        if not granted or not set(granted).issubset(old.scopes):
+            return None
+        family = old.family
+        if family is None or family not in self._families:
+            family = self._new_family(client_id)
+        self._refresh.pop(token, None)
+        if self._signed_family(client_id, token) != family:
+            # a pre-family token has no signature to recognise it by later
+            self._retired_legacy[_legacy_key(token)] = {"client_id": client_id, "family": family}
+        at = self._new_access(client_id, granted, _ACCESS_TTL_S, old.resource, family)
+        rt = self._new_refresh(client_id, granted, _REFRESH_TTL_S, old.resource, family)
+        self._save()
+        return at, rt
 
     # ----- authorization codes (single-use) -----
     def issue_authorization_code(self, client_id: str, scopes: list[str],
@@ -260,9 +457,13 @@ class TokenStore:
 
     # ----- revocation -----
     def revoke(self, token: str) -> None:
-        """Revoke an access OR refresh token by its value. Idempotent."""
+        """Revoke an access OR refresh token by its value. Idempotent. A
+        refresh token carries the approval, so revoking one revokes its whole
+        family; revoking an access token revokes only that token."""
         self._access.pop(token, None)
-        self._refresh.pop(token, None)
+        rt = self._refresh.pop(token, None)
+        if rt is not None and rt.family is not None:
+            self._revoke_family(rt.family)
         self._save()
 
     # ----- admin surface (the /inventory OAuth panel reads these) -----
@@ -281,6 +482,7 @@ class TokenStore:
             "access": len(self._access),
             "refresh": len(self._refresh),
             "codes": len(self._codes),
+            "families": len(self._families),
             "by_client": by_client,
         }
 
@@ -295,5 +497,8 @@ class TokenStore:
             self._refresh.pop(t, None)
         self._codes = {c: ac for c, ac in self._codes.items()
                        if ac.client_id != client_id}
+        for family, meta in list(self._families.items()):
+            if meta.get("client_id") == client_id:
+                self._revoke_family(family)
         self._save()
         return len(doomed_a) + len(doomed_r)

@@ -270,3 +270,53 @@ async def test_refresh_cannot_upgrade_an_unbound_or_wrong_resource_grant(resourc
     assert error.value.error == "invalid_grant"
     assert not provider.store._access
     assert await provider.load_refresh_token(client, refresh.token) is not None
+
+
+async def _code_pair(provider, client):
+    params = AuthorizationParams(
+        state="s", scopes=["read"], code_challenge="chal",
+        redirect_uri="https://claude.ai/api/mcp/auth_callback",
+        redirect_uri_provided_explicitly=True, resource=None,
+    )
+    await provider.authorize(client, params)
+    code_obj = next(iter(provider.store._codes.values()))
+    return await provider.exchange_authorization_code(client, code_obj)
+
+
+@pytest.mark.anyio
+async def test_refresh_replay_revokes_the_family_and_is_invalid_grant(provider):
+    from mcp.server.auth.provider import TokenError
+
+    c = _client(); await provider.register_client(c)
+    first = await _code_pair(provider, c)
+    old = await provider.load_refresh_token(c, first.refresh_token)
+    second = await provider.exchange_refresh_token(c, old, ["read"])
+    assert await provider.load_access_token(second.access_token) is not None
+
+    with pytest.raises(TokenError) as exc:
+        await provider.exchange_refresh_token(c, old, ["read"])
+    assert exc.value.error == "invalid_grant"
+    assert await provider.load_access_token(first.access_token) is None
+    assert await provider.load_access_token(second.access_token) is None
+    assert await provider.load_refresh_token(c, second.refresh_token) is None
+
+
+@pytest.mark.anyio
+async def test_refresh_replay_through_load_revokes_the_family(provider):
+    c = _client(); await provider.register_client(c)
+    first = await _code_pair(provider, c)
+    old = await provider.load_refresh_token(c, first.refresh_token)
+    second = await provider.exchange_refresh_token(c, old, ["read"])
+    assert await provider.load_refresh_token(c, first.refresh_token) is None
+    assert await provider.load_access_token(second.access_token) is None
+    assert await provider.load_refresh_token(c, second.refresh_token) is None
+
+
+@pytest.mark.anyio
+async def test_revoking_a_refresh_token_revokes_its_access_tokens(provider):
+    c = _client(); await provider.register_client(c)
+    pair = await _code_pair(provider, c)
+    refresh = await provider.load_refresh_token(c, pair.refresh_token)
+    await provider.revoke_token(refresh)
+    assert await provider.load_access_token(pair.access_token) is None
+    assert await provider.load_refresh_token(c, pair.refresh_token) is None

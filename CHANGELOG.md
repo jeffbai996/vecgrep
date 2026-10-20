@@ -23,6 +23,11 @@ patch = fixes). The version is a single source of truth in
   elsewhere.
 - The registration ingress hands the application the client's own `receive()`
   after replaying the buffered body, instead of synthetic empty bodies.
+- Replaying an OAuth refresh token that was already rotated revokes every
+  access and refresh token descended from the same approval, instead of only
+  refusing the retired token. Revoking a refresh token revokes its family's
+  access tokens too. State files written before families existed load with one
+  family per refresh token, so connected clients stay connected.
 
 ### Added
 - Parser-backed `code_symbol` chunks for Python (standard library `ast`) and

@@ -92,14 +92,16 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
         if ac is None:
             from mcp.server.auth.errors import TokenError
             raise TokenError("invalid_grant", "authorization code invalid or already used")
-        at = self.store.issue_access_token(client.client_id, ac.scopes, resource=ac.resource)
-        rt = self.store.issue_refresh_token(client.client_id, ac.scopes, resource=ac.resource)
+        # The approval starts a token family; every rotation stays in it.
+        at, rt = self.store.issue_token_pair(client.client_id, ac.scopes, resource=ac.resource)
         return _oauth_token(at, rt)
 
     # ----- refresh token -----
     async def load_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: str
     ) -> RefreshToken | None:
+        # A refresh token this client already rotated revokes its family here,
+        # before the SDK answers invalid_grant.
         return self.store.load_refresh_token(client.client_id, refresh_token)
 
     async def exchange_refresh_token(
@@ -124,11 +126,15 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
             from mcp.server.auth.provider import TokenError
 
             raise TokenError("invalid_scope", "unsupported requested scope")
-        at = self.store.issue_access_token(client.client_id, granted, resource=resource)
-        # Rotate-and-revoke so replaying an already-used refresh token cannot
-        # mint a second access token.
-        self.store.revoke(refresh_token.token)
-        rt = self.store.issue_refresh_token(client.client_id, granted, resource=resource)
+        # Consume and reissue in one store call. A token already rotated means
+        # a second copy exists: the store revokes its whole family and nothing
+        # is minted.
+        pair = self.store.rotate_refresh_token(client.client_id, refresh_token.token, granted)
+        if pair is None:
+            from mcp.server.auth.provider import TokenError
+
+            raise TokenError("invalid_grant", "refresh token invalid or already used")
+        at, rt = pair
         return _oauth_token(at, rt)
 
     # ----- access token (also the verify path the bearer middleware uses) -----
