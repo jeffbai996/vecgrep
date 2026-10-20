@@ -2,7 +2,7 @@
 
 > grep for meaning, not keywords
 
-**v1.2.0 + current main** · stable CLI, HTTP API, and MCP surfaces · see [CHANGELOG.md](CHANGELOG.md) for release history
+**v1.2.0** · stable CLI, HTTP API, and MCP surfaces · changes since the release are under Unreleased in [CHANGELOG.md](CHANGELOG.md)
 
 `vecgrep` is a local-first semantic search engine for any corpus you throw at it. Drop in documents — text, markdown, PDFs, URLs — and search by concept instead of exact words. Runs on your machine, no cloud roundtrip required.
 
@@ -49,6 +49,7 @@ The closest equivalents — `txtai`, `chroma`, `LlamaIndex` — are libraries yo
 - [Why not just use X?](#why-not-just-use-x)
 - [Contributing](#contributing)
 - [Tests](#tests)
+- [Optional PDF and image enrichment](#optional-pdf-and-image-enrichment)
 - [License](#license)
 
 ## Status
@@ -80,7 +81,7 @@ For an isolated one-shot invocation:
 uvx --from "vecgrep[mcp] @ git+https://github.com/jeffbai996/vecgrep" vecgrep --help
 ```
 
-Optional extras are `openai`, `rerank`, `watch`, `mcp`, and `dev`. Combine
+Optional extras are `openai`, `rerank`, `watch`, `mcp`, `code`, `visual`, and `dev`. Combine
 them in the bracketed list when installing from GitHub.
 
 You also need [Ollama](https://ollama.com) running locally for the default embedding backend:
@@ -192,6 +193,7 @@ vecgrep serve
 | `discord_jsonl` | `.jsonl` files where each line is a Discord message (DiscordChatExporter format or any one-message-per-line JSONL with `author` + `content`) |
 | `claude_export` | Anthropic data export `conversations.json` — one Document per conversation |
 | `chatgpt_export` | OpenAI data export `conversations.json` — one Document per conversation, follows main thread |
+| `image` | `.png`, `.jpg`, `.jpeg`, `.webp`, `.tif`, `.tiff`, `.bmp` — needs the `visual` extra; see [Optional PDF and image enrichment](#optional-pdf-and-image-enrichment) |
 
 Pointing `vecgrep index` at a directory walks it recursively and dispatches each file to the matching adapter. Unrecognized files are skipped silently — no errors.
 
@@ -204,7 +206,7 @@ docs ──▶ adapters ──▶ chunkers ──┤                      ├─
 ```
 
 - **Adapters** convert source formats to text. They run once per source; chunkers handle slicing.
-- **Chunkers** slice text into overlapping windows. `SentenceWindowChunker` is the default — 3 sentences with 1-sentence overlap. `FixedTokenChunker` (tiktoken-backed) is the alternate for code, logs, anything where sentence boundaries are noisy.
+- **Chunkers** slice text into overlapping windows, chosen with `--chunker` on `index` and `watch`. `sentence_window` is the default — 3 sentences with 1-sentence overlap. `fixed_token` (tiktoken-backed) suits logs and anything where sentence boundaries are noisy; `markdown_section` keeps each window inside one heading section, `code_symbol` cuts at Python and TypeScript definitions (TypeScript needs the `code` extra) and `turn_window` groups whole chat messages. For a directory source, `--include '*.md'` limits indexing to matching file names.
 - **Embed backends** are pluggable. Each corpus pins the model it was built with; corpora on different models can be served at once, each querying with its own.
   - Default: Ollama `bge-m3` (1024-dim) — strong on paraphrase-heavy and multilingual queries.
   - Alternates: any other Ollama model via `VECGREP_EMBED_MODEL` (e.g. `nomic-embed-text`, 768-dim, lighter/faster; `mxbai-embed-large`, 1024-dim).
@@ -607,14 +609,14 @@ assembly, filters and timelines, stores and adapters, caching and migration,
 backup/restore, OAuth, MCP tools, and guarded write workflows. Skip if you don't
 care; the tooling itself doesn't require them.
 
-## License
-
-MIT
-
-### Optional PDF and image enrichment
+## Optional PDF and image enrichment
 
 With the optional `visual` extra, PDFs and local images can queue for CPU OCR
 and visual descriptions without blocking search. Native PDF text indexes
 immediately; completed enrichment uses the corpus's existing text embedding
 model. A remote vision worker is optional and can go offline without removing
 cached results. See [setup, limits and recovery](docs/VISUAL_ENRICHMENT.md).
+
+## License
+
+MIT

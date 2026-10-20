@@ -639,7 +639,7 @@ def chunk(corpus: str, chunk_id: str, window: int, json_out: bool) -> None:
 @click.option(
     "--rerank-model",
     default=None,
-    help="Override the cross-encoder model (default: BAAI/bge-reranker-base).",
+    help="Override the cross-encoder model (default: BAAI/bge-reranker-v2-m3).",
 )
 @click.option(
     "--filter",
