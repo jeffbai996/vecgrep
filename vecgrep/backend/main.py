@@ -256,6 +256,8 @@ def create_app() -> FastAPI:
             resource_path = urlsplit(resource_raw).path.rstrip("/")
             service = "vecgrep"
             if resource_path and not resource_path.endswith("/vecgrep-mcp"):
+                import os
+
                 raw_labels = os.environ.get("VECGREP_OAUTH_RESOURCE_LABELS", "")
                 for item in raw_labels.split(","):
                     suffix, sep, label = item.strip().partition("=")

@@ -393,6 +393,7 @@ def test_load_access_token_reloads_when_state_file_changes_on_disk(tmp_path):
 
 def test_google_connector_federates_tokens_across_sibling_stores_and_reuses_live_sibling_token(tmp_path):
     import hashlib
+    import json
 
     vg_path = tmp_path / "vecgrep_oauth.json"
     sib_a_path = tmp_path / "sibling_a_oauth.json"
