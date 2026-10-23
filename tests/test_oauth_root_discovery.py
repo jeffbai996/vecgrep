@@ -379,6 +379,30 @@ def test_unlock_page_names_where_the_connection_returns(oauth_client):
     assert "returns to" not in bare.text, "no destination line when the request names none"
 
 
+def test_unlock_page_names_target_sibling_service_from_resource_query(oauth_client, monkeypatch):
+    monkeypatch.setenv("VECGREP_OAUTH_RESOURCE_LABELS", "/notes-mcp/mcp=notes-service,/mcp=broker-mcp")
+    reg = oauth_client.post("/register", json={
+        "client_name": "Google",
+        "redirect_uris": ["https://oauth-redirect.googleusercontent.com/r/custom-mcp"],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    })
+    cid = reg.json()["client_id"]
+    notes_target = f"/authorize?client_id={cid}&scope=read+propose&resource=https%3A%2F%2Fexample.com%2Fnotes-mcp%2Fmcp"
+    notes_page = oauth_client.get("/oauth/unlock", params={"next": notes_target})
+    assert notes_page.status_code == 200
+    assert "Connect Google to notes-service" in notes_page.text
+    assert "query notes-service tools and resources" in notes_page.text
+
+    broker_target = f"/authorize?client_id={cid}&scope=read+propose&resource=https%3A%2F%2Fexample.com%2Fsecret%2Fmcp"
+    broker_page = oauth_client.get("/oauth/unlock", params={"next": broker_target})
+    assert broker_page.status_code == 200
+    assert "Connect Google to broker-mcp" in broker_page.text
+    assert "query broker-mcp tools and resources" in broker_page.text
+
+
+
 def test_unlock_and_issuance_both_default_omitted_scope_to_read(oauth_client):
     reg = oauth_client.post("/register", json={
         "client_name": "Example client",

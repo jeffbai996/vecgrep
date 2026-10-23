@@ -252,7 +252,17 @@ def create_app() -> FastAPI:
                     name = (getattr(info, "client_name", None) or "") if info else ""
                 except Exception:  # pragma: no cover - a missing name is a generic heading
                     name = ""
-            return {"client": name, "scopes": scopes}
+            resource_raw = (q.get("resource") or [""])[0]
+            resource_path = urlsplit(resource_raw).path.rstrip("/")
+            service = "vecgrep"
+            if resource_path and not resource_path.endswith("/vecgrep-mcp"):
+                raw_labels = os.environ.get("VECGREP_OAUTH_RESOURCE_LABELS", "")
+                for item in raw_labels.split(","):
+                    suffix, sep, label = item.strip().partition("=")
+                    if sep and suffix and label and resource_path.endswith(suffix.strip().rstrip("/")):
+                        service = label.strip()
+                        break
+            return {"client": name, "scopes": scopes, "service": service}
 
         _SCOPE_COPY = {
             "read": ("Search and read", "your indexed corpora"),
@@ -270,12 +280,22 @@ def create_app() -> FastAPI:
             safe_next = html.escape(safe_authorize_target(next_target), quote=True)
             ctx = ctx or {"client": "", "scopes": ["read"]}
             client = html.escape(ctx.get("client") or "")
-            heading = f"Connect {client} to vecgrep" if client else "Connect to vecgrep"
+            raw_service = ctx.get("service") or "vecgrep"
+            service = html.escape(raw_service)
+            heading = f"Connect {client} to {raw_service}" if client else f"Connect to {raw_service}"
             from urllib.parse import urlsplit as _us, urlencode as _ue
             host = html.escape(_us(_gs().oauth_issuer_url or "").hostname or "")
+            scope_copy = (
+                _SCOPE_COPY
+                if raw_service == "vecgrep"
+                else {
+                    "read": ("Read access", f"query {raw_service} tools and resources"),
+                    "propose": ("Write and propose", f"run state-changing tools on {raw_service}"),
+                }
+            )
             rows = "".join(
-                f'<li><span class="dot"></span><span><b>{html.escape(_SCOPE_COPY.get(sc, (sc, ""))[0])}</b>'
-                f'<small>{html.escape(_SCOPE_COPY.get(sc, (sc, ""))[1])}</small></span></li>'
+                f'<li><span class="dot"></span><span><b>{html.escape(scope_copy.get(sc, (sc, ""))[0])}</b>'
+                f'<small>{html.escape(scope_copy.get(sc, (sc, ""))[1])}</small></span></li>'
                 for sc in ctx.get("scopes", ["read"])
             )
             private_url = _gs().oauth_tailnet_approval_url
@@ -413,7 +433,7 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
 <main>
 <div class="brand">
 <span class="mark"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 19L19 5M10 5h9v9"/></svg></span>
-<b>vecgrep</b><span>{host}</span>
+<b>{service}</b><span>{host}</span>
 </div>
 <div class="card">
 <h1>{html.escape(heading)}</h1>

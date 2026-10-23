@@ -8,6 +8,8 @@ validated. Dynamic client registration is supported (claude.ai self-registers).
 """
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from mcp.server.auth.provider import (
     AccessToken,
     AuthorizeError,
@@ -20,7 +22,19 @@ from mcp.server.auth.provider import (
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 from .scopes import VALID_SCOPES, UnsupportedScope, effective_scopes
-from .store import TokenStore, _ACCESS_TTL_S
+from .store import TokenStore, _ACCESS_TTL_S, _is_google_connector
+
+
+def _same_origin_resource(requested: str | None, configured: str | None) -> bool:
+    if not requested or not configured:
+        return False
+    req = urlsplit(str(requested))
+    cfg = urlsplit(str(configured))
+    return bool(
+        req.scheme
+        and req.netloc
+        and (req.scheme.lower(), req.netloc.lower()) == (cfg.scheme.lower(), cfg.netloc.lower())
+    )
 
 
 class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
@@ -36,7 +50,10 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
                  *, resource: str | None = None) -> None:
         import os
         # persisted when VECGREP_OAUTH_STATE_FILE is set (the service env does)
-        self.store = TokenStore(path=os.environ.get("VECGREP_OAUTH_STATE_FILE", "").strip() or None)
+        self.store = TokenStore(
+            path=os.environ.get("VECGREP_OAUTH_STATE_FILE", "").strip() or None,
+            default_resource=resource,
+        )
         self.resource = resource
         self.valid_scopes = list(VALID_SCOPES if valid_scopes is None else valid_scopes)
 
@@ -55,21 +72,31 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
     async def authorize(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
-        if self.resource and params.resource not in (None, self.resource):
+        allow_sibling = _is_google_connector(client) and _same_origin_resource(params.resource, self.resource)
+        if self.resource and params.resource not in (None, self.resource) and not allow_sibling:
             raise AuthorizeError("invalid_target", "wrong OAuth resource")
+        raw_scopes = params.scopes
+        if _is_google_connector(client) and raw_scopes:
+            mapped = [
+                "read" if s.endswith(".read") else ("propose" if s.endswith(".write") else s)
+                for s in raw_scopes
+                if s != "offline_access"
+            ]
+            raw_scopes = list(dict.fromkeys(mapped)) or ["read"]
         try:
             scopes = effective_scopes(
-                params.scopes,
+                raw_scopes,
                 valid_scopes=self.valid_scopes,
             )
         except UnsupportedScope as exc:
             raise AuthorizeError("invalid_scope", str(exc)) from exc
+        target_resource = self.resource if allow_sibling else (params.resource or self.resource)
         code = self.store.issue_authorization_code(
             client_id=client.client_id,
             scopes=scopes,
             code_challenge=params.code_challenge,
             redirect_uri=str(params.redirect_uri),
-            resource=params.resource or self.resource,
+            resource=target_resource,
         )
         # Redirect the resource owner's browser back to the client with the
         # code (+ state for CSRF). The SDK helper builds the query correctly.

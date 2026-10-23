@@ -345,3 +345,39 @@ async def test_google_connector_oauth_token_advertises_long_expires_in(provider)
     rotated = await provider.exchange_refresh_token(google, refresh, ["read"])
     assert rotated.expires_in >= 365 * 86400 - 5
 
+
+@pytest.mark.anyio
+async def test_google_connector_accepts_same_origin_sibling_resource_and_normalizes_token_audience():
+    provider = VecgrepOAuthProvider(resource="https://host.example/vg-secret/vecgrep-mcp")
+    google = OAuthClientInformationFull(
+        client_id="google-ai",
+        client_name="Google",
+        redirect_uris=["https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-host_example"],
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        scope="read propose",
+    )
+    await provider.register_client(google)
+    await provider.authorize(google, AuthorizationParams(
+        state="s", scopes=["read", "propose"], code_challenge="chal",
+        redirect_uri="https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-host_example",
+        redirect_uri_provided_explicitly=True,
+        resource="https://host.example/notes-mcp/mcp",
+    ))
+    code_obj = next(iter(provider.store._codes.values()))
+    assert code_obj.resource == "https://host.example/vg-secret/vecgrep-mcp"
+    pair = await provider.exchange_authorization_code(google, code_obj)
+    access = await provider.load_access_token(pair.access_token)
+    assert access is not None
+    assert access.resource == "https://host.example/vg-secret/vecgrep-mcp"
+
+    with pytest.raises(AuthorizeError) as error:
+        await provider.authorize(google, AuthorizationParams(
+            state="s", scopes=["read"], code_challenge="chal",
+            redirect_uri="https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-host_example",
+            redirect_uri_provided_explicitly=True,
+            resource="https://other.example/notes-mcp/mcp",
+        ))
+    assert error.value.error == "invalid_target"
+
+
