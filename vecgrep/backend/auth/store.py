@@ -95,7 +95,7 @@ _GOOGLE_REDIRECT_HOSTS = frozenset({
 
 
 def _is_google_connector(client: OAuthClientInformationFull | None) -> bool:
-    """Google's Gemini web MCP proxy caches issued [redacted:BEARER] across worker
+    """Google's Gemini web MCP proxy caches issued bearer tokens across worker
     tasks and does not refresh expired 1-hour access tokens on chat turns."""
     if client is None:
         return False
