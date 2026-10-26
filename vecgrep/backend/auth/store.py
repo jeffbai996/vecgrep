@@ -18,6 +18,12 @@ Security invariants enforced here:
     client already rotated can still hold the retired value
   - anonymous dynamic registrations have a TTL and count cap, while clients
     with issued tokens are never evicted automatically
+  - Gemini's bearer is shared with the other MCPs on this origin through the
+    registry in google_bearers.py: a bearer another MCP issued is accepted
+    only under this store's own approval of Gemini (its client, scopes and
+    family, no later expiry), and a revocation anywhere holds here
+  - Google is recognised by where its logins are delivered (its OAuth redirect
+    hosts), never by the client name a registrant typed
 """
 from __future__ import annotations
 
@@ -28,9 +34,13 @@ import json
 import os
 import secrets
 import time
+from urllib.parse import urlsplit
 
 from mcp.server.auth.provider import AccessToken, AuthorizationCode, RefreshToken
 from mcp.shared.auth import OAuthClientInformationFull
+
+from . import google_bearers
+from .google_bearers import GoogleBearerRegistry
 
 # Default lifetimes. Access tokens are short (the whole point of OAuth); refresh
 # tokens are long-lived but revocable; codes are seconds-scale (used immediately).
@@ -74,17 +84,29 @@ def _legacy_key(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+# Gemini registers its connector with redirects on Google's production, sandbox
+# and test OAuth hosts. Only Google receives what is sent there, while a client
+# name is whatever the registrant typed.
+_GOOGLE_REDIRECT_HOSTS = frozenset({
+    "oauth-redirect.googleusercontent.com",
+    "oauth-redirect-sandbox.googleusercontent.com",
+    "oauth-redirect-test.googleusercontent.com",
+})
+
+
 def _is_google_connector(client: OAuthClientInformationFull | None) -> bool:
-    """Google's Gemini web MCP proxy caches issued bearer tokens across worker
+    """Google's Gemini web MCP proxy caches issued [redacted:BEARER] across worker
     tasks and does not refresh expired 1-hour access tokens on chat turns."""
     if client is None:
         return False
-    if (getattr(client, "client_name", None) or "").strip() == "Google":
-        return True
-    for uri in getattr(client, "redirect_uris", None) or ():
-        if ".googleusercontent.com/" in str(uri):
-            return True
-    return False
+    uris = [str(u) for u in (getattr(client, "redirect_uris", None) or ())]
+    if not uris:
+        return False
+    for uri in uris:
+        parts = urlsplit(uri)
+        if parts.scheme != "https" or (parts.hostname or "") not in _GOOGLE_REDIRECT_HOSTS:
+            return False
+    return True
 
 
 class TokenStore:
@@ -98,7 +120,7 @@ class TokenStore:
         *,
         max_unapproved_clients: int = _MAX_UNAPPROVED_CLIENTS,
         unapproved_client_ttl_s: int = _UNAPPROVED_CLIENT_TTL_S,
-        federated_state_paths: list[str] | None = None,
+        google_registry_path: str | None = None,
         default_resource: str | None = None,
     ) -> None:
         if max_unapproved_clients < 1:
@@ -119,15 +141,10 @@ class TokenStore:
         self._path = path
         self._loaded_mtime: float = 0.0
         self._default_resource = default_resource
-        if federated_state_paths is not None:
-            self._federated_state_paths = [p for p in federated_state_paths if p]
-        elif path:
-            env_paths = os.environ.get("VECGREP_OAUTH_FEDERATED_STORES", "")
-            self._federated_state_paths = [
-                os.path.expanduser(p.strip()) for p in env_paths.split(",") if p.strip()
-            ]
-        else:
-            self._federated_state_paths = []
+        if google_registry_path is None and path:
+            google_registry_path = os.environ.get(google_bearers.ENV_VAR) or None
+        self._google_bearers = (GoogleBearerRegistry(google_registry_path)
+                                if google_registry_path else None)
         self._max_unapproved_clients = max_unapproved_clients
         self._unapproved_client_ttl_s = unapproved_client_ttl_s
         self._load()
@@ -158,9 +175,8 @@ class TokenStore:
         else:
             changed = True
         changed = self._assign_legacy_families() or changed
-        changed = self._import_sibling_google_token() or changed
         self._clamp_loaded_lifetimes(changed)
-        self._sync_google_tokens_to_siblings()
+        self._record_google_bearers(self._access.values())
 
     def _assign_legacy_families(self) -> bool:
         """State written before families existed: each refresh token becomes
@@ -255,187 +271,56 @@ class TokenStore:
             self._loaded_mtime = os.path.getmtime(self._path)
         except OSError:
             pass
-        self._sync_google_tokens_to_siblings()
 
-    def _live_sibling_google_token(self) -> str | None:
+    # ----- Gemini's bearer, shared through the registry -----
+    def _google_expiries(self, tokens) -> dict[str, float]:
         now = _now()
-        candidates: list[tuple[int, float, str]] = []
-        for sib_path in self._federated_state_paths:
-            if not os.path.exists(sib_path):
-                continue
-            try:
-                with open(sib_path, encoding="utf-8") as fh:
-                    raw = json.load(fh)
-                if "access" not in raw:
-                    continue
-                google_clients = {
-                    cid for cid, c in raw.get("clients", {}).items()
-                    if isinstance(c, dict) and (
-                        str(c.get("client_name") or "").strip() == "Google"
-                        or any(".googleusercontent.com/" in str(u) for u in (c.get("redirect_uris") or ()))
-                    )
-                }
-                for tok, at in raw.get("access", {}).items():
-                    if not isinstance(at, dict) or at.get("client_id") not in google_clients:
-                        continue
-                    exp = float(at.get("expires_at") or 0)
-                    if exp > now:
-                        candidates.append((0 if str(tok).startswith("vgat_") else 1, exp, str(tok)))
-            except Exception:
-                continue
-        if not candidates:
+        return {google_bearers.digest(at.token): float(at.expires_at or (now + _REFRESH_TTL_S))
+                for at in tokens
+                if _is_google_connector(self._clients.get(at.client_id))}
+
+    def _record_google_bearers(self, tokens) -> None:
+        if self._google_bearers is not None:
+            now = _now()
+            self._google_bearers.record(
+                {k: v for k, v in self._google_expiries(tokens).items() if v > now},
+                issuer="vecgrep", now=now)
+
+    def _withdraw_google_bearers(self, tokens) -> None:
+        if self._google_bearers is not None:
+            self._google_bearers.revoke(self._google_expiries(tokens), now=_now())
+
+    def _approved_google_grant(self) -> ResourceRefreshToken | None:
+        """The live refresh token of an approved Google client, latest expiry
+        first. A client that only registered (open DCR) holds none."""
+        now = _now()
+        grants = [rt for rt in self._refresh.values()
+                  if _is_google_connector(self._clients.get(rt.client_id))
+                  and (rt.expires_at is None or rt.expires_at > now)]
+        return max(grants, key=lambda rt: rt.expires_at or float("inf"), default=None)
+
+    def _registered_google_bearer(self, token: str) -> FamilyAccessToken | None:
+        """A bearer another MCP on this origin issued to Gemini, accepted under
+        this store's own approval of Gemini: its client, scopes and family,
+        and no later expiry than that approval. Never stored here, so a
+        revocation or expiry in the registry applies on the next call."""
+        if self._google_bearers is None:
             return None
-        candidates.sort(reverse=True)
-        return candidates[0][2]
-
-    def _import_sibling_google_token(self) -> bool:
-        shared = self._live_sibling_google_token()
-        if not shared:
-            return False
-        google_cids = [cid for cid, c in self._clients.items() if _is_google_connector(c)]
-        if not google_cids:
-            return False
-        target_cid = google_cids[-1]
-        inferred_res = self._default_resource
-        if not inferred_res:
-            for at in self._access.values():
-                if at.resource:
-                    inferred_res = at.resource
-                    break
-        existing = self._access.get(shared)
-        if (
-            existing is not None
-            and set(existing.scopes) >= {"read", "propose"}
-            and (not inferred_res or existing.resource == inferred_res)
-        ):
-            return False
-        family = next(
-            (f for f, meta in self._families.items() if meta.get("client_id") == target_cid),
-            None,
-        ) or self._new_family(target_cid)
-        self._access[shared] = FamilyAccessToken(
-            token=shared,
-            client_id=target_cid,
-            scopes=["read", "propose"],
-            expires_at=int(_now() + _REFRESH_TTL_S),
-            resource=inferred_res,
-            family=family,
+        entry = self._google_bearers.lookup(google_bearers.digest(token), now=_now())
+        grant = self._approved_google_grant() if entry else None
+        if grant is None:
+            return None
+        expires = float(entry["expires_at"])
+        if grant.expires_at is not None:
+            expires = min(expires, float(grant.expires_at))
+        return FamilyAccessToken(
+            token=token,
+            client_id=grant.client_id,
+            scopes=list(grant.scopes),
+            expires_at=int(expires),
+            resource=self._default_resource or grant.resource,
+            family=grant.family,
         )
-        return True
-
-    def _sync_google_tokens_to_siblings(self) -> None:
-        if not self._federated_state_paths:
-            return
-        now = _now()
-        google_tokens: dict[str, int] = {}
-        for tok, at in self._access.items():
-            if _is_google_connector(self._clients.get(at.client_id)) and (at.expires_at is None or at.expires_at > now):
-                google_tokens[tok] = int(at.expires_at or (now + _REFRESH_TTL_S))
-        if not google_tokens:
-            return
-
-        for sib_path in self._federated_state_paths:
-            if not os.path.exists(sib_path):
-                continue
-            try:
-                import fcntl
-                lock_path = sib_path + ".lock"
-                lfd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-                with os.fdopen(lfd, "r+") as lfh:
-                    fcntl.flock(lfh, fcntl.LOCK_EX)
-                    try:
-                        with open(sib_path, encoding="utf-8") as sfh:
-                            sib = json.load(sfh)
-                        if "access_tokens" in sib and "grants" in sib:
-                            google_cids = {
-                                cid for cid, c in sib.get("clients", {}).items()
-                                if isinstance(c, dict) and not c.get("revoked_at") and (
-                                    c.get("client_name") == "Google"
-                                    or any(".googleusercontent.com/" in str(u) for u in (c.get("redirect_uris") or ()))
-                                )
-                            }
-                            grants = [
-                                g for g in sib.get("grants", {}).values()
-                                if isinstance(g, dict) and not g.get("revoked_at") and g.get("client_id") in google_cids
-                            ]
-                            if grants:
-                                grants.sort(key=lambda g: float(g.get("created_at") or 0))
-                                grant = grants[-1]
-                                gid = grant["grant_id"]
-                                fams = [
-                                    f for f in sib.get("families", {}).values()
-                                    if isinstance(f, dict) and f.get("grant_id") == gid
-                                    and not f.get("revoked_at") and float(f.get("expires_at") or 0) > now
-                                ]
-                                if fams:
-                                    fid = fams[-1]["family_id"]
-                                else:
-                                    fid = secrets.token_hex(16)
-                                    sib.setdefault("families", {})[fid] = {
-                                        "family_id": fid,
-                                        "grant_id": gid,
-                                        "expires_at": now + _REFRESH_TTL_S,
-                                        "revoked_at": None,
-                                    }
-                                changed = False
-                                acc = sib.setdefault("access_tokens", {})
-                                for tok_str, exp in google_tokens.items():
-                                    digest = hashlib.sha256(tok_str.encode("utf-8")).hexdigest()
-                                    cur = acc.get(digest)
-                                    if (
-                                        not isinstance(cur, dict)
-                                        or cur.get("revoked_at") is not None
-                                        or float(cur.get("expires_at") or 0) < exp
-                                    ):
-                                        acc[digest] = {
-                                            "client_id": grant["client_id"],
-                                            "expires_at": float(exp),
-                                            "family_id": fid,
-                                            "grant_id": gid,
-                                            "issued_at": now,
-                                            "resource": grant["resource"],
-                                            "revoked_at": None,
-                                            "scopes": sorted(set(grant.get("scopes") or ["read"])),
-                                        }
-                                        changed = True
-                                if changed:
-                                    stmp = sib_path + ".tmp"
-                                    sfd = os.open(stmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                                    with os.fdopen(sfd, "w", encoding="utf-8") as out:
-                                        json.dump(sib, out, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                                    os.replace(stmp, sib_path)
-                        elif "access" in sib and "clients" in sib:
-                            sib_cids = [
-                                cid for cid, c in sib.get("clients", {}).items()
-                                if isinstance(c, dict) and (
-                                    str(c.get("client_name") or "").strip() == "Google"
-                                    or any(".googleusercontent.com/" in str(u) for u in (c.get("redirect_uris") or ()))
-                                )
-                            ]
-                            if sib_cids:
-                                sib_cid = sib_cids[-1]
-                                sib_acc = sib.setdefault("access", {})
-                                changed = False
-                                for tok_str, exp in google_tokens.items():
-                                    if tok_str not in sib_acc:
-                                        sib_acc[tok_str] = {
-                                            "token": tok_str,
-                                            "client_id": sib_cid,
-                                            "scopes": ["read", "propose"],
-                                            "expires_at": int(exp),
-                                            "resource": None,
-                                        }
-                                        changed = True
-                                if changed:
-                                    itmp = sib_path + ".tmp"
-                                    ifd = os.open(itmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                                    with os.fdopen(ifd, "w", encoding="utf-8") as out:
-                                        json.dump(sib, out, sort_keys=True)
-                                    os.replace(itmp, sib_path)
-                    finally:
-                        fcntl.flock(lfh, fcntl.LOCK_UN)
-            except Exception:
-                pass
 
     # ----- clients -----
     def save_client(self, info: OAuthClientInformationFull) -> None:
@@ -515,6 +400,7 @@ class TokenStore:
         return self._signed_family(client_id, token)
 
     def _revoke_family(self, family: str) -> None:
+        self._withdraw_google_bearers([at for at in self._access.values() if at.family == family])
         self._access = {k: v for k, v in self._access.items() if v.family != family}
         self._refresh = {k: v for k, v in self._refresh.items() if v.family != family}
         self._families.pop(family, None)
@@ -532,11 +418,8 @@ class TokenStore:
     # ----- access tokens -----
     def _new_access(self, client_id: str, scopes: list[str], ttl_s: int,
                     resource: str | None, family: str | None) -> FamilyAccessToken:
-        token_val = None
-        if _is_google_connector(self._clients.get(client_id)):
-            token_val = self._live_sibling_google_token()
         at = FamilyAccessToken(
-            token=token_val or _new_secret("vgat"),
+            token=_new_secret("vgat"),
             client_id=client_id,
             scopes=list(scopes),
             expires_at=int(_now() + ttl_s),
@@ -544,6 +427,7 @@ class TokenStore:
             family=family,
         )
         self._access[at.token] = at
+        self._record_google_bearers([at])
         return at
 
     def issue_access_token(self, client_id: str, scopes: list[str],
@@ -565,8 +449,14 @@ class TokenStore:
                 self._load()
                 at = self._access.get(token)
         if at is None:
-            return None
+            at = self._registered_google_bearer(token)
+            if at is None:
+                return None
         if at.expires_at is not None and at.expires_at <= _now():
+            return None
+        if (self._google_bearers is not None
+                and _is_google_connector(self._clients.get(at.client_id))
+                and self._google_bearers.is_revoked(google_bearers.digest(at.token))):
             return None
         return at
 
@@ -692,7 +582,12 @@ class TokenStore:
         """Revoke an access OR refresh token by its value. Idempotent. A
         refresh token carries the approval, so revoking one revokes its whole
         family; revoking an access token revokes only that token."""
-        self._access.pop(token, None)
+        at = self._access.pop(token, None)
+        if at is not None:
+            self._withdraw_google_bearers([at])
+        elif self._google_bearers is not None:
+            # a bearer another MCP issued: revoke it there too, if registered
+            self._google_bearers.revoke({google_bearers.digest(token): None}, now=_now())
         rt = self._refresh.pop(token, None)
         if rt is not None and rt.family is not None:
             self._revoke_family(rt.family)
@@ -723,6 +618,7 @@ class TokenStore:
         panel's revoke button). Returns how many tokens died."""
         doomed_a = [t for t, at in self._access.items() if at.client_id == client_id]
         doomed_r = [t for t, rt in self._refresh.items() if rt.client_id == client_id]
+        self._withdraw_google_bearers([self._access[t] for t in doomed_a])
         for t in doomed_a:
             self._access.pop(t, None)
         for t in doomed_r:

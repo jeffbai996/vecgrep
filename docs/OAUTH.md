@@ -128,6 +128,15 @@ before families existed loads with one family per refresh token, and lifetimes
 longer than the current maximum are clamped on load, never extended. Without
 the setting tokens live in memory and a restart revokes everything.
 
+Gemini keeps one bearer per hostname and presents it to every MCP behind that
+hostname. With `OAUTH_GOOGLE_BEARER_REGISTRY` set to the same path for every
+MCP on the origin, each one records the bearers it issues to Gemini there (a
+sha256 digest, an expiry and a revocation time, never the token) and accepts a
+bearer another MCP registered only under its own approval of Gemini: its
+scopes, and no later expiry than that approval. Revoking a Gemini bearer at
+any MCP revokes it at all of them. Gemini is recognised by its OAuth redirect
+hosts, not by its client name. Other clients never touch the registry.
+
 Scopes are `read` and `propose` only, and write-shaped tools enforce `propose`
 at execution. The write path stays
 propose → **human confirm**; confirm is never grantable via OAuth — an
