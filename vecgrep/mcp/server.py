@@ -94,8 +94,8 @@ def _require_mcp() -> None:
 def _tool_annotations(name: str) -> Any:
     from mcp.types import ToolAnnotations
 
-    writes = {"write", "edit", "propose_write", "propose_edit",
-              "propose_delete", "propose_merge"}
+    writes = {"write", "edit", "write_temp", "renew_temp", "propose_write",
+              "propose_edit", "propose_delete", "propose_merge"}
     return ToolAnnotations(
         readOnlyHint=name not in writes,
         destructiveHint=name == "edit",
@@ -167,7 +167,7 @@ _atexit.register(lambda: _reset_service_cache())
 
 
 def _result_payload(r) -> dict:
-    return {
+    payload = {
         "similarity_pct": round(r.similarity_pct, 1),  # compat alias
         "relevance_pct": round(r.relevance_pct, 1),
         "relevance_label": r.relevance_label,
@@ -186,6 +186,14 @@ def _result_payload(r) -> dict:
         # Raw retriever scores for downstream re-calibration.
         "scores": r.explain or {},
     }
+    # Only temp docs carry an expiry; everything else keeps the old shape.
+    from ..backend.write.temp import time_left
+    left = time_left(r.metadata or {})
+    if left is not None:
+        payload["expires_in"] = left
+        if r.metadata.get("until"):
+            payload["until"] = r.metadata["until"]
+    return payload
 
 
 # Corpora at or above this many points get cross-encoder rerank by default.
@@ -976,6 +984,10 @@ def _run_direct_write(content: str, source_kind: str | None = None,
             "instead — it works for any agent-writable corpus and lands after a "
             "human confirm.")})
 
+    conflict = _temp_corpus_conflict(corpus)
+    if conflict:
+        return conflict
+
     # A write-through routes a CONFIRMED op into an upstream store of record.
     # Pairing that with an unconfirmed write would let an agent mutate that
     # upstream with no human in the loop -- exactly the wall this whole module
@@ -1002,7 +1014,8 @@ def _run_direct_write(content: str, source_kind: str | None = None,
 
 
 def _commit_direct_write(corpus: str, content: str, title: str | None,
-                         source_kind: str | None, tags: list[str] | None) -> str:
+                         source_kind: str | None, tags: list[str] | None,
+                         extra_meta: dict | None = None) -> str:
     """Commit file creation + indexing under the corpus admission lock."""
     from ..backend.write import proposal as _P
     svc = _svc()
@@ -1036,6 +1049,7 @@ def _commit_direct_write(corpus: str, content: str, title: str | None,
             meta["source_kind"] = source_kind
         if tags:
             meta["tags"] = list(tags)
+        meta.update(extra_meta or {})
         try:
             _P._validate_meta(meta)
             rendered = _P.render_doc(doc_id, content, meta)
@@ -1059,6 +1073,125 @@ def _commit_direct_write(corpus: str, content: str, title: str | None,
             "path": str(target),
             "status": f"written and indexed{index_note}",
         })
+
+
+def _temp_corpus_conflict(corpus: str) -> str | None:
+    """Refuse a direct write/edit into the temp corpus: those paths carry no
+    expiry, and every temp doc must have one. Use write_temp there."""
+    from ..backend.write.temp import temp_corpus
+    if corpus == temp_corpus():
+        return json.dumps({"error": (
+            f"corpus {corpus!r} is the temp corpus, where every doc needs an "
+            f"expiry. Use write_temp, or point VECGREP_DIRECT_WRITE_CORPUS at "
+            f"a different corpus.")})
+    return None
+
+
+# ── Temp corpus: direct writes that expire ───────────────────────────────────
+# Same unconfirmed, single-corpus, capped shape as `write`, aimed at the
+# operator-designated temp corpus (VECGREP_TEMP_CORPUS). The one difference is
+# the required expiry; see backend/write/temp.py for the contract.
+def _temp_preflight(corpus: str | None) -> str | None:
+    denied = _require_remote_scope("propose")
+    if denied:
+        return denied
+    if not corpus:
+        return json.dumps({"error": (
+            "temp writes are not enabled. An operator enables them for one "
+            "corpus with VECGREP_TEMP_CORPUS=<corpus>.")})
+    if corpus == _direct_write_corpus():
+        return json.dumps({"error": (
+            f"corpus {corpus!r} is set as both the temp corpus and the direct "
+            f"write corpus. Give VECGREP_TEMP_CORPUS its own corpus.")})
+    from ..backend.write.confirm import _writethrough_cmd
+    if _writethrough_cmd(corpus) is not None:
+        return json.dumps({"error": (
+            f"corpus {corpus!r} has a write-through configured; the temp "
+            f"corpus must be a plain local corpus.")})
+    return None
+
+
+def _run_temp_write(content: str, expires: str | None,
+                    until: str | None = None, title: str | None = None,
+                    tags: list[str] | None = None) -> str:
+    """WRITE a doc into the temp corpus with a required expiry, no confirm.
+
+    Sweeps the corpus's expired docs first, so the corpus stays small without
+    a separate timer."""
+    from ..backend.write import temp as _T
+    from ..backend.write.proposal import ProposalError
+
+    corpus = _T.temp_corpus()
+    refused = _temp_preflight(corpus)
+    if refused:
+        return refused
+    if not content or not content.strip():
+        return json.dumps({"error": "write_temp needs non-empty content."})
+    n_bytes = len(content.encode("utf-8"))
+    if n_bytes > _direct_write_max_bytes():
+        return json.dumps({"error": (
+            f"content is {n_bytes} bytes, over the {_direct_write_max_bytes()}-byte "
+            f"cap. Split it.")})
+    try:
+        at = _T.parse_expiry(expires)
+    except ProposalError as e:
+        return json.dumps({"error": str(e)})
+
+    extra = {"expires_at": at.isoformat()}
+    if until and until.strip():
+        extra["until"] = until.strip()
+    swept = _T.sweep_expired(_svc(), _write_dir(corpus))
+    result = json.loads(_commit_direct_write(
+        corpus, content, title, None, tags, extra_meta=extra))
+    if "error" in result:
+        return json.dumps(result)
+    result.update({"expires_at": extra["expires_at"],
+                   "expires_in": _T.time_left(extra), "swept": len(swept)})
+    return json.dumps(result)
+
+
+def _run_temp_renew(doc_id: str, expires: str | None) -> str:
+    """Move a temp doc's expiry to a new time (from now, under the same cap)."""
+    from ..backend.ingestion.adapters.markdown import parse_frontmatter
+    from ..backend.write import proposal as _P
+    from ..backend.write import temp as _T
+
+    corpus = _T.temp_corpus()
+    refused = _temp_preflight(corpus)
+    if refused:
+        return refused
+    # The id regex admits only one path-safe token, so no traversal out of
+    # the temp corpus's own directory.
+    if not _P._ID_RE.match(doc_id or ""):
+        return json.dumps({"error": f"{doc_id!r} is not a doc id."})
+    try:
+        at = _T.parse_expiry(expires)
+    except _P.ProposalError as e:
+        return json.dumps({"error": str(e)})
+
+    svc = _svc()
+    with svc.locks.write(corpus):
+        target = _write_dir(corpus) / f"{doc_id}.md"
+        if not target.is_file():
+            return json.dumps({"error": f"{doc_id!r} not found in the temp corpus."})
+        text = target.read_text(encoding="utf-8")
+        meta = parse_frontmatter(text)
+        meta["expires_at"] = at.isoformat()
+        try:
+            rendered = _P.render_doc(doc_id, _P._body_of(text), meta)
+        except _P.ProposalError as e:
+            return json.dumps({"error": str(e)})
+        _atomic_write_private(target, rendered)
+        index_note = ""
+        try:
+            svc.index(str(target), corpus)
+        except Exception as e:  # noqa: BLE001 - the file is the source of truth
+            index_note = f" (index not refreshed: {e}; `vecgrep index` will reconcile)"
+    return json.dumps({
+        "renewed": True, "doc_id": doc_id, "corpus": corpus,
+        "expires_at": meta["expires_at"],
+        "expires_in": _T.time_left(meta), "status": f"renewed{index_note}",
+    })
 
 
 def _run_direct_edit(doc_id: str, content: str | None = None,
@@ -1091,6 +1224,10 @@ def _run_direct_edit(doc_id: str, content: str | None = None,
             "corpus with VECGREP_DIRECT_WRITE_CORPUS=<corpus>. Use propose_edit "
             "instead — it works for any agent-writable corpus and lands after a "
             "human confirm.")})
+
+    conflict = _temp_corpus_conflict(corpus)
+    if conflict:
+        return conflict
 
     from ..backend.write.confirm import _writethrough_cmd
     if _writethrough_cmd(corpus) is not None:
@@ -1630,6 +1767,44 @@ def build_mcp_server() -> Any:
                 },
             ),
             Tool(
+                name="write_temp",
+                description=(
+                    "WRITE a short-lived entry that expires on its own -- no "
+                    "human confirm. Lands in the operator's temp corpus "
+                    "(VECGREP_TEMP_CORPUS). `expires` is required: 3d, 12h, 2w "
+                    "or an ISO date, capped by the operator (default 90 days). "
+                    "`until` optionally names the event that would make it "
+                    "stale. Search drops the entry once it expires. Use it for "
+                    "facts that are true for now; durable facts go elsewhere."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string"},
+                        "expires": {"type": "string"},
+                        "until": {"type": "string"},
+                        "title": {"type": "string"},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["content", "expires"],
+                },
+            ),
+            Tool(
+                name="renew_temp",
+                description=(
+                    "Move a temp entry's expiry to a new time, counted from "
+                    "now and under the same cap. Body and metadata are kept."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "doc_id": {"type": "string"},
+                        "expires": {"type": "string"},
+                    },
+                    "required": ["doc_id", "expires"],
+                },
+            ),
+            Tool(
                 name="edit",
                 description=(
                     "EDIT an existing entry immediately — no human confirm. Same "
@@ -1786,6 +1961,14 @@ def build_mcp_server() -> Any:
                     source_kind=args.get("source_kind"),
                     tags=args.get("tags"), title=args.get("title"),
                 )
+            elif name == "write_temp":
+                text = _run_temp_write(
+                    args.get("content", ""), args.get("expires"),
+                    until=args.get("until"), title=args.get("title"),
+                    tags=args.get("tags"),
+                )
+            elif name == "renew_temp":
+                text = _run_temp_renew(args.get("doc_id", ""), args.get("expires"))
             elif name == "edit":
                 text = _run_direct_edit(
                     args.get("doc_id", ""), content=args.get("content"),
@@ -2940,6 +3123,35 @@ def build_http_app(
         Commits immediately and returns the doc_id."""
         return _run_direct_write(content, source_kind=source_kind,
                                  tags=tags, title=title)
+
+    @fmcp.tool(
+        description=(
+            "WRITE a short-lived entry that expires on its own -- no human "
+            "confirm. Lands in the operator's temp corpus. `expires` is "
+            "required: 3d, 12h, 2w or an ISO date, capped by the operator "
+            "(default 90 days). `until` optionally names the event that would "
+            "make it stale. Search drops the entry once it expires. Use it for "
+            "facts that are true for now (a current release, a workaround, a "
+            "degraded host); durable facts belong in a permanent corpus."
+        )
+    )
+    def write_temp(content: str, expires: str, until: str | None = None,
+                   title: str | None = None,
+                   tags: list[str] | None = None) -> str:
+        """content: entry text. expires: 3d | 12h | 2w | ISO date. until:
+        optional stale-when condition. Returns the doc_id and time left."""
+        return _run_temp_write(content, expires, until=until, title=title,
+                               tags=tags)
+
+    @fmcp.tool(
+        description=(
+            "Move a temp entry's expiry to a new time, counted from now and "
+            "under the same cap. Body and metadata are kept."
+        )
+    )
+    def renew_temp(doc_id: str, expires: str) -> str:
+        """doc_id: the temp entry's id. expires: 3d | 12h | 2w | ISO date."""
+        return _run_temp_renew(doc_id, expires)
 
     @fmcp.tool(
         description=(

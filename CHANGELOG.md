@@ -7,6 +7,16 @@ patch = fixes). The version is a single source of truth in
 
 ## [Unreleased]
 
+### Added
+- Temp corpus for short-lived documents. `VECGREP_TEMP_CORPUS=<name>` enables
+  the MCP `write_temp` and `renew_temp` tools for one plain local corpus. Every
+  temp document carries a required `expires_at` (`3d`, `12h`, `2w` or an ISO
+  date), capped by `VECGREP_TEMP_MAX_TTL_DAYS` (default 90), and an optional
+  `until` condition. Search drops a document once its expiry passes, and temp
+  hits report `expires_in`. `vecgrep temp sweep`, and every temp write, delete
+  expired documents from that corpus only. The direct-write corpus cannot be
+  the temp corpus.
+
 ### Fixed
 - Tailscale Serve identity still counts after uvicorn rewrites the loopback peer to the forwarded address.
 - Same-machine trust now requires the client peer address to be exactly

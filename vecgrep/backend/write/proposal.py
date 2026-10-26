@@ -39,7 +39,7 @@ _ID_RE = re.compile(r"^[a-z][a-z0-9_]*-([a-z0-9]+)$")
 FRONTMATTER_FIELDS = (
     "id", "title", "status", "created_at", "origin", "confirmed_by",
     "confirmed_at", "edited_at", "tier", "corpus", "source_kind", "tags",
-    "merged_from",
+    "merged_from", "expires_at", "until",
 )
 
 

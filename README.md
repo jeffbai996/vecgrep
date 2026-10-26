@@ -174,6 +174,8 @@ Proposal corpora are default-deny: `claude-ai` unless `VECGREP_DEFAULT_PROPOSE_C
 
 `VECGREP_DIRECT_WRITE_CORPUS=<name>` enables immediate MCP `write` and `edit` for one plain local corpus. The corpus is not in the tool schema. Writes are capped by `VECGREP_DIRECT_WRITE_MAX_BYTES` and `VECGREP_DIRECT_WRITE_MAX_PER_HOUR`; edits keep timestamped backups and refuse protected documents; there is no direct delete; a corpus with a write-through hook is refused.
 
+`VECGREP_TEMP_CORPUS=<name>` enables MCP `write_temp` and `renew_temp` for one plain local corpus of short-lived documents. Each document needs an expiry (`3d`, `12h`, `2w` or an ISO date) no further out than `VECGREP_TEMP_MAX_TTL_DAYS` (default 90). Search hides a document once it expires and reports `expires_in` on live ones; `vecgrep temp sweep` and each temp write delete expired documents from that corpus and no other. It must differ from the direct-write corpus.
+
 CLI without MCP:
 
 ```bash

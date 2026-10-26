@@ -189,6 +189,7 @@ def test_http_and_stdio_advertise_same_search_controls_and_operation_hints(monke
         for name, tool in tools.items():
             assert tool.annotations is not None, name
             assert tool.annotations.readOnlyHint == (name not in {
-                'write', 'edit', 'propose_write', 'propose_edit', 'propose_delete', 'propose_merge'})
+                'write', 'edit', 'write_temp', 'renew_temp', 'propose_write', 'propose_edit',
+                    'propose_delete', 'propose_merge'})
         assert tools['write'].annotations.idempotentHint is False
         assert tools['propose_delete'].annotations.destructiveHint is False

@@ -42,6 +42,7 @@ from .embed.cache import CachedBackend, EmbedCache
 from .explorer import ExplorerCatalog, build_catalog, list_catalog
 from .explorer_store import CatalogGeneration, ExplorerStore
 from .ingestion.enrich import chunk_enrichment
+from .write.temp import is_expired
 from .ingestion.adapters import (
     AdapterError,
     Document,
@@ -1412,6 +1413,9 @@ class VecgrepService:
             filters.append("meta.status=active")
         if filters:
             results = [r for r in results if _passes_filters(r, filters, default_active=True)]
+        # A temp doc (write/temp.py) leaves search the moment its own expiry
+        # passes, whether or not the sweep has deleted it yet.
+        results = [r for r in results if not is_expired(r.metadata)]
 
         # Collapse near-duplicate chunks from the same source before selecting,
         # so adjacent sentence-windows and repeated messages (bot alert spam,

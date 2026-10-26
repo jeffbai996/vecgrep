@@ -1366,6 +1366,29 @@ def bm25_rebuild(corpus: str) -> None:
 
 
 @cli.group()
+def temp() -> None:
+    """Manage the temp corpus (docs that expire)."""
+
+
+@temp.command("sweep")
+def temp_sweep() -> None:
+    """Delete expired docs from the temp corpus (VECGREP_TEMP_CORPUS).
+
+    Search already hides expired docs; this reclaims their files and index
+    entries. Touches no other corpus."""
+    from ..backend.service import VecgrepService
+    from ..backend.write.temp import sweep_expired, temp_corpus
+
+    corpus = temp_corpus()
+    if not corpus:
+        click.echo("temp corpus is not enabled (set VECGREP_TEMP_CORPUS).")
+        return
+    svc = VecgrepService()
+    removed = sweep_expired(svc, get_settings().home / "write" / corpus)
+    click.echo(f"swept {len(removed)} expired doc(s) from {corpus}")
+
+
+@cli.group()
 def cache() -> None:
     """Inspect and manage the embedding cache."""
 
