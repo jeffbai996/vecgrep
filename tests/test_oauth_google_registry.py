@@ -100,6 +100,18 @@ def test_a_registered_bearer_is_refused_once_it_expires(tmp_path, monkeypatch):
     assert store.load_access_token("from-another-mcp") is None
 
 
+def test_a_copy_that_expired_here_gives_way_to_a_longer_one_recorded_elsewhere(tmp_path, monkeypatch):
+    store, _, _ = _approved(tmp_path)
+    short = store.issue_access_token("vg-google", ["read"], ttl_s=DAY, resource=RESOURCE)
+    _registered_elsewhere(tmp_path, short.token, time.time() + 30 * DAY)
+    later = time.time() + 2 * DAY
+    monkeypatch.setattr("vecgrep.backend.auth.store._now", lambda: later)
+
+    at = store.load_access_token(short.token)
+
+    assert at is not None and at.expires_at > later
+
+
 def test_without_a_registry_a_foreign_bearer_is_refused(tmp_path):
     store = TokenStore(path=str(tmp_path / "vecgrep.json"))
     store.save_client(_client())

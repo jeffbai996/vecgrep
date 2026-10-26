@@ -448,6 +448,8 @@ class TokenStore:
             if mtime != self._loaded_mtime:
                 self._load()
                 at = self._access.get(token)
+        if at is not None and at.expires_at is not None and at.expires_at <= _now():
+            at = None   # another MCP may hold a longer-lived copy of this bearer
         if at is None:
             at = self._registered_google_bearer(token)
             if at is None:
