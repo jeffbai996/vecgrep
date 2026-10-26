@@ -3,6 +3,7 @@ and an unreadable file accepts nothing and is never overwritten."""
 from __future__ import annotations
 
 import json
+import os
 import time
 
 from vecgrep.backend.auth.google_bearers import GoogleBearerRegistry, digest
@@ -51,6 +52,38 @@ def test_revoking_an_unregistered_bearer_with_a_known_expiry_keeps_it_out(tmp_pa
     assert reg.lookup(digest("bearer-1"), now=now) is None
 
 
+def test_an_entry_lasts_as_long_as_the_longest_copy_recorded(tmp_path):
+    reg = _registry(tmp_path)
+    now = time.time()
+    reg.record({digest("bearer-1"): now + 27 * DAY}, issuer="one", now=now)
+    reg.record({digest("bearer-1"): now + 365 * DAY}, issuer="two", now=now)
+
+    assert reg.lookup(digest("bearer-1"), now=now + 100 * DAY) is not None
+
+
+def test_a_revocation_lasts_as_long_as_the_longest_copy_recorded(tmp_path):
+    reg = _registry(tmp_path)
+    now = time.time()
+    reg.record({digest("bearer-1"): now + 27 * DAY}, issuer="one", now=now)
+    reg.revoke({digest("bearer-1"): None}, now=now)
+    reg.record({digest("bearer-1"): now + 365 * DAY}, issuer="two", now=now)
+
+    reg.record({digest("other"): now + 365 * DAY}, issuer="one", now=now + 28 * DAY)
+
+    assert reg.is_revoked(digest("bearer-1"))
+
+
+def test_revoking_with_a_later_expiry_extends_the_revocation(tmp_path):
+    reg = _registry(tmp_path)
+    now = time.time()
+    reg.record({digest("bearer-1"): now + 27 * DAY}, issuer="one", now=now)
+    reg.revoke({digest("bearer-1"): now + 365 * DAY}, now=now)
+
+    reg.record({digest("other"): now + 365 * DAY}, issuer="one", now=now + 28 * DAY)
+
+    assert reg.is_revoked(digest("bearer-1"))
+
+
 def test_revoking_an_unregistered_bearer_without_an_expiry_records_nothing(tmp_path):
     reg = _registry(tmp_path)
     reg.revoke({digest("bearer-1"): None})
@@ -83,5 +116,17 @@ def test_expired_entries_are_dropped_on_the_next_write(tmp_path):
 def test_the_registry_file_is_private(tmp_path):
     reg = _registry(tmp_path)
     reg.record({digest("bearer-1"): time.time() + DAY}, issuer="one")
-    import os
+
     assert os.stat(reg.path).st_mode & 0o777 == 0o600
+
+
+def test_the_registry_reaches_the_disk_before_it_replaces_the_old_file(tmp_path, monkeypatch):
+    reg = _registry(tmp_path)
+    calls = []
+    real_fsync, real_replace = os.fsync, os.replace
+    monkeypatch.setattr(os, "fsync", lambda fd: (calls.append("fsync"), real_fsync(fd))[1])
+    monkeypatch.setattr(os, "replace", lambda a, b: (calls.append("replace"), real_replace(a, b))[1])
+
+    reg.record({digest("bearer-1"): time.time() + DAY}, issuer="one")
+
+    assert calls == ["fsync", "replace"]

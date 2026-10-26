@@ -8,6 +8,10 @@ revocation time per bearer, never a token value. An MCP accepts a registered
 bearer only under its own approval of Gemini, so the registry says whether a
 bearer is live and each MCP decides what it may do with it.
 
+Several MCPs may hold copies of one bearer with different expiries, so an
+entry lasts as long as the longest copy any of them records. A revocation
+therefore holds for as long as any MCP could still accept that bearer.
+
 Several processes write the file: every change takes `<path>.lock` and
 replaces the file atomically. An unreadable registry accepts nothing new and
 is never overwritten.
@@ -71,6 +75,9 @@ class GoogleBearerRegistry:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump({"version": 1, "bearers": live}, fh, sort_keys=True)
+                fh.flush()
+                # a torn file after power loss would stay unreadable for good
+                os.fsync(fh.fileno())
             os.replace(tmp, self.path)
         except BaseException:
             try:
@@ -79,23 +86,34 @@ class GoogleBearerRegistry:
                 pass
             raise
 
+    @staticmethod
+    def _extend(entry: dict, expires_at: float | None) -> bool:
+        if expires_at is None or float(expires_at) <= float(entry.get("expires_at") or 0):
+            return False
+        entry["expires_at"] = float(expires_at)
+        return True
+
     def record(self, expiries: dict[str, float], *, issuer: str,
                now: float | None = None) -> None:
-        """Add bearers an MCP issued to Gemini, as digest -> expiry. An entry
-        already present is left as it is, so a revocation is never undone."""
+        """Add bearers an MCP holds for Gemini, as digest -> expiry. An entry
+        already present only has its expiry raised to the later one; its
+        revocation is never undone."""
         if not expiries:
             return
         now = time.time() if now is None else now
         try:
             with self._locked():
                 bearers = self._read()
-                added = False
+                changed = False
                 for key, expires_at in expiries.items():
-                    if key not in bearers and float(expires_at) > now:
+                    entry = bearers.get(key)
+                    if isinstance(entry, dict):
+                        changed = self._extend(entry, expires_at) or changed
+                    elif float(expires_at) > now:
                         bearers[key] = {"issuer": issuer, "issued_at": now,
                                         "expires_at": float(expires_at), "revoked_at": None}
-                        added = True
-                if added:
+                        changed = True
+                if changed:
                     self._write(bearers, now)
         except Exception as exc:
             log.error("Google bearer registry was not updated: %s", exc)
@@ -125,8 +143,9 @@ class GoogleBearerRegistry:
 
     def revoke(self, expiries: dict[str, float | None], *, now: float | None = None) -> None:
         """Mark bearers revoked for every MCP, as digest -> expiry. An entry
-        stays until its expiry so no MCP records or accepts it again; a digest
-        not yet registered is added revoked when its expiry is known."""
+        stays until the latest expiry offered for it, so no MCP records or
+        accepts it again; a digest not yet registered is added revoked when
+        its expiry is known."""
         if not expiries:
             return
         now = time.time() if now is None else now
@@ -137,6 +156,7 @@ class GoogleBearerRegistry:
                 for key, expires_at in expiries.items():
                     entry = bearers.get(key)
                     if isinstance(entry, dict):
+                        changed = self._extend(entry, expires_at) or changed
                         if entry.get("revoked_at") is None:
                             entry["revoked_at"] = now
                             changed = True

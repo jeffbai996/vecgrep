@@ -134,8 +134,10 @@ MCP on the origin, each one records the bearers it issues to Gemini there (a
 sha256 digest, an expiry and a revocation time, never the token) and accepts a
 bearer another MCP registered only under its own approval of Gemini: its
 scopes, and no later expiry than that approval. Revoking a Gemini bearer at
-any MCP revokes it at all of them. Gemini is recognised by its OAuth redirect
-hosts, not by its client name. Other clients never touch the registry.
+any MCP revokes it at all of them. An entry lasts as long as the longest
+copy any MCP records, so a revocation holds while any MCP could still accept
+that token. Gemini is recognised by its OAuth redirect hosts, not by its
+client name. Other clients never touch the registry.
 
 Scopes are `read` and `propose` only, and write-shaped tools enforce `propose`
 at execution. The write path stays
