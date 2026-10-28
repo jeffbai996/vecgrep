@@ -93,7 +93,7 @@ STRUCTURAL_FIELDS = {
 
 # Sizing rationale lives with the cache (embed/cache.py): the cap must exceed
 # the number of distinct chunk texts across every corpus, or a repair re-embeds.
-DEFAULT_EMBED_CACHE_MAX_ROWS = 500_000
+DEFAULT_EMBED_CACHE_MAX_ROWS = 2_000_000
 
 
 def _home() -> Path:

@@ -12,6 +12,7 @@ import pytest
 
 from vecgrep.backend.embed.base import EmbedBackend
 from vecgrep.backend.embed.cache import DEFAULT_MAX_ROWS, CachedBackend, EmbedCache
+from vecgrep.backend.store.corpora import Corpus, CorpusRegistry
 
 
 class _Counting(EmbedBackend):
@@ -101,8 +102,8 @@ def test_cap_evicts_least_recently_used(tmp_path, monkeypatch):
 
     first = [f"first-{i}" for i in range(5)]
     second = [f"second-{i}" for i in range(5)]
-    cache.put_many("id", first, [[float(i)] for i in range(5)])
-    cache.put_many("id", second, [[float(i)] for i in range(5)])
+    cache.put_many("id", first, [[float(i + 1)] for i in range(5)])
+    cache.put_many("id", second, [[float(i + 1)] for i in range(5)])
     assert sum(cache.stats().values()) == 10
 
     # Touch the OLDER batch. Under FIFO these are next to die; under LRU the
@@ -110,7 +111,7 @@ def test_cap_evicts_least_recently_used(tmp_path, monkeypatch):
     assert len(cache.get_many("id", first)) == 5
 
     third = [f"third-{i}" for i in range(5)]
-    cache.put_many("id", third, [[float(i)] for i in range(5)])
+    cache.put_many("id", third, [[float(i + 1)] for i in range(5)])
     assert sum(cache.stats().values()) == 10
 
     assert len(cache.get_many("id", first)) == 5, "recently read rows must survive"
@@ -127,7 +128,7 @@ def test_warm_corpus_reindexes_without_embedding(tmp_path, monkeypatch):
     monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", str(len(corpus)))
     cache = EmbedCache(tmp_path / "embed.db")
     inner = _Counting()
-    cache.put_many(inner.identity, corpus, [[float(i)] for i in range(len(corpus))])
+    cache.put_many(inner.identity, corpus, [[float(i + 1)] for i in range(len(corpus))])
 
     wrapped = CachedBackend(inner, cache)
     for i in range(0, len(corpus), 10):
@@ -223,7 +224,7 @@ def test_cap_disabled_when_nonpositive(tmp_path, monkeypatch):
     monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "0")
     cache = EmbedCache(tmp_path / "embed.db")
     texts = [f"t{i}" for i in range(20)]
-    cache.put_many("id", texts, [[float(i)] for i in range(20)])
+    cache.put_many("id", texts, [[float(i + 1)] for i in range(20)])
     assert sum(cache.stats().values()) == 20
 
 
@@ -606,3 +607,144 @@ def test_touches_flush_once_the_interval_elapses(tmp_path, monkeypatch, clock_st
 
     (stored,) = cache._conn.execute("SELECT last_used FROM embed_cache").fetchone()
     assert stored > 0
+
+
+def test_put_many_refuses_all_zero_vectors(tmp_path):
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts = ["good", "zero", "good2", "empty"]
+    vectors = [
+        [1.0, 2.0, 3.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.5, 0.0],
+        [],
+    ]
+    cache.put_many("id", texts, vectors)
+
+    assert cache.stats() == {"id": 2}
+    hits = cache.get_many("id", texts)
+    assert EmbedCache._sha("good") in hits
+    assert EmbedCache._sha("good2") in hits
+    assert EmbedCache._sha("zero") not in hits
+    assert EmbedCache._sha("empty") not in hits
+
+    # Entire batch of zeros/empty returns early and writes nothing
+    cache.put_many("other", ["all_zero"], [[0.0, 0.0]])
+    assert "other" not in cache.stats()
+
+
+def test_flush_touches_coalesces_across_multiple_get_many_calls(tmp_path):
+    cache = EmbedCache(tmp_path / "embed.db")
+    texts_batch1 = [f"t{i}" for i in range(10)]
+    texts_batch2 = [f"t{i}" for i in range(10, 25)]
+    all_texts = texts_batch1 + texts_batch2
+    cache.put_many("id", all_texts, [[float(i + 1)] for i in range(len(all_texts))])
+
+    # First get_many sets pending touches for batch 1
+    cache.get_many("id", texts_batch1)
+    # Second get_many sets pending touches for batch 2
+    cache.get_many("id", texts_batch2)
+
+    class SpyingConnection:
+        def __init__(self, inner):
+            self.inner = inner
+            self.updates = []
+
+        def execute(self, sql, *args, **kwargs):
+            if isinstance(sql, str) and "UPDATE embed_cache SET last_used" in sql:
+                self.updates.append((sql, args, kwargs))
+            return self.inner.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    spy_conn = SpyingConnection(cache._conn)
+    cache._conn = spy_conn
+    cache.flush_touches()
+
+    # Coalescing by identity produces exactly 1 UPDATE statement for < 500 keys
+    assert len(spy_conn.updates) == 1, f"Expected 1 coalesced UPDATE, got {len(spy_conn.updates)}"
+    _, params, _ = spy_conn.updates[0]
+    assert len(params[0]) == 27  # [now, identity, *25_shas]
+
+    # Verify per-500-keys chunking: 600 keys across 2 calls coalesce into 2 UPDATEs
+    texts_600_a = [f"k{i}" for i in range(300)]
+    texts_600_b = [f"k{i}" for i in range(300, 600)]
+    cache.put_many("bulk", texts_600_a + texts_600_b, [[1.0]] * 600)
+    cache.get_many("bulk", texts_600_a)
+    cache.get_many("bulk", texts_600_b)
+
+    spy_conn.updates.clear()
+    cache.flush_touches()
+
+    assert len(spy_conn.updates) == 2  # ceil(600 / 500) = 2
+
+
+def test_corpus_registry_stat_cache_and_include_sources(tmp_path, monkeypatch):
+    import json
+    path = tmp_path / "corpora.json"
+    reg = CorpusRegistry(path)
+
+    c = Corpus(
+        name="test_c",
+        embed_backend="ollama",
+        embed_model="bge-m3",
+        dim=1024,
+        sources=["/path/to/src1.txt", "/path/to/src2.txt"],
+        source_hashes={"/path/to/src1.txt": "sha1", "/path/to/src2.txt": "sha2"},
+    )
+    reg.upsert(c)
+    assert path.exists()
+
+    loads_count = 0
+    orig_loads = json.loads
+
+    def counting_loads(*args, **kwargs):
+        nonlocal loads_count
+        loads_count += 1
+        return orig_loads(*args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", counting_loads)
+
+    c1 = reg.get("test_c")
+    assert c1.name == "test_c"
+    assert c1.sources == ["/path/to/src1.txt", "/path/to/src2.txt"]
+    assert c1.source_hashes == {"/path/to/src1.txt": "sha1", "/path/to/src2.txt": "sha2"}
+
+    all_c = reg.list()
+    assert len(all_c) == 1
+    assert all_c[0].sources == ["/path/to/src1.txt", "/path/to/src2.txt"]
+
+    # Multiple repeated get() and list() calls without disk modification
+    for _ in range(5):
+        reg.get("test_c")
+        reg.list()
+
+    # File stat did not change, json.loads was never called
+    assert loads_count == 0, f"Expected 0 json.loads calls, got {loads_count}"
+
+    # Verify include_sources=False omits sources and source_hashes
+    light_get = reg.get("test_c", include_sources=False)
+    assert light_get.sources == []
+    assert light_get.source_hashes == {}
+    assert light_get.name == "test_c"
+    assert light_get.dim == 1024
+
+    light_list = reg.list(include_sources=False)
+    assert len(light_list) == 1
+    assert light_list[0].sources == []
+    assert light_list[0].source_hashes == {}
+    assert light_list[0].name == "test_c"
+
+    # Original corpus in registry retains full sources
+    full_c = reg.get("test_c")
+    assert full_c.sources == ["/path/to/src1.txt", "/path/to/src2.txt"]
+    assert full_c.source_hashes == {"/path/to/src1.txt": "sha1", "/path/to/src2.txt": "sha2"}
+
+    # Modifying the file externally causes stat mismatch and triggers reload
+    raw = orig_loads(path.read_text())
+    raw["test_c"]["doc_count"] = 42
+    path.write_text(json.dumps(raw))
+
+    reloaded = reg.get("test_c")
+    assert reloaded.doc_count == 42
+    assert loads_count == 1

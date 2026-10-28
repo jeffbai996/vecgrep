@@ -177,6 +177,8 @@ class OllamaBackend(EmbedBackend):
                 rows = data.get("embeddings") if isinstance(data, dict) else None
                 if not isinstance(data, dict):
                     reason = "bad_response"
+            elif r.status_code == 400 and _is_too_long(r.text):
+                reason = "input_too_long"
             else:
                 # The overflow host's gate answers 503 while its GPU is in use
                 # for something else; that is a refusal, not an outage.
@@ -194,11 +196,12 @@ class OllamaBackend(EmbedBackend):
             return rows
         record(data if isinstance(data, dict) else {}, model=self.model, route="overflow",
                outcome="fallback", reason=reason or "bad_vectors")
-        self._overflow_benched_until = self._clock() + self.overflow_cooldown_s
-        logger.info(
-            "Overflow embed endpoint %s did not answer cleanly; using the primary "
-            "for %.0fs", self.overflow_url, self.overflow_cooldown_s,
-        )
+        if reason != "input_too_long":
+            self._overflow_benched_until = self._clock() + self.overflow_cooldown_s
+            logger.info(
+                "Overflow embed endpoint %s did not answer cleanly; using the primary "
+                "for %.0fs", self.overflow_url, self.overflow_cooldown_s,
+            )
         return None
 
     def _embed_batch(self, texts: list[str], route: str | None = None) -> list[list[float]] | None:

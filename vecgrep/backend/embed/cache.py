@@ -223,11 +223,14 @@ class EmbedCache:
             return
         pending, self._pending_touch = self._pending_touch, {}
         try:
-            by_stamp: dict[tuple[str, int], list[str]] = {}
+            by_identity: dict[str, list[str]] = {}
+            max_stamp: dict[str, int] = {}
             for (identity, sha), stamp in pending.items():
-                by_stamp.setdefault((identity, stamp), []).append(sha)
-            for (identity, stamp), shas in by_stamp.items():
-                self._touch_locked(identity, shas, now=stamp)
+                by_identity.setdefault(identity, []).append(sha)
+                if identity not in max_stamp or stamp > max_stamp[identity]:
+                    max_stamp[identity] = stamp
+            for identity, shas in by_identity.items():
+                self._touch_locked(identity, shas, now=max_stamp[identity])
             self._conn.commit()
         except sqlite3.Error:
             try:
@@ -266,10 +269,16 @@ class EmbedCache:
             return
         if self._read_only:
             return
+        valid = [
+            (t, v) for t, v in zip(texts, vectors)
+            if v and not all(x == 0.0 for x in v)
+        ]
+        if not valid:
+            return
         now = self._now()
         rows = [
             (identity, self._sha(t), _encode(v), now)
-            for t, v in zip(texts, vectors)
+            for t, v in valid
         ]
         with self._lock:
             try:
@@ -330,17 +339,18 @@ class EmbedCache:
         overage = count - self._max_rows
         if overage <= 0:
             return
+        to_evict = overage if self._max_rows < 100 else max(overage, self._max_rows // 20)
         logger.warning(
             "embed cache over cap: evicting %d coldest of %d rows "
             "(embed_cache_max_rows / VECGREP_EMBED_CACHE_MAX_ROWS=%d)",
-            overage,
+            to_evict,
             count,
             self._max_rows,
         )
         self._conn.execute(
             "DELETE FROM embed_cache WHERE rowid IN "
             "(SELECT rowid FROM embed_cache ORDER BY last_used ASC, rowid ASC LIMIT ?)",
-            (overage,),
+            (to_evict,),
         )
 
     def stats(self) -> dict:

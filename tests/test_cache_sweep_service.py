@@ -24,8 +24,8 @@ def test_cache_sweep_keeps_every_live_chunk_and_drops_the_rest(svc, tmp_path: Pa
     before = sum(cache.stats().values())
     assert before > 0
     # an orphan under the live identity and a whole identity no corpus uses
-    cache.put_many(identity, ["orphaned chunk text"], [[0.0] * 16])
-    cache.put_many("ollama:retired-model", ["anything"], [[0.0] * 16])
+    cache.put_many(identity, ["orphaned chunk text"], [[1.0] * 16])
+    cache.put_many("ollama:retired-model", ["anything"], [[1.0] * 16])
     plan = svc.cache_sweep(dry_run=True)
     assert plan["deleted"] == {identity: 1, "ollama:retired-model": 1}
     assert plan["kept"][identity] == before

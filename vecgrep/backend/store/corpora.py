@@ -7,12 +7,11 @@ refuse to mix models within one corpus.
 from __future__ import annotations
 
 import contextlib
-
 import json
 import os
 import re
 import tempfile
-from copy import deepcopy
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -79,6 +78,30 @@ class Corpus:
     avoid_for: list[str] = field(default_factory=list)
 
 
+def _copy_corpus(c: Corpus, *, include_sources: bool = True) -> Corpus:
+    """Explicitly copy a Corpus dataclass, avoiding deepcopy overhead."""
+    return Corpus(
+        name=c.name,
+        embed_backend=c.embed_backend,
+        embed_model=c.embed_model,
+        dim=c.dim,
+        chunker=c.chunker,
+        doc_count=c.doc_count,
+        chunk_count=c.chunk_count,
+        created_at=c.created_at,
+        updated_at=c.updated_at,
+        sources=list(c.sources) if include_sources else [],
+        source_hashes=dict(c.source_hashes) if include_sources else {},
+        decay_half_life_days=c.decay_half_life_days,
+        rank_weight=c.rank_weight,
+        bm25_weight=c.bm25_weight,
+        datatype=c.datatype,
+        description=c.description,
+        use_for=list(c.use_for),
+        avoid_for=list(c.avoid_for),
+    )
+
+
 class CorpusRegistry:
     def __init__(self, path: Path, locks: CorpusLocks | None = None,
                  *, in_memory: bool = False) -> None:
@@ -88,9 +111,18 @@ class CorpusRegistry:
         # corpus name -> pending entry while deferred_saves() is open
         self._deferred: dict[str, Corpus | None] = {}
         self._corpora: dict[str, Corpus] = {}
+        self._cache_lock = threading.RLock()
+        self._loaded_stat: tuple[int, int, int] | None = None
         if not in_memory:
             with self.locks.registry_read():
                 self._load()
+
+    def _file_stat(self) -> tuple[int, int, int] | None:
+        try:
+            st = self.path.stat()
+            return (st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError:
+            return None
 
     def _load(self) -> None:
         if not self.path.exists():
@@ -110,8 +142,10 @@ class CorpusRegistry:
             ) from exc
         for name, payload in data.items():
             self._corpora[name] = Corpus(**payload)
+        with self._cache_lock:
+            self._loaded_stat = self._file_stat()
 
-    def _reload(self) -> None:
+    def _reload(self, *, force: bool = False) -> None:
         """Replace in-memory state with the current on-disk state.
 
         Called right before a mutation so a long-lived process (e.g. the search
@@ -119,8 +153,26 @@ class CorpusRegistry:
         a stale in-memory copy. This was a real bug: migrate/index writes done
         by the CLI were silently reverted when the running server next saved.
         """
-        self._corpora = {}
-        self._load()
+        with self._cache_lock:
+            cur_stat = self._file_stat()
+            if not force and cur_stat is not None and cur_stat == self._loaded_stat:
+                return
+            if cur_stat is None:
+                self._corpora = {}
+                self._loaded_stat = None
+                return
+            try:
+                data = json.loads(self.path.read_text())
+            except json.JSONDecodeError as exc:
+                raise CorpusError(
+                    f"corpus registry at {self.path} is unreadable ({exc}); "
+                    "refusing to load an empty registry over it"
+                ) from exc
+            loaded: dict[str, Corpus] = {}
+            for name, payload in data.items():
+                loaded[name] = Corpus(**payload)
+            self._corpora = loaded
+            self._loaded_stat = cur_stat
 
     def _on_disk_text(self) -> str | None:
         """Current file contents, or None if unreadable for any reason.
@@ -135,7 +187,8 @@ class CorpusRegistry:
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {name: asdict(c) for name, c in self._corpora.items()}
+        with self._cache_lock:
+            payload = {name: asdict(c) for name, c in self._corpora.items()}
         # Atomic write: serialize to a temp file in the same dir, fsync, then
         # os.replace (atomic on POSIX). A crashed/half-finished save can no
         # longer leave a truncated corpora.json for the next reader to choke on
@@ -149,6 +202,8 @@ class CorpusRegistry:
         # fsyncs per source, for zero new information. Comparing first is one
         # read of a file the OS already has cached.
         if self._on_disk_text() == text:
+            with self._cache_lock:
+                self._loaded_stat = self._file_stat()
             return
         fd, tmp_name = tempfile.mkstemp(
             dir=str(self.path.parent), prefix=self.path.name + ".", suffix=".tmp"
@@ -166,6 +221,8 @@ class CorpusRegistry:
                 os.fsync(dir_fd)
             finally:
                 os.close(dir_fd)
+            with self._cache_lock:
+                self._loaded_stat = self._file_stat()
         except BaseException:
             try:
                 os.unlink(tmp_name)
@@ -188,42 +245,55 @@ class CorpusRegistry:
             return
         CorpusRegistry.validate_user_name(name)
 
-    def list(self) -> list[Corpus]:
+    def list(self, *, include_sources: bool = True) -> list[Corpus]:
         if self.in_memory:
-            return sorted(
-                (deepcopy(c) for c in self._corpora.values()), key=lambda c: c.name
-            )
+            with self._cache_lock:
+                return sorted(
+                    (_copy_corpus(c, include_sources=include_sources) for c in self._corpora.values()),
+                    key=lambda c: c.name,
+                )
         with self.locks.registry_read():
             self._reload()
-            return sorted(
-                (deepcopy(c) for c in self._corpora.values()), key=lambda c: c.name
-            )
+            with self._cache_lock:
+                return sorted(
+                    (_copy_corpus(c, include_sources=include_sources) for c in self._corpora.values()),
+                    key=lambda c: c.name,
+                )
 
-    def get(self, name: str) -> Corpus:
+    def get(self, name: str, *, include_sources: bool = True) -> Corpus:
         if self.in_memory:
-            if name not in self._corpora:
-                raise CorpusError(f"No such corpus: {name}")
-            return deepcopy(self._corpora[name])
+            with self._cache_lock:
+                if name not in self._corpora:
+                    raise CorpusError(f"No such corpus: {name}")
+                return _copy_corpus(self._corpora[name], include_sources=include_sources)
         # A deferred entry is the truth for this process until it lands; the
         # file only lags it. Readers in this process (the journal-retire check
         # that compares BM25 rows to chunk_count) must see the live one.
-        pending = self._deferred.get(name)
-        if pending is not None:
-            return deepcopy(pending)
+        with self._cache_lock:
+            pending = self._deferred.get(name)
+            if pending is not None:
+                return _copy_corpus(pending, include_sources=include_sources)
         with self.locks.registry_read():
             self._reload()
-            if name not in self._corpora:
-                raise CorpusError(f"No such corpus: {name}")
-            return deepcopy(self._corpora[name])
+            with self._cache_lock:
+                pending = self._deferred.get(name)
+                if pending is not None:
+                    return _copy_corpus(pending, include_sources=include_sources)
+                if name not in self._corpora:
+                    raise CorpusError(f"No such corpus: {name}")
+                return _copy_corpus(self._corpora[name], include_sources=include_sources)
 
     def has(self, name: str) -> bool:
         if self.in_memory:
-            return name in self._corpora
-        if self._deferred.get(name) is not None:
-            return True
+            with self._cache_lock:
+                return name in self._corpora
+        with self._cache_lock:
+            if self._deferred.get(name) is not None:
+                return True
         with self.locks.registry_read():
             self._reload()
-            return name in self._corpora
+            with self._cache_lock:
+                return self._deferred.get(name) is not None or name in self._corpora
 
     @contextlib.contextmanager
     def deferred_saves(self, name: str):
@@ -241,43 +311,51 @@ class CorpusRegistry:
         if self.in_memory or name in self._deferred:
             yield
             return
-        self._deferred[name] = None
+        with self._cache_lock:
+            self._deferred[name] = None
         try:
             yield
         finally:
-            pending = self._deferred.pop(name, None)
+            with self._cache_lock:
+                pending = self._deferred.pop(name, None)
             if pending is not None:
                 with self.locks.registry_write():
                     self._reload()
-                    self._corpora[name] = pending
+                    with self._cache_lock:
+                        self._corpora[name] = pending
                     self._save()
 
     def upsert(self, c: Corpus) -> None:
         self.validate_name(c.name)
         if self.in_memory:
-            self._corpora[c.name] = deepcopy(c)
+            with self._cache_lock:
+                self._corpora[c.name] = _copy_corpus(c)
             return
-        if c.name in self._deferred:
-            self._deferred[c.name] = deepcopy(c)
-            self._corpora[c.name] = deepcopy(c)
-            return
+        with self._cache_lock:
+            if c.name in self._deferred:
+                self._deferred[c.name] = _copy_corpus(c)
+                self._corpora[c.name] = _copy_corpus(c)
+                return
         # The lock spans reload -> modify -> replace. Atomic replace alone kept
         # readers from seeing torn JSON but still allowed two writers to reload
         # the same generation and silently clobber one another.
         with self.locks.registry_write():
             self._reload()
-            self._corpora[c.name] = deepcopy(c)
+            with self._cache_lock:
+                self._corpora[c.name] = _copy_corpus(c)
             self._save()
 
     def delete(self, name: str) -> None:
         if self.in_memory:
-            if name not in self._corpora:
-                raise CorpusError(f"No such corpus: {name}")
-            del self._corpora[name]
+            with self._cache_lock:
+                if name not in self._corpora:
+                    raise CorpusError(f"No such corpus: {name}")
+                del self._corpora[name]
             return
         with self.locks.registry_write():
             self._reload()
-            if name not in self._corpora:
-                raise CorpusError(f"No such corpus: {name}")
-            del self._corpora[name]
+            with self._cache_lock:
+                if name not in self._corpora:
+                    raise CorpusError(f"No such corpus: {name}")
+                del self._corpora[name]
             self._save()
