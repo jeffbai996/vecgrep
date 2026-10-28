@@ -193,3 +193,45 @@ def test_http_and_stdio_advertise_same_search_controls_and_operation_hints(monke
                     'propose_delete', 'propose_merge'})
         assert tools['write'].annotations.idempotentHint is False
         assert tools['propose_delete'].annotations.destructiveHint is False
+
+
+def test_stub_trimming_finds_exact_fit_in_logarithmic_encode_calls(monkeypatch):
+    """Trimming large preview tails must binary-search the stub count rather
+    than popping stubs one by one and serializing the whole payload each time.
+    """
+    from copy import deepcopy
+
+    payload = {
+        'full': [],
+        'stubs': [{'chunk_id': f'stub-{i}', 'snippet': 'preview ' * 40} for i in range(90)],
+        'warnings': [],
+    }
+    encoding = tiktoken.get_encoding('cl100k_base')
+    call_count = 0
+    real_encode = encoding.encode
+
+    def counted_encode(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return real_encode(*args, **kwargs)
+
+    monkeypatch.setattr(encoding, 'encode', counted_encode)
+    monkeypatch.setattr(tiktoken, 'get_encoding', lambda _: encoding)
+
+    ceiling = 1000
+    text = bounded_payload(payload, ceiling, {})
+    # Binary search over 90 stubs completes in ceil(log2(90)) + 2 render calls
+    # (<= 15 calls), whereas linear popping takes over 70 calls.
+    assert call_count <= 15
+    data = json.loads(text)
+    fitted_stubs = len(data['stubs'])
+    assert fitted_stubs == 18
+    assert data['search_info']['returned_results'] == 18
+    assert len(real_encode(text)) <= ceiling
+
+    # Confirm 18 was the exact boundary: 19 stubs exceed the ceiling.
+    over = deepcopy(data)
+    over['stubs'].append(payload['stubs'][18])
+    over['search_info']['returned_results'] = 19
+    over_text = json.dumps(over, ensure_ascii=False, separators=(',', ':'))
+    assert len(real_encode(over_text)) > ceiling

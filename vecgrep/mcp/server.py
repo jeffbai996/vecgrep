@@ -127,19 +127,37 @@ def _close_svc(svc: VecgrepService) -> None:
 def _svc() -> VecgrepService:
     global _SVC
     from ..backend.config import get_settings
+    from ..backend.api import routes as _routes
 
-    key = id(get_settings())
-    if _SVC is None or _SVC[0] != key:
+    settings = get_settings()
+    key = id(settings)
+    if (
+        _SVC is None
+        or _SVC[0] != key
+        or (
+            _routes._SERVICE is not None
+            and _routes._SERVICE.settings is settings
+            and _SVC[1] is not _routes._SERVICE
+        )
+    ):
         if _SVC is not None:
-            _close_svc(_SVC[1])  # settings changed — release the old handles
-        _SVC = (key, VecgrepService())
+            if _routes._SERVICE is None or _SVC[1] is not _routes._SERVICE:
+                _close_svc(_SVC[1])  # settings changed — release the old handles
+        if _routes._SERVICE is not None and _routes._SERVICE.settings is settings:
+            service = _routes._SERVICE
+        else:
+            service = VecgrepService()
+        _SVC = (key, service)
     return _SVC[1]
 
 
 def _reset_service_cache() -> None:
     global _SVC
     if _SVC is not None:
-        _close_svc(_SVC[1])
+        from ..backend.api import routes as _routes
+
+        if _routes._SERVICE is None or _SVC[1] is not _routes._SERVICE:
+            _close_svc(_SVC[1])
     _SVC = None
 
 
@@ -2035,6 +2053,7 @@ class ToolBusyError(RuntimeError):
 # an ordinary search ahead of it finishes, short enough to stay inside a
 # client's tool timeout.
 MCP_GATE_WAIT_S = float(_os.environ.get("VECGREP_MCP_GATE_WAIT_S", "20"))
+MCP_GATE_SLOTS = max(1, int(_os.environ.get("VECGREP_MCP_GATE_SLOTS", "1")))
 
 
 def _offload_sync_tools(fmcp: Any) -> None:
@@ -2070,7 +2089,7 @@ def _offload_sync_tools(fmcp: Any) -> None:
     import anyio
 
     register = fmcp.tool
-    gate = anyio.Semaphore(1)
+    gate = anyio.Semaphore(max(1, int(_os.environ.get("VECGREP_MCP_GATE_SLOTS", str(MCP_GATE_SLOTS)))))
 
     def tool(*args: Any, **kwargs: Any):
         decorate = register(*args, **kwargs)

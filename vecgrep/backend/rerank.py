@@ -122,6 +122,7 @@ RERANK_WORKER_START_TIMEOUT_S = float(
 RERANK_WORKER_CALL_TIMEOUT_S = float(
     os.environ.get("VECGREP_RERANK_WORKER_CALL_TIMEOUT_S", "60")
 )
+RERANK_QUEUE_WAIT_S = float(os.environ.get("VECGREP_RERANK_QUEUE_WAIT_S", "10.0"))
 # A timed-out or crashed prediction usually means the accelerator is wedged or
 # unavailable, not that immediately loading another 1.2 GB worker will help.
 # Keep automatic callers on the already-computed fusion order for a bounded
@@ -575,7 +576,9 @@ class _WorkerClient:
                 self.attempt_done.set()
 
     def predict(self, query: str, texts: list[str]) -> list[float]:
-        with self._call_lock:
+        if not self._call_lock.acquire(timeout=RERANK_QUEUE_WAIT_S):
+            raise RuntimeError(f"rerank worker queue busy after {RERANK_QUEUE_WAIT_S:.1f}s")
+        try:
             if not self.is_ready():
                 raise RerankerError(f"reranker worker '{self.model_name}' is not ready")
             with self._state_lock:
@@ -609,6 +612,8 @@ class _WorkerClient:
                 self._retire(terminate=False)
                 self.ensure_started()
             return [float(score) for score in scores]
+        finally:
+            self._call_lock.release()
 
     def _open_circuit(self, exc: Exception) -> None:
         with self._state_lock:

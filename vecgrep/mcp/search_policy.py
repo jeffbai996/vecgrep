@@ -110,11 +110,30 @@ def bounded_payload(payload: dict, ceiling: int, info: dict) -> str:
         if len(full) == 1 and render(include_stubs=False)[1] <= ceiling:
             break
         demote(full.pop())
-    while True:
-        text, tokens = render()
-        if tokens <= ceiling:
-            return text
-        if stubs:
-            stubs.pop()
+    text, tokens = render()
+    if tokens <= ceiling:
+        return text
+
+    all_stubs = list(stubs)
+    stubs.clear()
+    empty_text, empty_tokens = render()
+    if empty_tokens > ceiling:
+        raise ValueError('response_token_ceiling cannot fit search diagnostics; increase it')
+
+    best_text = empty_text
+    best_count = 0
+    lo, hi = 1, len(all_stubs) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        stubs[:] = all_stubs[:mid]
+        cand_text, cand_tokens = render()
+        if cand_tokens <= ceiling:
+            best_text = cand_text
+            best_count = mid
+            lo = mid + 1
         else:
-            raise ValueError('response_token_ceiling cannot fit search diagnostics; increase it')
+            hi = mid - 1
+
+    stubs[:] = all_stubs[:best_count]
+    metadata['returned_results'] = len(full) + len(stubs)
+    return best_text

@@ -106,7 +106,7 @@ def flush_embed_cache_if_started() -> None:
 
 
 @public_router.get("/health")
-def health() -> dict:
+async def health() -> dict:
     return {"status": "ok"}
 
 
