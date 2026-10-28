@@ -37,9 +37,19 @@ def _has_table(text: str) -> bool:
     return False
 
 
-def chunk_enrichment(text: str) -> dict:
+def chunk_enrichment(
+    text: str,
+    *,
+    fallback_speaker: str | None = None,
+) -> dict:
     """Metadata for one chunk: speakers (document order, deduped), bot flag,
-    and cheap content-shape booleans."""
+    and cheap content-shape booleans.
+
+    When a multi-paragraph transcript turn is split across several chunks, only
+    the first chunk carries the `**name** · HH:MM` header line. Passing the
+    enclosing turn's `fallback_speaker` keeps body chunks attributable to the
+    speaker who wrote them.
+    """
     speakers: list[str] = []
     seen: set[str] = set()
     for m in _EVENT_HEADER.finditer(text):
@@ -47,6 +57,10 @@ def chunk_enrichment(text: str) -> dict:
         if name and name not in seen:
             seen.add(name)
             speakers.append(name)
+    if not speakers and fallback_speaker:
+        clean = fallback_speaker.strip()
+        if clean:
+            speakers.append(clean)
     return {
         "speakers": speakers,
         "has_bot_speaker": any("[bot]" in s for s in speakers),

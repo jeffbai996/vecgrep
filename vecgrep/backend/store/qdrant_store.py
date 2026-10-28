@@ -41,10 +41,24 @@ from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+import threading
 
 import httpx
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
+
+
+_PAYLOAD_INDEX_FIELDS: tuple[tuple[str, qm.PayloadSchemaType], ...] = (
+    ("source_id", qm.PayloadSchemaType.KEYWORD),
+    ("doc_timestamp", qm.PayloadSchemaType.FLOAT),
+    ("metadata.channel", qm.PayloadSchemaType.KEYWORD),
+    ("metadata.status", qm.PayloadSchemaType.KEYWORD),
+    ("metadata.speakers", qm.PayloadSchemaType.KEYWORD),
+    ("metadata.has_bot_speaker", qm.PayloadSchemaType.BOOL),
+    ("metadata.has_code", qm.PayloadSchemaType.BOOL),
+    ("metadata.has_table", qm.PayloadSchemaType.BOOL),
+    ("metadata.has_link", qm.PayloadSchemaType.BOOL),
+)
 
 
 @dataclass
@@ -106,6 +120,50 @@ class QdrantStore:
         else:
             path.mkdir(parents=True, exist_ok=True)
             self.client = QdrantClient(path=str(path))
+        self._meta_lock = threading.RLock()
+        self._known_collections: set[str] | None = None
+        self._indexed_collections: set[str] = set()
+
+    def _lock_for_meta(self) -> threading.RLock:
+        lock = getattr(self, "_meta_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._meta_lock = lock
+        return lock
+
+    def _has_collection(self, name: str) -> bool:
+        with self._lock_for_meta():
+            known = getattr(self, "_known_collections", None)
+            if known is not None and name in known:
+                return True
+            refreshed = {c.name for c in self.client.get_collections().collections}
+            self._known_collections = refreshed
+            return name in refreshed
+
+    def _ensure_payload_indexes(self, name: str) -> None:
+        if not getattr(self, "_url", None):
+            return
+        with self._lock_for_meta():
+            indexed = getattr(self, "_indexed_collections", None)
+            if indexed is None:
+                indexed = set()
+                self._indexed_collections = indexed
+            if name in indexed:
+                return
+            indexed.add(name)
+        for field_name, field_schema in _PAYLOAD_INDEX_FIELDS:
+            try:
+                self.client.create_payload_index(
+                    collection_name=name,
+                    field_name=field_name,
+                    field_schema=field_schema,
+                    wait=False,
+                )
+            except Exception:
+                # Embedded local mode or older server builds may ignore or
+                # reject index creation on specific field types; search still
+                # works with unindexed evaluation.
+                pass
 
     def ensure_collection(
         self,
@@ -125,8 +183,8 @@ class QdrantStore:
         not the lever for storage. Both are pinned at creation; measure any
         change on the eval harness before adopting it for a live corpus.
         """
-        existing = {c.name for c in self.client.get_collections().collections}
-        if name in existing:
+        if self._has_collection(name):
+            self._ensure_payload_indexes(name)
             return
         dt = {"float32": qm.Datatype.FLOAT32, "float16": qm.Datatype.FLOAT16}.get(datatype)
         if dt is None:
@@ -153,16 +211,29 @@ class QdrantStore:
             hnsw_config=qm.HnswConfigDiff(on_disk=True),
             quantization_config=quant,
         )
+        with self._lock_for_meta():
+            if getattr(self, "_known_collections", None) is None:
+                self._known_collections = {name}
+            else:
+                self._known_collections.add(name)
+        self._ensure_payload_indexes(name)
 
     def drop_collection(self, name: str) -> None:
         existing = {c.name for c in self.client.get_collections().collections}
+        with self._lock_for_meta():
+            self._known_collections = existing - {name}
+            if getattr(self, "_indexed_collections", None) is not None:
+                self._indexed_collections.discard(name)
         if name in existing:
             self.client.delete_collection(name)
 
     def list_collections(self) -> list[str]:
         """Every collection name the store holds — used to find orphans (a
         collection with no registry entry)."""
-        return [c.name for c in self.client.get_collections().collections]
+        names = [c.name for c in self.client.get_collections().collections]
+        with self._lock_for_meta():
+            self._known_collections = set(names)
+        return names
 
     def count(self, name: str) -> int:
         """Live point count for a collection — the ground truth for chunk_count.
@@ -172,10 +243,15 @@ class QdrantStore:
         from Qdrant after an index instead of accumulating a delta, which drifts
         the moment the BM25-derived `chunks_freed` diverges from reality (e.g. a
         collection wiped out-of-band leaves a stale accumulator forever wrong)."""
-        existing = {c.name for c in self.client.get_collections().collections}
-        if name not in existing:
+        if not self._has_collection(name):
             return 0
-        return self.client.count(collection_name=name, exact=True).count
+        try:
+            return self.client.count(collection_name=name, exact=True).count
+        except Exception:
+            with self._lock_for_meta():
+                if getattr(self, "_known_collections", None) is not None:
+                    self._known_collections.discard(name)
+            return 0
 
     def source_counts(self, name: str) -> dict[str, int]:
         """Return the live point count for each source in one collection scan.
@@ -185,8 +261,7 @@ class QdrantStore:
         upsert.  Counting each source with an unindexed filter would turn a
         large recovery into thousands of full collection scans.
         """
-        existing = {c.name for c in self.client.get_collections().collections}
-        if name not in existing:
+        if not self._has_collection(name):
             return {}
         counts: Counter[str] = Counter()
         offset = None
@@ -220,8 +295,7 @@ class QdrantStore:
         exclude fields not needed by the derivative; this matters when a large
         source document is deliberately duplicated on every point.
         """
-        existing = {c.name for c in self.client.get_collections().collections}
-        if name not in existing:
+        if not self._has_collection(name):
             return
         offset = None
         if include_payload_fields:
@@ -250,8 +324,7 @@ class QdrantStore:
         records before the first batch lets recovery restore the complete old
         version if the writer dies before Qdrant reports the stage complete.
         """
-        existing = {c.name for c in self.client.get_collections().collections}
-        if name not in existing:
+        if not self._has_collection(name):
             return []
         records: list[dict] = []
         offset = None
@@ -320,7 +393,14 @@ class QdrantStore:
                 qm.PointStruct(id=cid, vector=v, payload=p)
                 for cid, v, p in zip(ids[start:end], vectors[start:end], payloads[start:end])
             ]
-            self.client.upsert(collection_name=collection, points=points, wait=True)
+            # Wait only on the final batch so multi-batch upserts do not pay a
+            # synchronous WAL flush per 64-point slice while still returning
+            # only after all batches are durable.
+            self.client.upsert(
+                collection_name=collection,
+                points=points,
+                wait=(end >= len(vectors)),
+            )
             total += len(points)
         return total
 
@@ -329,14 +409,19 @@ class QdrantStore:
         collection: str,
         query_vector: list[float],
         top_k: int,
+        *,
+        query_filter: qm.Filter | None = None,
     ) -> list[StoredHit]:
         try:
-            response = self.client.query_points(
-                collection_name=collection,
-                query=query_vector,
-                limit=top_k,
-                with_payload=True,
-            )
+            kwargs: dict = {
+                "collection_name": collection,
+                "query": query_vector,
+                "limit": top_k,
+                "with_payload": True,
+            }
+            if query_filter is not None:
+                kwargs["query_filter"] = query_filter
+            response = self.client.query_points(**kwargs)
         except Exception:
             return []
         results = response.points
@@ -367,8 +452,7 @@ class QdrantStore:
     def get_vector(self, collection: str, point_id: str) -> list[float] | None:
         """Stored embedding vector for one point — powers query-by-example
         (`related`) without re-embedding. None if the point is missing."""
-        existing = {c.name for c in self.client.get_collections().collections}
-        if collection not in existing:
+        if not self._has_collection(collection):
             return None
         try:
             points = self.client.retrieve(
@@ -387,8 +471,7 @@ class QdrantStore:
 
     def get_by_id(self, collection: str, point_id: str) -> dict | None:
         """Fetch a single point's payload by id. Returns None if missing."""
-        existing = {c.name for c in self.client.get_collections().collections}
-        if collection not in existing:
+        if not self._has_collection(collection):
             return None
         try:
             points = self.client.retrieve(
@@ -493,9 +576,17 @@ class QdrantStore:
             wait=True,
         )
 
+    def delete_points(self, collection: str, point_ids: list[str]) -> None:
+        if not point_ids or not self._has_collection(collection):
+            return
+        self.client.delete(
+            collection_name=collection,
+            points_selector=qm.PointIdsList(points=list(point_ids)),
+            wait=True,
+        )
+
     def delete_by_source(self, collection: str, source_id: str) -> None:
-        existing = {c.name for c in self.client.get_collections().collections}
-        if collection not in existing:
+        if not self._has_collection(collection):
             return
         self.client.delete(
             collection_name=collection,

@@ -13,6 +13,7 @@ import os
 import pickle
 import re
 import tempfile
+import threading
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
@@ -247,6 +248,7 @@ class BM25Store:
         # exits, and a `.dirty` marker sits beside the pickle for the duration
         # (see bulk()).
         self._bulk: set[str] = set()
+        self._lock = threading.RLock()
         if root is not None:
             root.mkdir(parents=True, exist_ok=True)
 
@@ -266,26 +268,27 @@ class BM25Store:
         return (stat.st_mtime_ns, stat.st_size)
 
     def _load(self, corpus: str) -> _CorpusIndex:
-        if corpus in self._cache:
-            if self._disk_versions.get(corpus) == self._disk_version(corpus):
-                self._cache.move_to_end(corpus)
-                if corpus in self._bm25_instances:
-                    self._bm25_instances.move_to_end(corpus)
-                return self._cache[corpus]
-            self.evict(corpus)
-        self._make_room(corpus)
-        p = self._path(corpus)
-        if p and p.exists():
-            try:
-                idx = pickle.loads(p.read_bytes())
-            except Exception:
+        with self._lock:
+            if corpus in self._cache:
+                if self._disk_versions.get(corpus) == self._disk_version(corpus):
+                    self._cache.move_to_end(corpus)
+                    if corpus in self._bm25_instances:
+                        self._bm25_instances.move_to_end(corpus)
+                    return self._cache[corpus]
+                self.evict(corpus)
+            self._make_room(corpus)
+            p = self._path(corpus)
+            if p and p.exists():
+                try:
+                    idx = pickle.loads(p.read_bytes())
+                except Exception:
+                    idx = _CorpusIndex()
+            else:
                 idx = _CorpusIndex()
-        else:
-            idx = _CorpusIndex()
-        self._cache[corpus] = idx
-        self._disk_versions[corpus] = self._disk_version(corpus)
-        self._cached_bytes[corpus] = self._sidecar_bytes(corpus)
-        return idx
+            self._cache[corpus] = idx
+            self._disk_versions[corpus] = self._disk_version(corpus)
+            self._cached_bytes[corpus] = self._sidecar_bytes(corpus)
+            return idx
 
     def _sidecar_bytes(self, corpus: str) -> int:
         p = self._path(corpus)
@@ -335,10 +338,11 @@ class BM25Store:
 
     def evict(self, corpus: str) -> None:
         """Release one corpus's expanded index and BM25 scoring structure."""
-        self._cache.pop(corpus, None)
-        self._bm25_instances.pop(corpus, None)
-        self._disk_versions.pop(corpus, None)
-        self._cached_bytes.pop(corpus, None)
+        with self._lock:
+            self._cache.pop(corpus, None)
+            self._bm25_instances.pop(corpus, None)
+            self._disk_versions.pop(corpus, None)
+            self._cached_bytes.pop(corpus, None)
 
     def _marker(self, corpus: str) -> Path | None:
         p = self._path(corpus)
@@ -435,16 +439,18 @@ class BM25Store:
     def upsert(self, corpus: str, ids: list[str], texts: list[str], payloads: list[dict]) -> None:
         if not ids:
             return
-        idx = self._load(corpus)
-        for i, (cid, text, payload) in enumerate(zip(ids, texts, payloads)):
-            arr_pos = len(idx.ids)
-            idx.ids.append(cid)
-            idx.docs.append(tokenize(text))
-            idx.payloads.append(payload)
-            sid = payload.get("source_id", "")
-            idx.by_source.setdefault(sid, []).append(arr_pos)
-        self._bm25_instances.pop(corpus, None)
-        self._persist(corpus)
+        with self._lock:
+            idx = self._load(corpus)
+            for cid, text, payload in zip(ids, texts, payloads):
+                clean = {k: v for k, v in payload.items() if k != "source_text"} if "source_text" in payload else payload
+                arr_pos = len(idx.ids)
+                idx.ids.append(cid)
+                idx.docs.append(tokenize(text))
+                idx.payloads.append(clean)
+                sid = clean.get("source_id", "")
+                idx.by_source.setdefault(sid, []).append(arr_pos)
+            self._bm25_instances.pop(corpus, None)
+            self._persist(corpus)
 
     def replace(self, corpus: str, records: Iterable[tuple[str, str, dict]]) -> int:
         """Atomically replace one corpus from already-materialized chunks.
@@ -454,20 +460,22 @@ class BM25Store:
         replacement in memory, then persist it once so readers see either the
         old index or the whole new one, never an incrementally-written pickle.
         """
-        self.evict(corpus)
-        self._make_room(corpus)
-        idx = _CorpusIndex()
-        for cid, text, payload in records:
-            pos = len(idx.ids)
-            idx.ids.append(cid)
-            idx.docs.append(tokenize(text))
-            idx.payloads.append(payload)
-            source_id = payload.get("source_id", "")
-            idx.by_source.setdefault(source_id, []).append(pos)
-        self._cache[corpus] = idx
-        self._bm25_instances.pop(corpus, None)
-        self._persist(corpus)
-        return len(idx.ids)
+        with self._lock:
+            self.evict(corpus)
+            self._make_room(corpus)
+            idx = _CorpusIndex()
+            for cid, text, payload in records:
+                clean = {k: v for k, v in payload.items() if k != "source_text"} if "source_text" in payload else payload
+                pos = len(idx.ids)
+                idx.ids.append(cid)
+                idx.docs.append(tokenize(text))
+                idx.payloads.append(clean)
+                source_id = clean.get("source_id", "")
+                idx.by_source.setdefault(source_id, []).append(pos)
+            self._cache[corpus] = idx
+            self._bm25_instances.pop(corpus, None)
+            self._persist(corpus)
+            return len(idx.ids)
 
     def exists(self, corpus: str) -> bool:
         """Whether a persisted index exists for a non-empty corpus."""
@@ -475,26 +483,49 @@ class BM25Store:
         return bool(p and p.exists())
 
     def delete_by_source(self, corpus: str, source_id: str) -> None:
-        idx = self._load(corpus)
-        positions = set(idx.by_source.pop(source_id, []))
-        if not positions:
+        with self._lock:
+            idx = self._load(corpus)
+            positions = set(idx.by_source.pop(source_id, []))
+            if not positions:
+                return
+            # Rebuild parallel arrays without those positions, then re-derive
+            # the by_source map. Simpler than splice math; BM25 needs full
+            # rebuild on every change anyway.
+            new = _CorpusIndex()
+            for i, cid in enumerate(idx.ids):
+                if i in positions:
+                    continue
+                new_pos = len(new.ids)
+                new.ids.append(cid)
+                new.docs.append(idx.docs[i])
+                new.payloads.append(idx.payloads[i])
+                sid = idx.payloads[i].get("source_id", "")
+                new.by_source.setdefault(sid, []).append(new_pos)
+            self._cache[corpus] = new
+            self._bm25_instances.pop(corpus, None)
+            self._persist(corpus)
+
+    def delete_ids(self, corpus: str, cids: list[str]) -> None:
+        if not cids:
             return
-        # Rebuild parallel arrays without those positions, then re-derive
-        # the by_source map. Simpler than splice math; BM25 needs full
-        # rebuild on every change anyway.
-        new = _CorpusIndex()
-        for i, cid in enumerate(idx.ids):
-            if i in positions:
-                continue
-            new_pos = len(new.ids)
-            new.ids.append(cid)
-            new.docs.append(idx.docs[i])
-            new.payloads.append(idx.payloads[i])
-            sid = idx.payloads[i].get("source_id", "")
-            new.by_source.setdefault(sid, []).append(new_pos)
-        self._cache[corpus] = new
-        self._bm25_instances.pop(corpus, None)
-        self._persist(corpus)
+        with self._lock:
+            idx = self._load(corpus)
+            drop_set = set(cids)
+            if not any(cid in drop_set for cid in idx.ids):
+                return
+            new = _CorpusIndex()
+            for i, cid in enumerate(idx.ids):
+                if cid in drop_set:
+                    continue
+                new_pos = len(new.ids)
+                new.ids.append(cid)
+                new.docs.append(idx.docs[i])
+                new.payloads.append(idx.payloads[i])
+                sid = idx.payloads[i].get("source_id", "")
+                new.by_source.setdefault(sid, []).append(new_pos)
+            self._cache[corpus] = new
+            self._bm25_instances.pop(corpus, None)
+            self._persist(corpus)
 
     # ── corpus queries ────────────────────────────────────────────────────
     # These exist so callers stop reaching into `_load(corpus)` and holding a
@@ -549,51 +580,62 @@ class BM25Store:
         if p and p.exists():
             p.unlink()
 
-    def search(self, corpus: str, query: str, top_k: int) -> list[tuple[str, float, dict]]:
-        idx = self._load(corpus)
-        if not idx.docs:
+    def search(
+        self,
+        corpus: str,
+        query: str,
+        top_k: int,
+        *,
+        source_ids: set[str] | None = None,
+    ) -> list[tuple[str, float, dict]]:
+        if source_ids is not None and not source_ids:
             return []
-        q_tokens = query_tokens(query)
-        if not q_tokens:
-            return []
-        
-        bm25 = self._bm25_instances.get(corpus)
-        if bm25 is None:
-            bm25 = BM25Okapi(idx.docs)
-            self._bm25_instances[corpus] = bm25
+        with self._lock:
+            idx = self._load(corpus)
+            if not idx.docs:
+                return []
+            q_tokens = query_tokens(query)
+            if not q_tokens:
+                return []
 
-        scores = bm25.get_scores(q_tokens)
-        # BM25Okapi can score 0 for valid matches when IDF is degenerate
-        # (single-doc corpus, or every doc contains the term). Fall back to
-        # token-overlap counting in that case so the retriever still surfaces
-        # something rather than nothing.
-        #
-        # Coverage handling lives in `_coverage_factor`: factor=None drops the
-        # doc, factor=1.0 keeps it at full BM25 score, factor<1 demotes it
-        # (penalty mode). We multiply factor into the sort key so partial-
-        # coverage docs survive but rank below full-coverage hits.
-        candidates: list[tuple[float, int]] = []
-        for i, s in enumerate(scores):
-            if s <= 0:
-                continue
-            factor = _coverage_factor(q_tokens, idx.docs[i])
-            if factor is None:
-                continue
-            candidates.append((float(s) * factor, i))
-        ranked = sorted(candidates, reverse=True)[:top_k]
-        if not ranked:
-            q_set = set(q_tokens)
-            fallback: list[tuple[float, int]] = []
-            for i in range(len(idx.docs)):
+            bm25 = self._bm25_instances.get(corpus)
+            if bm25 is None:
+                bm25 = BM25Okapi(idx.docs)
+                self._bm25_instances[corpus] = bm25
+
+            scores = bm25.get_scores(q_tokens)
+            allowed_positions: set[int] | None = None
+            if source_ids is not None:
+                allowed_positions = {
+                    pos
+                    for sid in source_ids
+                    for pos in idx.by_source.get(sid, ())
+                }
+                if not allowed_positions:
+                    return []
+            candidates: list[tuple[float, int]] = []
+            for i, s in enumerate(scores):
+                if allowed_positions is not None and i not in allowed_positions:
+                    continue
+                if s <= 0:
+                    continue
                 factor = _coverage_factor(q_tokens, idx.docs[i])
                 if factor is None:
                     continue
-                # Token-occurrence count (not distinct) preserves the prior
-                # fallback ordering behavior; the coverage factor still
-                # demotes partial matches in penalty mode.
-                o = sum(1 for t in idx.docs[i] if t in q_set)
-                if o <= 0:
-                    continue
-                fallback.append((float(o) * factor, i))
-            ranked = sorted(fallback, reverse=True)[:top_k]
-        return [(idx.ids[i], float(s), idx.payloads[i]) for s, i in ranked]
+                candidates.append((float(s) * factor, i))
+            ranked = sorted(candidates, reverse=True)[:top_k]
+            if not ranked:
+                q_set = set(q_tokens)
+                fallback: list[tuple[float, int]] = []
+                for i in range(len(idx.docs)):
+                    if allowed_positions is not None and i not in allowed_positions:
+                        continue
+                    factor = _coverage_factor(q_tokens, idx.docs[i])
+                    if factor is None:
+                        continue
+                    o = sum(1 for t in idx.docs[i] if t in q_set)
+                    if o <= 0:
+                        continue
+                    fallback.append((float(o) * factor, i))
+                ranked = sorted(fallback, reverse=True)[:top_k]
+            return [(idx.ids[i], float(s), idx.payloads[i]) for s, i in ranked]

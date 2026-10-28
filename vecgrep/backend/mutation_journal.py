@@ -27,10 +27,21 @@ class MutationJournal:
     def path(self, corpus: str) -> Path | None:
         return None if self.root is None else self.root / f"{self._safe(corpus)}.json"
 
+    def phase_path(self, corpus: str) -> Path | None:
+        return None if self.root is None else self.root / f"{self._safe(corpus)}.phase"
+
+    def has(self, corpus: str) -> bool:
+        path = self.path(corpus)
+        return path is not None and path.exists()
+
     def write(self, record: dict) -> None:
-        path = self.path(str(record["corpus"]))
+        corpus = str(record["corpus"])
+        path = self.path(corpus)
         if path is None:
             return
+        p_path = self.phase_path(corpus)
+        if p_path is not None:
+            p_path.unlink(missing_ok=True)
         payload = json.dumps(record, ensure_ascii=False, sort_keys=True)
         fd, temporary = tempfile.mkstemp(
             dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
@@ -49,11 +60,43 @@ class MutationJournal:
                 pass
             raise
 
+    def advance_phase(self, corpus: str, phase: str) -> None:
+        """Record a phase transition without rewriting the multi-MB old_points JSON."""
+        path = self.path(corpus)
+        p_path = self.phase_path(corpus)
+        if path is None or p_path is None or not path.exists():
+            return
+        fd, temporary = tempfile.mkstemp(
+            dir=str(p_path.parent), prefix=f".{p_path.name}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(phase)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, p_path)
+            self._fsync_dir(p_path.parent)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+
     def read(self, corpus: str) -> dict | None:
         path = self.path(corpus)
         if path is None or not path.exists():
             return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        record = json.loads(path.read_text(encoding="utf-8"))
+        p_path = self.phase_path(corpus)
+        if p_path is not None and p_path.exists():
+            try:
+                phase = p_path.read_text(encoding="utf-8").strip()
+                if phase:
+                    record["phase"] = phase
+            except OSError:
+                pass
+        return record
 
     def pending_corpora(self) -> list[str]:
         if self.root is None:
@@ -75,6 +118,9 @@ class MutationJournal:
         path = self.path(corpus)
         if path is None:
             return
+        p_path = self.phase_path(corpus)
+        if p_path is not None:
+            p_path.unlink(missing_ok=True)
         path.unlink(missing_ok=True)
         self._fsync_dir(path.parent)
 

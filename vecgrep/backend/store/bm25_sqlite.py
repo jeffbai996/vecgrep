@@ -85,6 +85,18 @@ def _fts_query(q_tokens: list[str]) -> str:
     return " OR ".join('"' + t.replace('"', '""') + '"' for t in q_tokens)
 
 
+def _fts_and_query(q_tokens: list[str]) -> str:
+    """An FTS5 MATCH expression that ANDs distinct query tokens."""
+    unique = list(dict.fromkeys(q_tokens))
+    return " AND ".join('"' + t.replace('"', '""') + '"' for t in unique)
+
+
+def _without_source_text(payload: dict) -> dict:
+    if "source_text" not in payload:
+        return payload
+    return {k: v for k, v in payload.items() if k != "source_text"}
+
+
 class BM25SqliteStore:
     """The BM25Store interface, backed by one SQLite file per corpus."""
 
@@ -93,12 +105,46 @@ class BM25SqliteStore:
         # database per corpus, discarded with the process.
         self.root = root
         self._conns: dict[str, sqlite3.Connection] = {}
+        self._corpus_locks: dict[str, threading.RLock] = {}
+        self._counts: dict[str, tuple[tuple[int, int] | None, int]] = {}
         self._lock = threading.RLock()
         self._bulk: set[str] = set()
 
     # ── connections ───────────────────────────────────────────────────────
     def _path(self, corpus: str) -> Path | None:
         return None if self.root is None else self.root / f"{corpus}.db"
+
+    def _corpus_lock(self, corpus: str) -> threading.RLock:
+        with self._lock:
+            lock = self._corpus_locks.get(corpus)
+            if lock is None:
+                lock = threading.RLock()
+                self._corpus_locks[corpus] = lock
+            return lock
+
+    def _disk_version(
+        self, corpus: str, conn: sqlite3.Connection | None = None
+    ) -> tuple[int, int, int, int, int] | None:
+        p = self._path(corpus)
+        if p is None:
+            return None
+        try:
+            st = p.stat()
+            wal = Path(f"{p}-wal")
+            if wal.exists():
+                wst = wal.stat()
+                wal_mtime, wal_size = wst.st_mtime_ns, wst.st_size
+            else:
+                wal_mtime, wal_size = 0, 0
+            c = conn or self._conns.get(corpus)
+            data_ver = (
+                int(c.execute("PRAGMA data_version").fetchone()[0])
+                if c is not None
+                else 0
+            )
+            return (st.st_mtime_ns, st.st_size, wal_mtime, wal_size, data_ver)
+        except OSError:
+            return None
 
     def _conn(self, corpus: str) -> sqlite3.Connection:
         with self._lock:
@@ -189,6 +235,7 @@ class BM25SqliteStore:
     def close(self, corpus: str) -> None:
         with self._lock:
             c = self._conns.pop(corpus, None)
+            self._counts.pop(corpus, None)
         if c is not None:
             c.close()
 
@@ -212,21 +259,24 @@ class BM25SqliteStore:
     @contextmanager
     def bulk(self, corpus: str):
         """Commit a multi-source update once, or roll it back as a unit."""
-        if corpus in self._bulk:
-            yield
-            return
-        conn = self._conn(corpus)
-        self._bulk.add(corpus)
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            yield
-            conn.commit()
-            self._checkpoint(corpus, conn)
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            self._bulk.discard(corpus)
+        with self._corpus_lock(corpus):
+            if corpus in self._bulk:
+                yield
+                return
+            conn = self._conn(corpus)
+            self._bulk.add(corpus)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                yield
+                conn.commit()
+                self._counts.pop(corpus, None)
+                self._checkpoint(corpus, conn)
+            except Exception:
+                conn.rollback()
+                self._counts.pop(corpus, None)
+                raise
+            finally:
+                self._bulk.discard(corpus)
 
     # ── reads ─────────────────────────────────────────────────────────────
     def exists(self, corpus: str) -> bool:
@@ -234,19 +284,29 @@ class BM25SqliteStore:
         return corpus in self._conns if p is None else p.exists()
 
     def count(self, corpus: str) -> int:
-        return int(self._conn(corpus).execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+        with self._corpus_lock(corpus):
+            conn = self._conn(corpus)
+            ver = self._disk_version(corpus, conn)
+            cached = self._counts.get(corpus)
+            if cached is not None and ver is not None and cached[0] == ver:
+                return cached[1]
+            n = int(conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+            self._counts[corpus] = (self._disk_version(corpus, conn), n)
+            return n
 
     def get_by_id(self, corpus: str, cid: str) -> dict | None:
-        row = self._conn(corpus).execute(
-            "SELECT payload FROM chunks WHERE cid = ? LIMIT 1", (cid,)
-        ).fetchone()
-        return None if row is None else json.loads(row[0])
+        with self._corpus_lock(corpus):
+            row = self._conn(corpus).execute(
+                "SELECT payload FROM chunks WHERE cid = ? LIMIT 1", (cid,)
+            ).fetchone()
+            return None if row is None else json.loads(row[0])
 
     def iter_payloads(self, corpus: str) -> Iterator[dict]:
         """Every payload, streamed. The replacement for reaching into
         `_load(corpus).payloads`: rows arrive one at a time and are not
         retained, so a full scan costs one row of memory rather than a corpus."""
-        cur = self._conn(corpus).execute("SELECT payload FROM chunks ORDER BY pos")
+        conn = self._conn(corpus)
+        cur = conn.execute("SELECT payload FROM chunks ORDER BY pos")
         for (raw,) in cur:
             yield json.loads(raw)
 
@@ -255,7 +315,8 @@ class BM25SqliteStore:
 
         Ordered by first appearance, which is what iterating the pickle
         store's `by_source` gave, so callers see the same sequence."""
-        cur = self._conn(corpus).execute(
+        conn = self._conn(corpus)
+        cur = conn.execute(
             "SELECT c.source_id, c.payload, g.n FROM chunks c "
             "JOIN (SELECT source_id, MIN(pos) AS first_pos, COUNT(*) AS n "
             "      FROM chunks GROUP BY source_id) g "
@@ -267,35 +328,39 @@ class BM25SqliteStore:
 
     def first_chunk_for_source(self, corpus: str, source_id: str) -> tuple[str, dict] | None:
         """(chunk id, payload) of a source's first chunk, or None."""
-        row = self._conn(corpus).execute(
-            "SELECT cid, payload FROM chunks WHERE source_id = ? ORDER BY pos LIMIT 1",
-            (source_id,),
-        ).fetchone()
-        return None if row is None else (row[0], json.loads(row[1]))
+        with self._corpus_lock(corpus):
+            row = self._conn(corpus).execute(
+                "SELECT cid, payload FROM chunks WHERE source_id = ? ORDER BY pos LIMIT 1",
+                (source_id,),
+            ).fetchone()
+            return None if row is None else (row[0], json.loads(row[1]))
 
     def update_payloads(self, corpus: str, mutate) -> int:
         """Apply `mutate(payload)` to every payload, writing back the ones it
         changed. `mutate` edits in place and returns True when it changed
         something. Rows are streamed and written in one transaction."""
-        conn = self._conn(corpus)
-        changed: list[tuple[str, int]] = []
-        for pos, raw in conn.execute("SELECT pos, payload FROM chunks ORDER BY pos"):
-            payload = json.loads(raw)
-            if mutate(payload):
-                changed.append((json.dumps(payload), pos))
-        if changed:
-            conn.executemany("UPDATE chunks SET payload = ? WHERE pos = ?", changed)
-            conn.commit()
-            self._checkpoint(corpus, conn)
-        return len(changed)
+        with self._corpus_lock(corpus):
+            conn = self._conn(corpus)
+            changed: list[tuple[str, int]] = []
+            for pos, raw in conn.execute("SELECT pos, payload FROM chunks ORDER BY pos"):
+                payload = json.loads(raw)
+                if mutate(payload):
+                    changed.append((json.dumps(_without_source_text(payload)), pos))
+            if changed:
+                conn.executemany("UPDATE chunks SET payload = ? WHERE pos = ?", changed)
+                conn.commit()
+                self._counts.pop(corpus, None)
+                self._checkpoint(corpus, conn)
+            return len(changed)
 
     def source_counts(self, corpus: str) -> dict[str, int]:
-        return {
-            sid: n
-            for sid, n in self._conn(corpus).execute(
-                "SELECT source_id, COUNT(*) FROM chunks GROUP BY source_id"
-            )
-        }
+        with self._corpus_lock(corpus):
+            return {
+                sid: n
+                for sid, n in self._conn(corpus).execute(
+                    "SELECT source_id, COUNT(*) FROM chunks GROUP BY source_id"
+                )
+            }
 
     # ── writes ────────────────────────────────────────────────────────────
     def _next_pos(self, conn: sqlite3.Connection) -> int:
@@ -304,9 +369,10 @@ class BM25SqliteStore:
 
     def _insert(self, conn: sqlite3.Connection, pos: int, cid: str,
                 source_id: str, tokens: str, payload: dict) -> None:
+        clean_payload = _without_source_text(payload)
         conn.execute(
             "INSERT INTO chunks(pos, cid, source_id, tokens, payload) VALUES (?,?,?,?,?)",
-            (pos, cid, source_id, tokens, json.dumps(payload)),
+            (pos, cid, source_id, tokens, json.dumps(clean_payload)),
         )
         # External-content FTS5 is not written by the table itself; each row is
         # mirrored explicitly so the two stay in lockstep.
@@ -316,46 +382,78 @@ class BM25SqliteStore:
                payloads: list[dict]) -> None:
         if not ids:
             return
-        conn = self._conn(corpus)
-        pos = self._next_pos(conn)
-        for cid, text, payload in zip(ids, texts, payloads):
-            self._insert(conn, pos, cid, payload.get("source_id", "") or "",
-                         " ".join(tokenize(text)), payload)
-            pos += 1
-        if corpus not in self._bulk:
-            conn.commit()
+        with self._corpus_lock(corpus):
+            conn = self._conn(corpus)
+            pos = self._next_pos(conn)
+            for cid, text, payload in zip(ids, texts, payloads):
+                self._insert(conn, pos, cid, payload.get("source_id", "") or "",
+                             " ".join(tokenize(text)), payload)
+                pos += 1
+            if corpus not in self._bulk:
+                conn.commit()
+            self._counts.pop(corpus, None)
 
     def replace(self, corpus: str, records: Iterable[tuple[str, str, dict]]) -> int:
         """Atomically replace a corpus. Readers see the old contents or the
         whole new one, never a half-written index."""
-        conn = self._conn(corpus)
-        n = 0
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute("DELETE FROM chunks_fts")
-            conn.execute("DELETE FROM chunks")
-            for cid, text, payload in records:
-                self._insert(conn, n, cid, payload.get("source_id", "") or "",
-                             " ".join(tokenize(text)), payload)
-                n += 1
-            conn.commit()
-            self._checkpoint(corpus, conn)
-        except Exception:
-            conn.rollback()
-            raise
-        return n
+        with self._corpus_lock(corpus):
+            conn = self._conn(corpus)
+            n = 0
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("DELETE FROM chunks_fts")
+                conn.execute("DELETE FROM chunks")
+                for cid, text, payload in records:
+                    self._insert(conn, n, cid, payload.get("source_id", "") or "",
+                                 " ".join(tokenize(text)), payload)
+                    n += 1
+                conn.commit()
+                self._counts.pop(corpus, None)
+                self._checkpoint(corpus, conn)
+            except Exception:
+                conn.rollback()
+                self._counts.pop(corpus, None)
+                raise
+            return n
 
     def delete_by_source(self, corpus: str, source_id: str) -> None:
-        conn = self._conn(corpus)
-        rows = [r[0] for r in conn.execute(
-            "SELECT pos FROM chunks WHERE source_id = ?", (source_id,))]
-        if not rows:
+        with self._corpus_lock(corpus):
+            conn = self._conn(corpus)
+            rows = [r[0] for r in conn.execute(
+                "SELECT pos FROM chunks WHERE source_id = ?", (source_id,))]
+            if not rows:
+                return
+            conn.executemany("DELETE FROM chunks_fts WHERE rowid = ?", [(r,) for r in rows])
+            conn.execute("DELETE FROM chunks WHERE source_id = ?", (source_id,))
+            if corpus not in self._bulk:
+                conn.commit()
+                self._checkpoint(corpus, conn)
+            self._counts.pop(corpus, None)
+
+    def delete_ids(self, corpus: str, cids: list[str]) -> None:
+        if not cids:
             return
-        conn.executemany("DELETE FROM chunks_fts WHERE rowid = ?", [(r,) for r in rows])
-        conn.execute("DELETE FROM chunks WHERE source_id = ?", (source_id,))
-        if corpus not in self._bulk:
-            conn.commit()
-            self._checkpoint(corpus, conn)
+        with self._corpus_lock(corpus):
+            conn = self._conn(corpus)
+            placeholders = ",".join("?" for _ in cids)
+            rows = [
+                r[0]
+                for r in conn.execute(
+                    f"SELECT pos FROM chunks WHERE cid IN ({placeholders})",
+                    list(cids),
+                )
+            ]
+            if not rows:
+                return
+            conn.executemany("DELETE FROM chunks_fts WHERE rowid = ?", [(r,) for r in rows])
+            conn.execute(
+                f"DELETE FROM chunks WHERE cid IN ({placeholders})",
+                list(cids),
+            )
+            if corpus not in self._bulk:
+                conn.commit()
+                self._checkpoint(corpus, conn)
+            self._counts.pop(corpus, None)
 
     def drop(self, corpus: str) -> None:
         self.close(corpus)
@@ -377,36 +475,96 @@ class BM25SqliteStore:
             stale.unlink(missing_ok=True)
 
     # ── search ────────────────────────────────────────────────────────────
-    def search(self, corpus: str, query: str, top_k: int) -> list[tuple[str, float, dict]]:
+    def search(
+        self,
+        corpus: str,
+        query: str,
+        top_k: int,
+        *,
+        source_ids: set[str] | None = None,
+    ) -> list[tuple[str, float, dict]]:
+        if source_ids is not None and not source_ids:
+            return []
         q_tokens = query_tokens(query)
         if not q_tokens:
             return []
-        conn = self._conn(corpus)
-        limit = max(_MIN_CANDIDATES, top_k * _OVERFETCH)
-        cur = conn.execute(
-            "SELECT c.cid, c.tokens, c.payload, bm25(chunks_fts) "
-            "FROM chunks_fts JOIN chunks c ON c.pos = chunks_fts.rowid "
-            "WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts) LIMIT ?",
-            (_fts_query(q_tokens), limit),
-        )
-        # Query tokens are quoted by _fts_query. Operational failures indicate
-        # an unhealthy store and must not silently become vector-only results.
-        rows = cur.fetchall()
+        with self._corpus_lock(corpus):
+            conn = self._conn(corpus)
+            limit = max(_MIN_CANDIDATES, top_k * _OVERFETCH)
+            source_clause = ""
+            source_params: list[str] = []
+            if source_ids is not None and len(source_ids) <= 200:
+                source_params = sorted(source_ids)
+                placeholders = ",".join("?" for _ in source_params)
+                source_clause = f" AND c.source_id IN ({placeholders})"
 
-        ranked: list[tuple[float, str, dict]] = []
-        for cid, tokens, raw_payload, score in rows:
-            factor = _coverage_factor(q_tokens, tokens.split())
-            if factor is None:
-                continue
-            # bm25() is negative-better; flip it so higher is better, matching
-            # the pickle store's contract and the RRF fusion above it.
-            ranked.append((-float(score) * factor, cid, json.loads(raw_payload)))
+            # Two-stage retrieval:
+            # 1) Fetch lightweight (pos, cid, tokens, bm25) rows WITHOUT
+            #    joining/deserializing the large payload column on all 400
+            #    overfetched candidates.
+            # 2) For multi-token queries, first pull up to top_k full-quorum
+            #    (AND) matches so single-term high-TF noise in the 400-row OR
+            #    window can never crowd out exact multi-term matches.
+            by_pos: dict[int, tuple[str, str, float]] = {}
+            unique_tokens = list(dict.fromkeys(q_tokens))
+            if len(unique_tokens) >= 2:
+                and_cur = conn.execute(
+                    "SELECT c.pos, c.cid, c.tokens, bm25(chunks_fts) "
+                    "FROM chunks_fts JOIN chunks c ON c.pos = chunks_fts.rowid "
+                    f"WHERE chunks_fts MATCH ?{source_clause} "
+                    "ORDER BY bm25(chunks_fts) LIMIT ?",
+                    (_fts_and_query(unique_tokens), *source_params, top_k),
+                )
+                for pos, cid, tokens, score in and_cur.fetchall():
+                    by_pos[int(pos)] = (str(cid), str(tokens), float(score))
 
-        # Ties broken by cid so the same query returns the same order every
-        # time. FTS5 would otherwise hand back rowid order, which is insertion
-        # order, which changes when a corpus is rebuilt.
-        ranked.sort(key=lambda r: (-r[0], r[1]))
-        return [(cid, s, payload) for s, cid, payload in ranked[:top_k]]
+            cur = conn.execute(
+                "SELECT c.pos, c.cid, c.tokens, bm25(chunks_fts) "
+                "FROM chunks_fts JOIN chunks c ON c.pos = chunks_fts.rowid "
+                f"WHERE chunks_fts MATCH ?{source_clause} "
+                "ORDER BY bm25(chunks_fts) LIMIT ?",
+                (_fts_query(q_tokens), *source_params, limit),
+            )
+            # Query tokens are quoted by _fts_query. Operational failures indicate
+            # an unhealthy store and must not silently become vector-only results.
+            for pos, cid, tokens, score in cur.fetchall():
+                by_pos[int(pos)] = (str(cid), str(tokens), float(score))
+
+            if not by_pos:
+                return []
+
+            ranked: list[tuple[float, str, int]] = []
+            for pos, (cid, tokens, score) in by_pos.items():
+                factor = _coverage_factor(q_tokens, tokens.split())
+                if factor is None:
+                    continue
+                # bm25() is negative-better; flip it so higher is better, matching
+                # the pickle store's contract and the RRF fusion above it.
+                ranked.append((-float(score) * factor, cid, pos))
+
+            # Ties broken by cid so the same query returns the same order every
+            # time. FTS5 would otherwise hand back rowid order, which is insertion
+            # order, which changes when a corpus is rebuilt.
+            ranked.sort(key=lambda r: (-r[0], r[1]))
+            winners = ranked[:top_k]
+            if not winners:
+                return []
+
+            win_positions = [pos for _, _, pos in winners]
+            placeholders = ",".join("?" for _ in win_positions)
+            payload_rows = conn.execute(
+                f"SELECT pos, payload FROM chunks WHERE pos IN ({placeholders})",
+                win_positions,
+            ).fetchall()
+            payload_by_pos = {
+                int(pos): json.loads(raw_payload)
+                for pos, raw_payload in payload_rows
+            }
+            return [
+                (cid, s, payload_by_pos[pos])
+                for s, cid, pos in winners
+                if pos in payload_by_pos
+            ]
 
 
 def migrate_from_pickle(root: Path, corpus: str, *, force: bool = False) -> int:

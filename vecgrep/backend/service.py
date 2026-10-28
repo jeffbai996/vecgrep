@@ -5,6 +5,7 @@ corpus lifecycle so callers don't have to coordinate four subsystems.
 """
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 import contextlib
 
 import fnmatch
@@ -70,6 +71,7 @@ from .timeline import (
     ANCHOR_TOP_K,
     MAX_GROUPS,
     SLICE_PADDING,
+    _EVENT_HEADER,
     build_timeline,
     parse_events,
 )
@@ -150,6 +152,8 @@ class _StageTimer:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._seconds: dict[str, float] = {}
+        self.user_filters: list[str] | None = None
+        self.effective_filters: list[str] | None = None
 
     def add(self, stage: str, seconds: float) -> None:
         with self._lock:
@@ -645,7 +649,7 @@ class VecgrepService:
             )
 
     def _recover_if_pending(self, corpus_name: str) -> None:
-        if self.mutations.read(corpus_name) is None:
+        if not self.mutations.has(corpus_name):
             return
         with self.locks.write(corpus_name):
             self._recover_corpus_locked(corpus_name)
@@ -1118,15 +1122,9 @@ class VecgrepService:
                         "old_points": old_records,
                     })
 
-                if replace_existing and not (
-                    resume_source_counts is not None and matches_recorded_source
-                ):
-                    self.store.delete_by_source(collection, doc.source_id)
-                if update_bm25:
-                    self.bm25.delete_by_source(corpus_name, doc.source_id)
-
+                newline_offsets = _newline_offsets(doc.text)
+                header_spans = _speaker_header_spans(doc.text)
                 ids = [_chunk_id(corpus_name, doc.source_id, c.index) for c in chunks]
-                vectors = backend.embed([c.search_text or c.text for c in chunks])
                 payloads = [
                     {
                         "corpus": corpus_name,
@@ -1138,7 +1136,9 @@ class VecgrepService:
                         # in O(1) via _source_text_for; per-chunk context comes
                         # from the precomputed fields below.
                         **({"source_text": doc.text} if c.index == 0 else {}),
-                        **_chunk_context_fields(doc.text, c.start, c.end),
+                        **_chunk_context_fields(
+                            doc.text, c.start, c.end, newline_offsets=newline_offsets
+                        ),
                         "chunk_index": c.index,
                         "chunk_start": c.start,
                         "chunk_end": c.end,
@@ -1148,24 +1148,131 @@ class VecgrepService:
                         **({"search_text": c.search_text} if c.search_text else {}),
                         # Doc metadata + per-chunk enrichment (speakers, bot flag,
                         # content shapes) — powers speaker:/bot:/has: filters.
-                        "metadata": {**doc.metadata, **chunk_enrichment(c.text),
-                                     **(getattr(c, "meta", None) or {})},
+                        "metadata": {
+                            **doc.metadata,
+                            **chunk_enrichment(
+                                c.text,
+                                fallback_speaker=_active_speaker_at(
+                                    header_spans, c.start
+                                ),
+                            ),
+                            **(getattr(c, "meta", None) or {}),
+                        },
                         # Document's own date (epoch seconds) when discoverable.
                         # Powers optional recency decay at search time. None is fine.
                         "doc_timestamp": doc.timestamp,
                     }
                     for c in chunks
                 ]
+
+                old_by_id = (
+                    {str(r["id"]): r for r in old_records}
+                    if old_records and not force
+                    else {}
+                )
+                vectors: list[list[float]] = [[] for _ in chunks]
+                dirty_embed_indices: list[int] = []
+                for idx, c in enumerate(chunks):
+                    cid = ids[idx]
+                    old_rec = old_by_id.get(cid)
+                    if old_rec is not None:
+                        old_pl = old_rec.get("payload") or {}
+                        old_vec = old_rec.get("vector")
+                        embed_text = c.search_text or c.text
+                        old_embed_text = old_pl.get("search_text") or old_pl.get("text", "")
+                        if (
+                            old_embed_text == embed_text
+                            and old_pl.get("text") == c.text
+                            and isinstance(old_vec, list)
+                            and len(old_vec) == corpus.dim
+                        ):
+                            vectors[idx] = old_vec
+                            continue
+                    dirty_embed_indices.append(idx)
+
+                if dirty_embed_indices:
+                    dirty_texts = [
+                        chunks[i].search_text or chunks[i].text
+                        for i in dirty_embed_indices
+                    ]
+                    embedded = backend.embed(dirty_texts)
+                    for i, vec in zip(dirty_embed_indices, embedded):
+                        vectors[i] = vec
+
+                reused_chunks = len(chunks) - len(dirty_embed_indices)
+                incremental_update = bool(old_by_id and reused_chunks > 0)
+                new_id_set = set(ids)
+                stale_ids = [oid for oid in old_by_id if oid not in new_id_set]
+
                 self.store.ensure_collection(
                     collection, corpus.dim, datatype=corpus.datatype,
                 )
-                self.store.upsert(collection, ids, vectors, payloads)
+                if incremental_update:
+                    if stale_ids:
+                        self.store.delete_points(collection, stale_ids)
+                    qdrant_indices = [
+                        i
+                        for i in range(len(chunks))
+                        if i == 0
+                        or i in dirty_embed_indices
+                        or not _chunk_payload_unchanged(
+                            old_by_id.get(ids[i], {}).get("payload"),
+                            payloads[i],
+                        )
+                    ]
+                    if qdrant_indices:
+                        self.store.upsert(
+                            collection,
+                            [ids[i] for i in qdrant_indices],
+                            [vectors[i] for i in qdrant_indices],
+                            [payloads[i] for i in qdrant_indices],
+                        )
+                else:
+                    if replace_existing and not (
+                        resume_source_counts is not None and matches_recorded_source
+                    ):
+                        self.store.delete_by_source(collection, doc.source_id)
+                    self.store.upsert(collection, ids, vectors, payloads)
+
                 if journaled:
-                    record = self.mutations.read(corpus_name) or {}
-                    record["phase"] = "qdrant_done"
-                    self.mutations.write(record)
+                    self.mutations.advance_phase(corpus_name, "qdrant_done")
                 if update_bm25:
-                    self.bm25.upsert(corpus_name, ids, [c.search_text or c.text for c in chunks], payloads)
+                    bm25_payloads = [
+                        {k: v for k, v in p.items() if k != "source_text"}
+                        if "source_text" in p
+                        else p
+                        for p in payloads
+                    ]
+                    if incremental_update:
+                        if stale_ids:
+                            self.bm25.delete_ids(corpus_name, stale_ids)
+                        bm25_indices = [
+                            i
+                            for i in range(len(chunks))
+                            if i in dirty_embed_indices
+                            or not _chunk_payload_unchanged(
+                                old_by_id.get(ids[i], {}).get("payload"),
+                                bm25_payloads[i],
+                            )
+                        ]
+                        if bm25_indices:
+                            self.bm25.upsert(
+                                corpus_name,
+                                [ids[i] for i in bm25_indices],
+                                [
+                                    chunks[i].search_text or chunks[i].text
+                                    for i in bm25_indices
+                                ],
+                                [bm25_payloads[i] for i in bm25_indices],
+                            )
+                    else:
+                        self.bm25.delete_by_source(corpus_name, doc.source_id)
+                        self.bm25.upsert(
+                            corpus_name,
+                            ids,
+                            [c.search_text or c.text for c in chunks],
+                            bm25_payloads,
+                        )
                     # Browse metadata lands once per pass (see the flush after
                     # the loop): a commit per source rewrote the catalog for
                     # every document of every incremental pass.
@@ -1176,9 +1283,7 @@ class VecgrepService:
                         "chunk_count": len(chunks),
                     })
                     if journaled:
-                        record = self.mutations.read(corpus_name) or {}
-                        record["phase"] = "bm25_done"
-                        self.mutations.write(record)
+                        self.mutations.advance_phase(corpus_name, "bm25_done")
 
                 total_docs += 1
                 total_chunks += len(chunks)
@@ -1195,9 +1300,6 @@ class VecgrepService:
                     else:
                         self.registry.upsert(corpus)
                     if journaled:
-                        record = self.mutations.read(corpus_name) or {}
-                        record["phase"] = "registry_done"
-                        self.mutations.write(record)
                         self.mutations.finish(corpus_name)
 
         # During recovery, do not persist an intermediate point count as the
@@ -1327,6 +1429,34 @@ class VecgrepService:
         # itself never silently clips the requested breadth.
         per_corpus_k = max(CANDIDATE_POOL, top_k)
 
+        user_filters = list(filters or [])
+        has_explicit_status = any(f.startswith("meta.status=") for f in user_filters)
+        effective_filters = list(user_filters)
+        if not include_superseded and not has_explicit_status:
+            effective_filters.append("meta.status=active")
+
+        timer = _StageTimer()
+        timer.user_filters = user_filters
+        timer.effective_filters = effective_filters
+        if user_filters and _has_invalid_filter(user_filters):
+            return SearchOutcome(
+                [],
+                [],
+                timings_ms=timer.as_ms(
+                    total_s=time.monotonic() - started, corpora=0
+                ),
+            )
+        if len(corpora) > 1 and user_filters:
+            corpora = _filter_corpora_by_name(corpora, user_filters)
+            if not corpora:
+                return SearchOutcome(
+                    [],
+                    [],
+                    timings_ms=timer.as_ms(
+                        total_s=time.monotonic() - started, corpora=0
+                    ),
+                )
+
         results: list[SearchResult] = []
         warnings: list[SearchWarning] = []
         successful: list[str] = []
@@ -1339,7 +1469,6 @@ class VecgrepService:
         workers = min(
             len(corpora), max(1, int(getattr(self.settings, "search_fanout_workers", 8) or 1))
         )
-        timer = _StageTimer()
         retrieve_started = time.monotonic()
         if workers > 1 and len(corpora) > 1:
             # Serial fan-out made unscoped latency the SUM of per-corpus cost.
@@ -1407,12 +1536,12 @@ class VecgrepService:
         # with include_superseded=True (audit trail) or by passing its own
         # meta.status= filter explicitly. Legacy chunks (no status) stay visible
         # via default_active back-compat in _passes_filters.
-        filters = list(filters or [])
-        has_explicit_status = any(f.startswith("meta.status=") for f in filters)
-        if not include_superseded and not has_explicit_status:
-            filters.append("meta.status=active")
-        if filters:
-            results = [r for r in results if _passes_filters(r, filters, default_active=True)]
+        if effective_filters:
+            results = [
+                r
+                for r in results
+                if _passes_filters(r, effective_filters, default_active=True)
+            ]
         # A temp doc (write/temp.py) leaves search the moment its own expiry
         # passes, whether or not the sweep has deleted it yet.
         results = [r for r in results if not is_expired(r.metadata)]
@@ -1700,14 +1829,15 @@ class VecgrepService:
         if until and until_ts is None:
             raise ValueError(f"unparseable until: {until!r} (want YYYY-MM-DD)")
 
-        groups: list[dict] = []
-        for source_id, payload, _chunk_count in self.bm25.iter_sources(corpus.name):
-            meta = payload.get("metadata") or {}
+        matched_records: list[dict] = []
+        for rec in self._explorer_records_for(corpus.name):
+            source_id = str(rec.get("source_id") or "")
+            meta = rec.get("metadata") or {}
             if channel is not None:
                 have = str(meta.get("channel", "")).strip().strip("\"'")
                 if have != channel:
                     continue
-            ts = payload.get("doc_timestamp")
+            ts = rec.get("doc_timestamp")
             if day_start is not None:
                 if ts is None or not (
                     day_start <= float(ts) < day_start + _SECONDS_IN_DAY
@@ -1724,8 +1854,59 @@ class VecgrepService:
                 ts is None or float(ts) >= until_ts + _SECONDS_IN_DAY
             ):
                 continue
-            # browse reads whole documents ("channel Y on day Z", "the last
-            # N messages"), so this must be the full text, not the hit chunk.
+            matched_records.append(rec)
+
+        matched_records.sort(
+            key=lambda r: (
+                r.get("doc_timestamp") is None,
+                float(r["doc_timestamp"])
+                if r.get("doc_timestamp") is not None
+                else 0.0,
+            )
+        )
+
+        # tail=N: keep only the NEWEST N events across the matched sources —
+        # "the last N messages", not the last N days. Walk newest-first,
+        # trimming the oldest events of the boundary group; groups that fall
+        # entirely outside the window are dropped without fetching or parsing
+        # their carrier documents. A non-transcript source (no parsed events)
+        # counts as one slot.
+        if tail is not None and int(tail) > 0:
+            remaining = int(tail)
+            kept: list[dict] = []
+            for rec in reversed(matched_records):
+                source_id = str(rec.get("source_id") or "")
+                ts = rec.get("doc_timestamp")
+                source_text = self._source_text_for(corpus.name, source_id)
+                events = parse_events(source_text)
+                evs = [
+                    {"speaker": e.speaker, "time": e.time, "text": e.text}
+                    for e in events
+                ]
+                if evs:
+                    if len(evs) > remaining:
+                        evs = evs[-remaining:]
+                    remaining -= len(evs)
+                else:
+                    remaining -= 1
+                kept.append(
+                    {
+                        "corpus": corpus.name,
+                        "source_id": source_id,
+                        "doc_timestamp": float(ts) if ts is not None else None,
+                        "events": evs,
+                        "slice_text": "" if evs else source_text,
+                    }
+                )
+                if remaining <= 0:
+                    break
+            kept.reverse()
+            return kept
+
+        groups: list[dict] = []
+        for rec in matched_records:
+            source_id = str(rec.get("source_id") or "")
+            ts = rec.get("doc_timestamp")
             source_text = self._source_text_for(corpus.name, source_id)
             events = parse_events(source_text)
             groups.append(
@@ -1740,30 +1921,6 @@ class VecgrepService:
                     "slice_text": "" if events else source_text,
                 }
             )
-        groups.sort(
-            key=lambda g: (g["doc_timestamp"] is None, g["doc_timestamp"] or 0.0)
-        )
-        # tail=N: keep only the NEWEST N events across the matched sources —
-        # "the last N messages", not the last N days. Walk newest-first,
-        # trimming the oldest events of the boundary group; groups that fall
-        # entirely outside the window are dropped. A non-transcript source
-        # (no parsed events) counts as one slot.
-        if tail is not None and int(tail) > 0:
-            remaining = int(tail)
-            kept: list[dict] = []
-            for g in reversed(groups):
-                evs = g["events"]
-                if evs:
-                    if len(evs) > remaining:
-                        g["events"] = evs[-remaining:]
-                    remaining -= len(g["events"])
-                else:
-                    remaining -= 1
-                kept.append(g)
-                if remaining <= 0:
-                    break
-            kept.reverse()
-            groups = kept
         return groups
 
     def get_source(self, corpus_name: str, source_id: str) -> dict | None:
@@ -1800,13 +1957,9 @@ class VecgrepService:
             ],
         }
 
-    def _explorer_catalog_for(self, corpus_name: str) -> ExplorerCatalog:
+    def _explorer_records_for(self, corpus_name: str) -> list[dict]:
         corpus = self.registry.get(corpus_name)
         generation = self._explorer_generation(corpus)
-        cached = self._explorer_cache.get(corpus.name)
-        if cached is not None and cached[0] == generation:
-            return cached[1]
-
         try:
             catalog_is_current = (
                 self.explorer_store.generation(corpus.name) == generation
@@ -1821,7 +1974,7 @@ class VecgrepService:
                 "explorer catalog read failed for %s: %s", corpus.name, exc
             )
             records = None
-        if records is None:
+        if not records:
             # One-time path for existing installations (and self-healing after
             # catalog loss): collapse the canonical chunk sidecar, then persist
             # the compact source rows so future process starts stay cheap.
@@ -1843,6 +1996,16 @@ class VecgrepService:
                     corpus.name,
                     exc,
                 )
+        return records
+
+    def _explorer_catalog_for(self, corpus_name: str) -> ExplorerCatalog:
+        corpus = self.registry.get(corpus_name)
+        generation = self._explorer_generation(corpus)
+        cached = self._explorer_cache.get(corpus.name)
+        if cached is not None and cached[0] == generation:
+            return cached[1]
+
+        records = self._explorer_records_for(corpus.name)
         catalog = build_catalog(records)
         self._explorer_cache[corpus.name] = (generation, catalog)
         return catalog
@@ -1986,13 +2149,17 @@ class VecgrepService:
         zero chunks inside the covered span — a broken archiver shows up as a
         growing gap), and per-source chunk sizes."""
         corpus = self.registry.get(corpus_name)
-        payloads = list(self.bm25.iter_payloads(corpus.name))
+        records = self._explorer_records_for(corpus.name)
         by_source: dict[str, int] = {}
-        for p in payloads:
-            sid = p.get("source_id", "") or ""
-            by_source[sid] = by_source.get(sid, 0) + 1
-        ts = [float(p["doc_timestamp"]) for p in payloads
-              if p.get("doc_timestamp")]
+        total_chunks = 0
+        ts: list[float] = []
+        for rec in records:
+            sid = str(rec.get("source_id") or "")
+            cnt = int(rec.get("chunk_count") or 0)
+            by_source[sid] = by_source.get(sid, 0) + cnt
+            total_chunks += cnt
+            if rec.get("doc_timestamp"):
+                ts.append(float(rec["doc_timestamp"]))
         span: dict = {"first": None, "last": None}
         gap_days = 0
         dated_days: set[int] = set()
@@ -2012,7 +2179,7 @@ class VecgrepService:
         )
         return {
             "corpus": corpus.name,
-            "chunks": len(payloads),
+            "chunks": total_chunks,
             "docs": len(by_source),
             "date_span": span,
             "days_covered": len(dated_days),
@@ -2034,49 +2201,56 @@ class VecgrepService:
         spaced deterministic sample of chunks for an LLM to theme. Sampling
         is explicit in the output — never a silent truncation."""
         corpus = self.registry.get(corpus_name)
-        payloads = list(self.bm25.iter_payloads(corpus.name))
-        if after or before:
-            filters = []
-            if after:
-                filters.append(f"after:{after}")
-            if before:
-                filters.append(f"before:{before}")
-            payloads = [
-                p for p in payloads
-                if _passes_filters(_payload_to_result(p, 0.0, 0.0, []), filters)
-            ]
+        filters: list[str] = []
+        if after:
+            filters.append(f"after:{after}")
+        if before:
+            filters.append(f"before:{before}")
         speakers: dict[str, int] = {}
         by_source: dict[str, int] = {}
-        ts: list[float] = []
-        for p in payloads:
+        first_ts: float | None = None
+        last_ts: float | None = None
+        compact_samples: list[tuple[str, int, str]] = []
+        for p in self.bm25.iter_payloads(corpus.name):
+            if filters and not _passes_filters(
+                _payload_to_result(p, 0.0, 0.0, []), filters
+            ):
+                continue
             md = p.get("metadata", {}) or {}
             for sp in md.get("speakers") or []:
                 speakers[str(sp)] = speakers.get(str(sp), 0) + 1
             sid = p.get("source_id", "") or ""
             by_source[sid] = by_source.get(sid, 0) + 1
             if p.get("doc_timestamp"):
-                ts.append(float(p["doc_timestamp"]))
+                t = float(p["doc_timestamp"])
+                first_ts = t if first_ts is None or t < first_ts else first_ts
+                last_ts = t if last_ts is None or t > last_ts else last_ts
+            compact_samples.append(
+                (
+                    sid,
+                    int(p.get("chunk_index", 0)),
+                    (p.get("text", "") or "")[:240],
+                )
+            )
         span: dict = {"first": None, "last": None}
-        if ts:
+        if first_ts is not None and last_ts is not None:
             span = {
-                "first": datetime.fromtimestamp(min(ts), tz=timezone.utc)
+                "first": datetime.fromtimestamp(first_ts, tz=timezone.utc)
                 .strftime("%Y-%m-%d"),
-                "last": datetime.fromtimestamp(max(ts), tz=timezone.utc)
+                "last": datetime.fromtimestamp(last_ts, tz=timezone.utc)
                 .strftime("%Y-%m-%d"),
             }
-        n = len(payloads)
+        n = len(compact_samples)
         take = min(max(0, sample), n)
         step = max(1, n // take) if take else 1
-        sample_payloads = payloads[::step][:take]
+        sampled_rows = compact_samples[::step][:take]
         sample_chunks = [
             {
-                "chunk_id": _chunk_id(
-                    corpus.name, p.get("source_id", ""), int(p.get("chunk_index", 0))
-                ),
-                "source_id": p.get("source_id", ""),
-                "text": (p.get("text", "") or "")[:240],
+                "chunk_id": _chunk_id(corpus.name, sid, cidx),
+                "source_id": sid,
+                "text": txt,
             }
-            for p in sample_payloads
+            for sid, cidx, txt in sampled_rows
         ]
         return {
             "corpus": corpus.name,
@@ -2295,7 +2469,11 @@ class VecgrepService:
         # precisely why the tail has to be split off BEFORE that happens.
         tail: list[SearchResult] = []
         if 0 < RERANK_POOL_MAX < len(candidates):
-            ordered = sorted(candidates, key=lambda r: r.similarity_pct, reverse=True)
+            ordered = sorted(
+                candidates,
+                key=lambda r: (r.score, r.similarity_pct),
+                reverse=True,
+            )
             candidates, tail = ordered[:RERANK_POOL_MAX], ordered[RERANK_POOL_MAX:]
         # rerank() takes (text, payload-ish) pairs. We pass each candidate's
         # chunk text + a dict that lets us reconstruct the SearchResult.
@@ -2382,13 +2560,52 @@ class VecgrepService:
         explain: bool = False,
         query_vectors: _QueryVectorMemo | None = None,
         timer: _StageTimer | None = None,
+        user_filters: list[str] | None = None,
+        effective_filters: list[str] | None = None,
     ) -> list[SearchResult]:
-        self._recover_if_pending(corpus.name)
         # LockTimeout leaves this corpus in search()'s failures list, which an
         # unscoped search reports as a warning beside the corpora that did
         # answer. The alternative is the whole call hanging on one busy corpus.
+        # Acquire the shared read lock BEFORE checking for pending mutations:
+        # if a live writer holds the write lock, the read lock queues until the
+        # writer finishes (at which point the journal marker is already gone).
+        # Only if a journal marker still exists inside the read lock (meaning
+        # a prior writer crashed without a live lock holder) do we drop out to
+        # recover under the write lock.
+        timeout = self._search_admission_timeout()
+        if user_filters is None and timer is not None:
+            user_filters = timer.user_filters
+        if effective_filters is None and timer is not None:
+            effective_filters = timer.effective_filters
         queued = time.monotonic()
-        with self.locks.read(corpus.name, timeout=self._search_admission_timeout()):
+        needs_recovery = False
+        with self.locks.read(corpus.name, timeout=timeout):
+            if self.mutations.has(corpus.name):
+                needs_recovery = True
+            else:
+                waited = time.monotonic() - queued
+                if timer is not None:
+                    timer.add("admit", waited)
+                if waited >= SLOW_ADMISSION_S:
+                    logger.warning(
+                        "corpus %s took %.1fs to admit a search", corpus.name, waited
+                    )
+                corpus = self.registry.get(corpus.name)
+                return self._search_one_locked(
+                    corpus,
+                    query,
+                    top_k,
+                    mode,
+                    explain,
+                    query_vectors,
+                    timer,
+                    user_filters=user_filters,
+                    effective_filters=effective_filters,
+                )
+
+        if needs_recovery:
+            self._recover_if_pending(corpus.name)
+        with self.locks.read(corpus.name, timeout=timeout):
             waited = time.monotonic() - queued
             if timer is not None:
                 # Time spent queued behind an indexer's write lock: the gap
@@ -2402,7 +2619,15 @@ class VecgrepService:
             # selecting corpora. Re-resolve metadata inside admission.
             corpus = self.registry.get(corpus.name)
             return self._search_one_locked(
-                corpus, query, top_k, mode, explain, query_vectors, timer
+                corpus,
+                query,
+                top_k,
+                mode,
+                explain,
+                query_vectors,
+                timer,
+                user_filters=user_filters,
+                effective_filters=effective_filters,
             )
 
     def _search_one_locked(
@@ -2414,13 +2639,16 @@ class VecgrepService:
         explain: bool = False,
         query_vectors: _QueryVectorMemo | None = None,
         timer: _StageTimer | None = None,
+        user_filters: list[str] | None = None,
+        effective_filters: list[str] | None = None,
     ) -> list[SearchResult]:
         collection = _collection_for(corpus.name)
         timer = timer or _StageTimer()
+        fetch_k = max(CANDIDATE_POOL, top_k)
 
         if mode in ("hybrid", "bm25") and isinstance(self.bm25, BM25SqliteStore):
             with timer.measure("bm25"):
-                expected = self.store.count(collection)
+                expected = corpus.chunk_count or self.store.count(collection)
                 consistent = not expected or (
                     self.bm25.exists(corpus.name)
                     and self.bm25.count(corpus.name) == expected
@@ -2430,6 +2658,30 @@ class VecgrepService:
                     f"BM25 SQLite index missing or inconsistent for {corpus.name}; "
                     f"run vecgrep bm25 rebuild {corpus.name} before searching"
                 )
+
+        allowed_sources: set[str] | None = None
+        qdrant_filter = None
+        has_unpushed = False
+        if user_filters:
+            if _has_invalid_filter(user_filters):
+                return []
+            if not _corpus_matches_filters(corpus.name, user_filters):
+                return []
+            allowed_sources = _filter_corpus_sources(corpus, user_filters)
+            if allowed_sources is not None and not allowed_sources:
+                return []
+            qdrant_filter, has_unpushed = _build_qdrant_filter(
+                user_filters, allowed_sources=allowed_sources
+            )
+
+        qdrant_fetch_k = (
+            max(fetch_k * 8, 400) if has_unpushed else fetch_k
+        )
+        bm25_fetch_k = (
+            max(fetch_k * 8, 400)
+            if user_filters and _has_non_source_filters(user_filters)
+            else fetch_k
+        )
 
         vector_hits: list[StoredHit] = []
         bm25_hits: list[tuple[str, float, dict]] = []
@@ -2445,16 +2697,64 @@ class VecgrepService:
                     else self._embed_query_singleflight(corpus, query)
                 )
             with timer.measure("vector"):
-                vector_hits = self.store.search(collection, qv, top_k=CANDIDATE_POOL)
+                if qdrant_filter is not None:
+                    vector_hits = self.store.search(
+                        collection,
+                        qv,
+                        top_k=qdrant_fetch_k,
+                        query_filter=qdrant_filter,
+                    )
+                else:
+                    vector_hits = self.store.search(
+                        collection, qv, top_k=qdrant_fetch_k
+                    )
             # Drop sub-noise vector hits before they reach fusion (see
             # COSINE_FLOOR_MARGIN). Gentle by default; keeps the real signal band.
             floor = _cosine_floor(corpus.embed_model)
             if floor > 0.0:
                 vector_hits = [h for h in vector_hits if h.score >= floor]
+            if effective_filters:
+                vector_hits = [
+                    h
+                    for h in vector_hits
+                    if (
+                        not user_filters
+                        and "status" not in (h.metadata or {})
+                    )
+                    or _passes_filters(
+                        _hit_to_result(h, ["vector"], model=corpus.embed_model),
+                        effective_filters,
+                        default_active=True,
+                    )
+                ]
 
         if mode in ("hybrid", "bm25"):
             with timer.measure("bm25"):
-                bm25_hits = self.bm25.search(corpus.name, query, top_k=CANDIDATE_POOL)
+                if allowed_sources is not None:
+                    bm25_hits = self.bm25.search(
+                        corpus.name,
+                        query,
+                        top_k=bm25_fetch_k,
+                        source_ids=allowed_sources,
+                    )
+                else:
+                    bm25_hits = self.bm25.search(
+                        corpus.name, query, top_k=bm25_fetch_k
+                    )
+            if effective_filters:
+                bm25_hits = [
+                    (cid, score, payload)
+                    for cid, score, payload in bm25_hits
+                    if (
+                        not user_filters
+                        and "status" not in (payload.get("metadata") or {})
+                    )
+                    or _passes_filters(
+                        _payload_to_result(payload, score, 0.0, ["bm25"]),
+                        effective_filters,
+                        default_active=True,
+                    )
+                ]
 
         if mode == "vector":
             out: list[SearchResult] = []
@@ -3215,12 +3515,10 @@ class VecgrepService:
         corpus = self.registry.get(corpus_name)  # raises CorpusError if absent
         meta_values: dict[str, set] = {}
         has_timestamp = False
-        # One pass: the old form scanned the payload list twice, which is free
-        # when it is already in memory and is not when it is a query.
-        for payload in self.bm25.iter_payloads(corpus.name):
-            if payload.get("doc_timestamp") is not None:
+        for rec in self._explorer_records_for(corpus.name):
+            if rec.get("doc_timestamp") is not None:
                 has_timestamp = True
-            meta = payload.get("metadata") or {}
+            meta = rec.get("metadata") or {}
             for k, v in meta.items():
                 if isinstance(v, (str, int, float, bool)):
                     meta_values.setdefault(k, set())
@@ -4120,7 +4418,251 @@ def _bm25_to_result(
 CONTEXT_CHARS = 400
 
 
-def _line_anchors(text: str, start: int, end: int) -> tuple[int | None, int | None]:
+def _newline_offsets(text: str) -> list[int]:
+    """Sorted character offsets of every '\\n' in text."""
+    offsets: list[int] = []
+    pos = text.find("\n")
+    while pos != -1:
+        offsets.append(pos)
+        pos = text.find("\n", pos + 1)
+    return offsets
+
+
+def _speaker_header_spans(text: str) -> list[tuple[int, str]]:
+    """Sorted (char_offset, speaker_name) for every transcript turn header in text."""
+    return [
+        (m.start(), m.group("speaker").strip())
+        for m in _EVENT_HEADER.finditer(text)
+        if m.group("speaker").strip()
+    ]
+
+
+def _active_speaker_at(headers: list[tuple[int, str]], offset: int) -> str | None:
+    """Most recent speaker header at or before `offset`."""
+    if not headers:
+        return None
+    idx = bisect_right(headers, (offset, "\uffff")) - 1
+    return headers[idx][1] if idx >= 0 else None
+
+
+def _chunk_payload_unchanged(old_pl: dict | None, new_pl: dict) -> bool:
+    """True when an existing chunk payload needs no rewrite on incremental update."""
+    if not isinstance(old_pl, dict):
+        return False
+    for key in (
+        "text",
+        "search_text",
+        "chunk_index",
+        "chunk_start",
+        "chunk_end",
+        "context_before",
+        "context_after",
+        "line_start",
+        "line_end",
+        "metadata",
+        "doc_timestamp",
+    ):
+        if old_pl.get(key) != new_pl.get(key):
+            return False
+    if "source_text" in new_pl and old_pl.get("source_text") != new_pl.get("source_text"):
+        return False
+    return True
+
+
+def _has_invalid_filter(filters: list[str], now: float | None = None) -> bool:
+    """True when any recognized filter expression has an unparseable value."""
+    dummy = SearchResult(
+        score=0.0,
+        similarity_pct=0.0,
+        chunk="",
+        chunk_start=0,
+        chunk_end=0,
+        context_before="",
+        context_after="",
+        source_id="",
+        corpus="",
+        metadata={},
+        chunk_id="",
+        matched_by=[],
+    )
+    for f in filters:
+        if ":" not in f and "=" not in f:
+            continue
+        form = f[1:] if f.startswith("-") else f
+        if _filter_matches(dummy, form, now=now) is _INVALID:
+            return True
+    return False
+
+
+def _corpus_matches_filters(corpus_name: str, filters: list[str]) -> bool:
+    for f in filters:
+        negated = f.startswith("-")
+        form = f[1:] if negated else f
+        if form.startswith("corpus:"):
+            want = form[len("corpus:"):]
+            matched = corpus_name == want
+            if negated:
+                matched = not matched
+            if not matched:
+                return False
+    return True
+
+
+def _filter_corpora_by_name(corpora: list[Corpus], filters: list[str]) -> list[Corpus]:
+    return [c for c in corpora if _corpus_matches_filters(c.name, filters)]
+
+
+def _filter_corpus_sources(corpus: Corpus, filters: list[str]) -> set[str] | None:
+    """Resolve source:/source_path: glob filters against corpus.sources.
+    Returns None when no source filter is present or corpus.sources is empty."""
+    if not corpus.sources:
+        return None
+    source_clauses: list[tuple[bool, str]] = []
+    for f in filters:
+        negated = f.startswith("-")
+        form = f[1:] if negated else f
+        if form.startswith("source:") or form.startswith("source_path:"):
+            source_clauses.append((negated, form.split(":", 1)[1]))
+    if not source_clauses:
+        return None
+    allowed = set(corpus.sources)
+    for negated, pat in source_clauses:
+        if negated:
+            allowed = {s for s in allowed if not fnmatch.fnmatch(s, pat)}
+        else:
+            allowed = {s for s in allowed if fnmatch.fnmatch(s, pat)}
+    return allowed
+
+
+def _has_non_source_filters(filters: list[str]) -> bool:
+    for f in filters:
+        form = f[1:] if f.startswith("-") else f
+        if form.startswith(("source:", "source_path:", "corpus:")):
+            continue
+        if ":" in form or "=" in form:
+            return True
+    return False
+
+
+def _build_qdrant_filter(
+    filters: list[str],
+    *,
+    allowed_sources: set[str] | None = None,
+    now: float | None = None,
+) -> tuple[object | None, bool]:
+    """Translate user filter clauses into a Qdrant Filter plus a flag indicating
+    whether any clause still requires post-retrieval Python evaluation."""
+    from qdrant_client.http import models as qm
+
+    must: list = []
+    must_not: list = []
+    has_unpushed = False
+
+    if allowed_sources is not None:
+        must.append(
+            qm.FieldCondition(
+                key="source_id",
+                match=qm.MatchAny(any=sorted(allowed_sources)),
+            )
+        )
+
+    for f in filters:
+        if ":" not in f and "=" not in f:
+            continue
+        negated = f.startswith("-")
+        form = f[1:] if negated else f
+        target = must_not if negated else must
+
+        if form.startswith(("source:", "source_path:", "corpus:")):
+            continue
+        if form.startswith("date:"):
+            day_start = _parse_filter_time(form[len("date:"):], now=now)
+            if day_start is not None:
+                target.append(
+                    qm.FieldCondition(
+                        key="doc_timestamp",
+                        range=qm.Range(
+                            gte=day_start, lt=day_start + _SECONDS_IN_DAY
+                        ),
+                    )
+                )
+        elif form.startswith("after:"):
+            cut = _parse_filter_time(form[len("after:"):], now=now)
+            if cut is not None:
+                if negated:
+                    has_unpushed = True
+                else:
+                    must.append(
+                        qm.FieldCondition(
+                            key="doc_timestamp",
+                            range=qm.Range(gte=cut),
+                        )
+                    )
+        elif form.startswith("before:"):
+            cut = _parse_filter_time(form[len("before:"):], now=now)
+            if cut is not None:
+                if negated:
+                    has_unpushed = True
+                else:
+                    must.append(
+                        qm.FieldCondition(
+                            key="doc_timestamp",
+                            range=qm.Range(lt=cut),
+                        )
+                    )
+        elif form.startswith("channel:"):
+            want = form[len("channel:"):].strip()
+            target.append(
+                qm.FieldCondition(
+                    key="metadata.channel",
+                    match=qm.MatchAny(
+                        any=sorted({want, f'"{want}"', f"'{want}'"})
+                    ),
+                )
+            )
+        elif form.startswith("bot:"):
+            val = form[len("bot:"):].strip().lower()
+            if val in ("true", "false", "1", "0", "yes", "no"):
+                want_bot = val in ("true", "1", "yes")
+                effective_bot = (not want_bot) if negated else want_bot
+                if effective_bot:
+                    must.append(
+                        qm.FieldCondition(
+                            key="metadata.has_bot_speaker",
+                            match=qm.MatchValue(value=True),
+                        )
+                    )
+                else:
+                    must_not.append(
+                        qm.FieldCondition(
+                            key="metadata.has_bot_speaker",
+                            match=qm.MatchValue(value=True),
+                        )
+                    )
+        elif form.startswith("has:"):
+            shape = form[len("has:"):].strip().lower()
+            if shape in ("code", "table", "link"):
+                target.append(
+                    qm.FieldCondition(
+                        key=f"metadata.has_{shape}",
+                        match=qm.MatchValue(value=True),
+                    )
+                )
+        else:
+            # speaker:/author:/meta.KEY=VALUE or unknown filter: evaluate in Python
+            has_unpushed = True
+
+    if not must and not must_not:
+        return None, has_unpushed
+    return qm.Filter(must=must or None, must_not=must_not or None), has_unpushed
+
+
+def _line_anchors(
+    text: str,
+    start: int,
+    end: int,
+    newline_offsets: list[int] | None = None,
+) -> tuple[int | None, int | None]:
     """1-based inclusive line span of text[start:end].
 
     chunk_end is exclusive, so the end line is counted at the last char
@@ -4129,20 +4671,33 @@ def _line_anchors(text: str, start: int, end: int) -> tuple[int | None, int | No
     """
     if not text or end <= start:
         return None, None
+    last_char = max(start, end - 1)
+    if newline_offsets is not None:
+        return (
+            bisect_left(newline_offsets, start) + 1,
+            bisect_left(newline_offsets, last_char) + 1,
+        )
     return (
         text.count("\n", 0, start) + 1,
-        text.count("\n", 0, max(start, end - 1)) + 1,
+        text.count("\n", 0, last_char) + 1,
     )
 
 
-def _chunk_context_fields(source_text: str, start: int, end: int) -> dict:
+def _chunk_context_fields(
+    source_text: str,
+    start: int,
+    end: int,
+    newline_offsets: list[int] | None = None,
+) -> dict:
     """Per-chunk payload fields derived from the full document at write time.
 
     Storing these (~800 bytes) beats storing the whole document on every
     chunk (~97 KB on the chats corpus) and keeps the search path free of
     per-hit store lookups.
     """
-    line_start, line_end = _line_anchors(source_text, start, end)
+    line_start, line_end = _line_anchors(
+        source_text, start, end, newline_offsets=newline_offsets
+    )
     return {
         "source_length": len(source_text),
         "context_before": source_text[max(0, start - CONTEXT_CHARS):start],
