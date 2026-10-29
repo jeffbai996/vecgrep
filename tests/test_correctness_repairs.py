@@ -1,5 +1,6 @@
 """Deterministic retrieval and incremental-index correctness contracts."""
 import pytest
+
 from vecgrep.backend.ingestion.chunkers.turn_window import TurnWindowChunker
 from vecgrep.backend.store.bm25_sqlite import BM25SqliteStore
 from vecgrep.backend.store.bm25_store import BM25Store
@@ -38,10 +39,9 @@ def test_upsert_replaces_identity_and_matches_clean_rebuild(tmp_path, store_type
 @pytest.mark.parametrize('backend', ['pickle', 'sqlite'])
 @pytest.mark.parametrize('mode', ['vector', 'bm25', 'hybrid'])
 def test_superseded_candidates_do_not_consume_result_budget(tmp_path, backend, mode):
+    from tests.test_area3_retrieval import _DeterministicEmbedder
     from vecgrep.backend.config import Settings
     from vecgrep.backend.service import VecgrepService
-
-    from tests.test_area3_retrieval import _DeterministicEmbedder
     svc = VecgrepService(Settings(home=tmp_path/'state', bm25_backend=backend, qdrant_url=None))
     svc._backend_cache['auto'] = _DeterministicEmbedder()
     docs = tmp_path / 'docs'; docs.mkdir()
@@ -103,6 +103,7 @@ def test_cached_zero_ingestion_vector_is_not_a_query(svc, monkeypatch):
 
 def test_http_dependency_error_does_not_expose_exception_detail(svc, make_doc, monkeypatch):
     from fastapi import HTTPException
+
     from vecgrep.backend.api import routes
     from vecgrep.backend.api.schemas import SearchRequest
     from vecgrep.backend.embed.base import EmbedBackendError
@@ -119,10 +120,9 @@ def test_http_dependency_error_does_not_expose_exception_detail(svc, make_doc, m
 
 @pytest.mark.parametrize('backend', ['pickle', 'sqlite'])
 def test_incremental_transcript_keeps_short_corrections_without_duplicates(tmp_path, backend):
+    from tests.test_retrieval_fixture import FixtureEmbedder
     from vecgrep.backend.config import Settings
     from vecgrep.backend.service import VecgrepService
-
-    from tests.test_retrieval_fixture import FixtureEmbedder
     svc = VecgrepService(Settings(home=tmp_path/'state', qdrant_url=None, bm25_backend=backend))
     svc._backend_cache['auto'] = FixtureEmbedder()
     doc = tmp_path/'chat.md'
