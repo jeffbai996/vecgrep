@@ -23,7 +23,6 @@ Two stages, run by service.search():
 from __future__ import annotations
 
 import difflib
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -140,12 +139,21 @@ def _normalized(r: SearchResult) -> str:
     return cached
 
 
+def _words(r: SearchResult) -> list[str]:
+    """Whitespace-split lowercase words, cached on the result."""
+    cached = getattr(r, "_asm_words", None)
+    if cached is None:
+        cached = _normalized(r).split()
+        r._asm_words = cached  # type: ignore[attr-defined]
+    return cached
+
+
 def _shingles(r: SearchResult) -> frozenset:
     """Token 8-gram shingles of the normalized text (cached). Only shingles
     long enough to be distinctive (>= MIN_CLONE_CHARS chars) are kept."""
     cached = getattr(r, "_asm_shingles", None)
     if cached is None:
-        toks = re.findall(r"\S+", _normalized(r))
+        toks = _words(r)
         grams = set()
         for i in range(max(0, len(toks) - SHINGLE_TOKENS + 1)):
             g = " ".join(toks[i : i + SHINGLE_TOKENS])
@@ -166,15 +174,29 @@ def span_overlap_ratio(a: SearchResult, b: SearchResult) -> float:
     return max(0, hi - lo) / shorter
 
 
-def _text_similarity(a: SearchResult, b: SearchResult) -> float:
+def _text_similarity(
+    a: SearchResult, b: SearchResult, min_ratio: float = 0.5
+) -> float:
     """difflib ratio on normalized text; 0.0 when either side is too short to
     judge. quick_ratio bounds the real ratio from above, so use it as a cheap
     bail-out before the quadratic comparison."""
     na, nb = _normalized(a), _normalized(b)
-    if len(na) < MIN_CLONE_CHARS or len(nb) < MIN_CLONE_CHARS:
+    la, lb = len(na), len(nb)
+    if la < MIN_CLONE_CHARS or lb < MIN_CLONE_CHARS:
         return 0.0
+    if 2.0 * min(la, lb) / (la + lb) < min_ratio:
+        return 0.0
+    # On long chunks (e.g. 2000-char code/transcript slices), single-character
+    # quick_ratio() is ~0.75 even for unrelated texts because the ASCII alphabet
+    # is small. A word-bag quick_ratio precheck filters out unrelated pairs in
+    # linear word time before constructing the quadratic char SequenceMatcher.
+    if la + lb >= 400:
+        wa, wb = _words(a), _words(b)
+        if len(wa) >= 8 and len(wb) >= 8:
+            if difflib.SequenceMatcher(None, wa, wb).quick_ratio() < min_ratio * 0.65:
+                return 0.0
     sm = difflib.SequenceMatcher(None, na, nb)
-    if sm.real_quick_ratio() < 0.5 or sm.quick_ratio() < 0.5:
+    if sm.real_quick_ratio() < min_ratio or sm.quick_ratio() < min_ratio:
         return 0.0
     return sm.ratio()
 
@@ -215,7 +237,7 @@ def dedup_near_duplicates(
             if span_overlap_ratio(k, r) >= min_overlap:
                 dup_idx = i
                 break
-            if _text_similarity(k, r) >= clone_threshold:
+            if _text_similarity(k, r, min_ratio=clone_threshold) >= clone_threshold:
                 dup_idx = i
                 break
         if dup_idx is None:
