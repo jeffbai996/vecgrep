@@ -124,6 +124,7 @@ class QdrantStore:
         else:
             path.mkdir(parents=True, exist_ok=True)
             self.client = QdrantClient(path=str(path))
+        self._url = url
         self._meta_lock = threading.RLock()
         self._known_collections: set[str] | None = None
         self._indexed_collections: set[str] = set()
