@@ -500,85 +500,158 @@ class BM25SqliteStore:
         with self._corpus_lock(corpus):
             conn = self._conn(corpus)
             limit = max(_MIN_CANDIDATES, top_k * _OVERFETCH)
-            source_clause = ""
+            base_clause = ""
             source_params: list[str] = []
             if source_ids is not None and len(source_ids) <= 200:
                 source_params = sorted(source_ids)
                 placeholders = ",".join("?" for _ in source_params)
-                source_clause = f" AND c.source_id IN ({placeholders})"
+                base_clause = f" AND c.source_id IN ({placeholders})"
 
-            if payload_filter is not None:
-                conn.create_function("eligible_payload", 1,
-                                     lambda raw: int(payload_filter(json.loads(raw))))
-                source_clause += " AND eligible_payload(c.payload)"
-
-            # Two-stage retrieval:
-            # 1) Fetch lightweight (pos, cid, tokens, bm25) rows WITHOUT
-            #    joining/deserializing the large payload column on all 400
-            #    overfetched candidates.
-            # 2) For multi-token queries, first pull up to top_k full-quorum
-            #    (AND) matches so single-term high-TF noise in the 400-row OR
-            #    window can never crowd out exact multi-term matches.
-            by_pos: dict[int, tuple[str, str, float]] = {}
             unique_tokens = list(dict.fromkeys(q_tokens))
-            if len(unique_tokens) >= 2:
-                and_cur = conn.execute(
+
+            def _fetch_fts_candidates(sql_clause: str) -> tuple[dict[int, tuple[str, str, float]], bool]:
+                by_pos: dict[int, tuple[str, str, float]] = {}
+                saturated = False
+                if len(unique_tokens) >= 2:
+                    and_rows = conn.execute(
+                        "SELECT c.pos, c.cid, c.tokens, bm25(chunks_fts) "
+                        "FROM chunks_fts JOIN chunks c ON c.pos = chunks_fts.rowid "
+                        f"WHERE chunks_fts MATCH ?{sql_clause} "
+                        "ORDER BY bm25(chunks_fts) LIMIT ?",
+                        (_fts_and_query(unique_tokens), *source_params, top_k),
+                    ).fetchall()
+                    if len(and_rows) >= top_k:
+                        saturated = True
+                    for pos, cid, tokens, score in and_rows:
+                        by_pos[int(pos)] = (str(cid), str(tokens), float(score))
+
+                or_rows = conn.execute(
                     "SELECT c.pos, c.cid, c.tokens, bm25(chunks_fts) "
                     "FROM chunks_fts JOIN chunks c ON c.pos = chunks_fts.rowid "
-                    f"WHERE chunks_fts MATCH ?{source_clause} "
+                    f"WHERE chunks_fts MATCH ?{sql_clause} "
                     "ORDER BY bm25(chunks_fts) LIMIT ?",
-                    (_fts_and_query(unique_tokens), *source_params, top_k),
-                )
-                for pos, cid, tokens, score in and_cur.fetchall():
+                    (_fts_query(q_tokens), *source_params, limit),
+                ).fetchall()
+                if len(or_rows) >= limit:
+                    saturated = True
+                for pos, cid, tokens, score in or_rows:
                     by_pos[int(pos)] = (str(cid), str(tokens), float(score))
+                return by_pos, saturated
 
-            cur = conn.execute(
-                "SELECT c.pos, c.cid, c.tokens, bm25(chunks_fts) "
-                "FROM chunks_fts JOIN chunks c ON c.pos = chunks_fts.rowid "
-                f"WHERE chunks_fts MATCH ?{source_clause} "
-                "ORDER BY bm25(chunks_fts) LIMIT ?",
-                (_fts_query(q_tokens), *source_params, limit),
-            )
-            # Query tokens are quoted by _fts_query. Operational failures indicate
-            # an unhealthy store and must not silently become vector-only results.
-            for pos, cid, tokens, score in cur.fetchall():
-                by_pos[int(pos)] = (str(cid), str(tokens), float(score))
+            def _rank_candidates(
+                by_pos: dict[int, tuple[str, str, float]],
+            ) -> list[tuple[float, str, int]]:
+                ranked: list[tuple[float, str, int]] = []
+                for pos, (cid, tokens, score) in by_pos.items():
+                    factor = _coverage_factor(q_tokens, tokens.split())
+                    if factor is None:
+                        continue
+                    # bm25() is negative-better; flip it so higher is better, matching
+                    # the pickle store's contract and the RRF fusion above it.
+                    ranked.append((-float(score) * factor, cid, pos))
+                # Ties broken by cid so the same query returns the same order every
+                # time. FTS5 would otherwise hand back rowid order, which is insertion
+                # order, which changes when a corpus is rebuilt.
+                ranked.sort(key=lambda r: (-r[0], r[1]))
+                return ranked
 
+            def _hydrate_winners(
+                ranked: list[tuple[float, str, int]],
+                *,
+                apply_filter: bool,
+            ) -> tuple[list[tuple[str, float, dict]], bool]:
+                if not ranked:
+                    return [], False
+                if not apply_filter or payload_filter is None:
+                    winners = ranked[:top_k]
+                    win_positions = [pos for _, _, pos in winners]
+                    placeholders = ",".join("?" for _ in win_positions)
+                    payload_rows = conn.execute(
+                        f"SELECT pos, payload FROM chunks WHERE pos IN ({placeholders})",
+                        win_positions,
+                    ).fetchall()
+                    payload_by_pos = {
+                        int(pos): json.loads(raw_payload)
+                        for pos, raw_payload in payload_rows
+                    }
+                    return [
+                        (cid, s, payload_by_pos[pos])
+                        for s, cid, pos in winners
+                        if pos in payload_by_pos
+                    ], False
+
+                out: list[tuple[str, float, dict]] = []
+                any_rejected = False
+                batch_size = max(top_k, 64)
+                for start in range(0, len(ranked), batch_size):
+                    batch = ranked[start : start + batch_size]
+                    batch_positions = [pos for _, _, pos in batch]
+                    placeholders = ",".join("?" for _ in batch_positions)
+                    payload_rows = conn.execute(
+                        f"SELECT pos, payload FROM chunks WHERE pos IN ({placeholders})",
+                        batch_positions,
+                    ).fetchall()
+                    payload_by_pos = {
+                        int(pos): json.loads(raw_payload)
+                        for pos, raw_payload in payload_rows
+                    }
+                    for s, cid, pos in batch:
+                        payload = payload_by_pos.get(pos)
+                        if payload is None:
+                            continue
+                        if payload_filter(payload):
+                            out.append((cid, s, payload))
+                            if len(out) >= top_k:
+                                return out, any_rejected
+                        else:
+                            any_rejected = True
+                return out, any_rejected
+
+            # Fast two-stage path: evaluate FTS5 without the Python payload UDF
+            # in WHERE so SQLite does not deserialize every matching row across
+            # a 200k-chunk table before ORDER BY bm25(chunks_fts) LIMIT 400.
+            by_pos, saturated = _fetch_fts_candidates(base_clause)
             if not by_pos:
                 return []
 
-            ranked: list[tuple[float, str, int]] = []
-            for pos, (cid, tokens, score) in by_pos.items():
-                factor = _coverage_factor(q_tokens, tokens.split())
-                if factor is None:
-                    continue
-                # bm25() is negative-better; flip it so higher is better, matching
-                # the pickle store's contract and the RRF fusion above it.
-                ranked.append((-float(score) * factor, cid, pos))
+            ranked = _rank_candidates(by_pos)
+            results, any_rejected = _hydrate_winners(ranked, apply_filter=True)
+            if payload_filter is None or len(results) >= top_k or not saturated:
+                return results
 
-            # Ties broken by cid so the same query returns the same order every
-            # time. FTS5 would otherwise hand back rowid order, which is insertion
-            # order, which changes when a corpus is rebuilt.
-            ranked.sort(key=lambda r: (-r[0], r[1]))
-            winners = ranked[:top_k]
-            if not winners:
+            # The 400-row FTS window was saturated and yielded < top_k results.
+            # Pushing eligible_payload(c.payload) into SQL can only change the
+            # 400-row window if at least one candidate in the unfiltered window
+            # was rejected by payload_filter. If ranked had no rejections, probe
+            # a small sample of unranked positions before paying for a full UDF scan.
+            if not any_rejected:
+                ranked_pos = {pos for _, _, pos in ranked}
+                probe_pos = [pos for pos in by_pos if pos not in ranked_pos][:16]
+                if probe_pos:
+                    placeholders = ",".join("?" for _ in probe_pos)
+                    for (_pos, raw_payload) in conn.execute(
+                        f"SELECT pos, payload FROM chunks WHERE pos IN ({placeholders})",
+                        probe_pos,
+                    ).fetchall():
+                        if not payload_filter(json.loads(raw_payload)):
+                            any_rejected = True
+                            break
+            if not any_rejected:
+                return results
+
+            conn.create_function(
+                "eligible_payload",
+                1,
+                lambda raw: int(payload_filter(json.loads(raw))),
+            )
+            filtered_by_pos, _ = _fetch_fts_candidates(
+                base_clause + " AND eligible_payload(c.payload)"
+            )
+            if not filtered_by_pos:
                 return []
-
-            win_positions = [pos for _, _, pos in winners]
-            placeholders = ",".join("?" for _ in win_positions)
-            payload_rows = conn.execute(
-                f"SELECT pos, payload FROM chunks WHERE pos IN ({placeholders})",
-                win_positions,
-            ).fetchall()
-            payload_by_pos = {
-                int(pos): json.loads(raw_payload)
-                for pos, raw_payload in payload_rows
-            }
-            return [
-                (cid, s, payload_by_pos[pos])
-                for s, cid, pos in winners
-                if pos in payload_by_pos
-            ]
+            filtered_ranked = _rank_candidates(filtered_by_pos)
+            filtered_results, _ = _hydrate_winners(filtered_ranked, apply_filter=False)
+            return filtered_results
 
 
 def migrate_from_pickle(root: Path, corpus: str, *, force: bool = False) -> int:

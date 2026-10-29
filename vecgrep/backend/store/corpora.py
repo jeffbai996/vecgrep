@@ -12,7 +12,7 @@ import os
 import re
 import tempfile
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from ..mutation import CorpusLocks
@@ -145,8 +145,11 @@ class CorpusRegistry:
                 f"corpus registry at {self.path} is unreadable ({exc}); "
                 "refusing to load an empty registry over it"
             ) from exc
+        known = {f.name for f in fields(Corpus)}
         for name, payload in data.items():
-            self._corpora[name] = Corpus(**payload)
+            self._corpora[name] = Corpus(
+                **{k: v for k, v in payload.items() if k in known}
+            )
         with self._cache_lock:
             self._loaded_stat = self._file_stat()
 
@@ -173,9 +176,12 @@ class CorpusRegistry:
                     f"corpus registry at {self.path} is unreadable ({exc}); "
                     "refusing to load an empty registry over it"
                 ) from exc
+            known = {f.name for f in fields(Corpus)}
             loaded: dict[str, Corpus] = {}
             for name, payload in data.items():
-                loaded[name] = Corpus(**payload)
+                loaded[name] = Corpus(
+                    **{k: v for k, v in payload.items() if k in known}
+                )
             self._corpora = loaded
             self._loaded_stat = cur_stat
 
