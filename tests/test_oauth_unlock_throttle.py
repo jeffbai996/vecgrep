@@ -8,9 +8,10 @@ from fastapi.testclient import TestClient
 
 pytest.importorskip("mcp")
 
+from tests.oauth_flow import submit
 from vecgrep.backend import config
-from vecgrep.backend.auth.approval import APPROVAL_COOKIE, approval_cookie_value
 from vecgrep.backend.auth import throttle
+from vecgrep.backend.auth.approval import APPROVAL_COOKIE, approval_cookie_value
 from vecgrep.backend.main import create_app
 from vecgrep.mcp import server
 
@@ -32,6 +33,9 @@ class Listener:
 
 @pytest.fixture
 def public(vg_home, monkeypatch):
+    from vecgrep.backend import rerank
+    # Authentication fixtures must not start model loading during app lifespan.
+    monkeypatch.setattr(rerank, "ensure_warm", lambda *args, **kwargs: None)
     monkeypatch.setenv("VECGREP_OAUTH_ENABLED", "1")
     monkeypatch.setenv("VECGREP_OAUTH_ISSUER_URL", "https://example.com/mcp")
     monkeypatch.setenv("VECGREP_OAUTH_APPROVAL_TOKEN", CODE)
@@ -42,13 +46,16 @@ def public(vg_home, monkeypatch):
     throttle.UNLOCK_FAILURES.reset()
     with TestClient(Listener(create_app(), 8766), base_url="https://example.com",
                     client=("127.0.0.1", 40000)) as client:
+        from mcp.shared.auth import OAuthClientInformationFull
+        server._shared_provider().store.save_client(OAuthClientInformationFull(
+            client_id="x", redirect_uris=["https://client.example/callback"]))
         yield client, clock
 
 
 def _attempt(client, code, *, ip=CLIENT_A):
     # Funnel requests reach the app with the real client address in
     # X-Forwarded-For, set by tailscaled; the socket peer is loopback.
-    return client.post("/oauth/unlock", data={"token": code, "next": "/authorize"},
+    return submit(client, data={"token": code, "next": "/authorize?client_id=x"},
                        headers={"X-Forwarded-For": ip}, follow_redirects=False)
 
 
@@ -63,10 +70,10 @@ def test_correct_code_below_the_limit_redirects_through_approved_continuation(pu
         _attempt(client, "nope")
     ok = _attempt(client, CODE)
     assert ok.status_code == 303
-    assert ok.headers["location"] == "/oauth/continue?next=%2Fauthorize"
+    assert ok.headers["location"] == "/oauth/continue?next=%2Fauthorize%3Fclient_id%3Dx"
     location = urlsplit(ok.headers["location"])
     assert location.path == "/oauth/continue"
-    assert parse_qs(location.query) == {"next": ["/authorize"]}
+    assert parse_qs(location.query) == {"next": ["/authorize?client_id=x"]}
     assert ok.cookies[APPROVAL_COOKIE] == approval_cookie_value(CODE)
     assert ok.cookies[APPROVAL_COOKIE] != CODE
     assert ok.headers["cache-control"] == "no-store"
@@ -77,7 +84,7 @@ def test_correct_code_below_the_limit_redirects_through_approved_continuation(pu
 
     continuation = client.get(ok.headers["location"], follow_redirects=False)
     assert continuation.status_code == 200
-    assert 'content="0;url=/authorize"' in continuation.text
+    assert 'content="0;url=/authorize?client_id=x"' in continuation.text
     assert continuation.headers["cache-control"] == "no-store"
     assert continuation.headers["referrer-policy"] == "no-referrer"
     assert continuation.headers["content-security-policy"] == (

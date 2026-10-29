@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 pytest.importorskip("mcp")
 
+from tests.oauth_flow import FormFields
 from vecgrep.backend import config
 from vecgrep.backend.main import create_app
 from vecgrep.mcp import server
@@ -36,6 +37,9 @@ class Listener:
 
 @pytest.fixture
 def ingress_app(vg_home, monkeypatch):
+    from vecgrep.backend import rerank
+    # Authentication fixtures must not start model loading during app lifespan.
+    monkeypatch.setattr(rerank, "ensure_warm", lambda *args, **kwargs: None)
     monkeypatch.setenv("VECGREP_OAUTH_ENABLED", "1")
     monkeypatch.setenv("VECGREP_OAUTH_ISSUER_URL", "https://example.com/mcp")
     monkeypatch.setenv("VECGREP_OAUTH_APPROVAL_TOKEN", "a" * 40)
@@ -57,11 +61,16 @@ def test_public_listener_requires_oauth_even_with_loopback_host(ingress_app, pat
 def test_public_identity_cannot_unlock_owner_approval(ingress_app):
     with TestClient(Listener(ingress_app, 8766), base_url="https://example.com",
                     client=("127.0.0.1", 40000)) as client:
-        page = client.get("/oauth/unlock", headers=SPOOF)
+        registration = client.post("/register", json={
+            "redirect_uris": ["https://client.example/callback"],
+            "token_endpoint_auth_method": "none",
+        })
+        target = "/authorize?client_id=" + registration.json()["client_id"]
+        page = client.get("/oauth/unlock", headers=SPOOF, params={"next": target})
         assert page.status_code == 200
         assert 'name="tailnet_intent"' not in page.text
         denied = client.post("/oauth/unlock", headers=SPOOF,
-                             data={"tailnet_intent": "a" * 64})
+                             data={**FormFields(page.text).values, "tailnet_intent": "a" * 64})
         assert denied.status_code == 401
 
 
@@ -209,6 +218,7 @@ def test_oauth_off_cli_port_override_remains_private(vg_home, monkeypatch):
     monkeypatch.setenv("VECGREP_API_PORT", "8765")
     import uvicorn
     from click.testing import CliRunner
+
     from vecgrep.cli.main import cli
 
     def run(_app, **kwargs):

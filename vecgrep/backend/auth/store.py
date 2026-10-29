@@ -550,7 +550,8 @@ class TokenStore:
     def issue_authorization_code(self, client_id: str, scopes: list[str],
                                  code_challenge: str, redirect_uri: str,
                                  ttl_s: int = _CODE_TTL_S,
-                                 resource: str | None = None) -> AuthorizationCode:
+                                 resource: str | None = None,
+                                 redirect_uri_provided_explicitly: bool = True) -> AuthorizationCode:
         code = AuthorizationCode(
             code=_new_secret("vgac"),
             scopes=list(scopes),
@@ -558,7 +559,7 @@ class TokenStore:
             client_id=client_id,
             code_challenge=code_challenge,
             redirect_uri=redirect_uri,
-            redirect_uri_provided_explicitly=True,
+            redirect_uri_provided_explicitly=redirect_uri_provided_explicitly,
             resource=resource,
         )
         self._codes[code.code] = code

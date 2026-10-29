@@ -12,13 +12,16 @@ import ipaddress
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from starlette.datastructures import Headers
-from starlette.responses import RedirectResponse
+from starlette.exceptions import HTTPException
+from starlette.responses import JSONResponse, RedirectResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .ingress import PRIVATE_INGRESS, has_exact_loopback_peer, has_trusted_proxied_peer
-
+from .redirects import check_consent, post_authorize_target, resolve_authorization
 
 APPROVAL_COOKIE = "__Host-vecgrep_oauth_approved"
+CONSENT_COOKIE = "__Host-vecgrep_oauth_request"
+REQUEST_COOKIE = "__Host-vecgrep_oauth_authorization"
 TAILNET_INTENT_COOKIE = "__Host-vecgrep_oauth_intent"
 AUTHORIZE_PATHS = frozenset({"/authorize", "/mcp/authorize"})
 _TAILSCALE_HEADERS_INFO = "https://tailscale.com/s/serve-headers"
@@ -36,7 +39,10 @@ def approval_cookie_value(secret: str) -> str:
 def safe_authorize_target(raw: str | None) -> str:
     """Keep post-unlock redirects on one of the two local authorize routes."""
     value = raw or "/authorize"
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "/authorize"
     if parsed.scheme or parsed.netloc or parsed.path not in AUTHORIZE_PATHS:
         return "/authorize"
     return parsed.path + (f"?{parsed.query}" if parsed.query else "")
@@ -147,6 +153,24 @@ class OAuthApprovalMiddleware:
             await self.app(scope, receive, send)
             return
 
+        from ...mcp.server import _shared_provider
+        provider = _shared_provider()
+        path = str(scope["path"])
+        try:
+            if scope.get("method") == "POST":
+                target = await post_authorize_target(scope, receive, path)
+                await resolve_authorization(target, provider)
+                await RedirectResponse(target, status_code=303,
+                                       headers={"Cache-Control": "no-store"})(scope, receive, send)
+                return
+            query = scope.get("query_string", b"").decode("latin-1")
+            target = path + (f"?{query}" if query else "")
+            resolved = await resolve_authorization(target, provider)
+        except (HTTPException, ValueError):
+            await JSONResponse({"error": "invalid_request"}, status_code=400,
+                               headers={"Cache-Control": "no-store"})(scope, receive, send)
+            return
+
         expected = approval_cookie_value(settings.oauth_approval_token or "")
         headers = Headers(scope=scope)
         cookies = {}
@@ -155,9 +179,9 @@ class OAuthApprovalMiddleware:
             if sep:
                 cookies[name] = value
         provided = cookies.get(APPROVAL_COOKIE, "")
-        if not provided or not hmac.compare_digest(provided, expected):
-            query = scope.get("query_string", b"").decode("latin-1")
-            target = str(scope["path"]) + (f"?{query}" if query else "")
+        if (not provided or not hmac.compare_digest(provided, expected)
+                or not check_consent(settings.oauth_approval_token or "", target, resolved["redirect_uri"],
+                                     cookies.get(REQUEST_COOKIE, ""))):
             response = RedirectResponse(
                 "/oauth/unlock?" + urlencode({"next": target}),
                 status_code=303,

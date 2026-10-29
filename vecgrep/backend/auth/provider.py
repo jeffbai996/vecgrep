@@ -12,17 +12,22 @@ from urllib.parse import urlsplit
 
 from mcp.server.auth.provider import (
     AccessToken,
-    AuthorizeError,
     AuthorizationCode,
     AuthorizationParams,
+    AuthorizeError,
     OAuthAuthorizationServerProvider,
     RefreshToken,
-    construct_redirect_uri,
+    RegistrationError,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
+from .redirects import (
+    authorization_response_uri,
+    resolve_redirect,
+    validate_redirect_uri,
+)
 from .scopes import VALID_SCOPES, UnsupportedScope, effective_scopes
-from .store import TokenStore, _ACCESS_TTL_S, _is_google_connector
+from .store import _ACCESS_TTL_S, TokenStore, _is_google_connector
 
 
 def _same_origin_resource(requested: str | None, configured: str | None) -> bool:
@@ -66,12 +71,26 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
         return self.store.get_client(client_id)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        try:
+            if not client_info.redirect_uris:
+                raise ValueError("missing redirect URIs")
+            for uri in client_info.redirect_uris:
+                validate_redirect_uri(str(uri))
+        except ValueError as exc:
+            raise RegistrationError("invalid_redirect_uri", "Invalid redirect URI") from exc
         self.store.save_client(client_info)
 
     # ----- authorize: issue a code, redirect back to the client -----
     async def authorize(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
+        try:
+            resolved = resolve_redirect(client, str(params.redirect_uri)
+                                        if params.redirect_uri_provided_explicitly else None)
+            if resolved != str(params.redirect_uri):
+                raise ValueError("redirect changed")
+        except ValueError as exc:
+            raise AuthorizeError("invalid_request", "Invalid redirect URI") from exc
         allow_sibling = _is_google_connector(client) and _same_origin_resource(params.resource, self.resource)
         if self.resource and params.resource not in (None, self.resource) and not allow_sibling:
             raise AuthorizeError("invalid_target", "wrong OAuth resource")
@@ -95,13 +114,14 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
             client_id=client.client_id,
             scopes=scopes,
             code_challenge=params.code_challenge,
-            redirect_uri=str(params.redirect_uri),
+            redirect_uri=resolved,
+            redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
             resource=target_resource,
         )
         # Redirect the resource owner's browser back to the client with the
-        # code (+ state for CSRF). The SDK helper builds the query correctly.
-        return construct_redirect_uri(
-            str(params.redirect_uri), code=code.code, state=params.state
+        # code and state, preserving the validated callback including its query.
+        return authorization_response_uri(
+            resolved, code=code.code, state=params.state
         )
 
     # ----- authorization code -----

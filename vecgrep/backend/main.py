@@ -5,13 +5,14 @@ the optional `mcp` extra is installed.
 from __future__ import annotations
 
 import contextlib
-import html
 import hmac
+import html
 import logging
+import secrets
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -19,10 +20,12 @@ from fastapi.staticfiles import StaticFiles
 from starlette.routing import Mount, Route
 
 from .. import __version__
-from .api.routes import public_router, router
 from .api.admin import router as admin_router
+from .api.routes import public_router, router
 from .auth.approval import (
     APPROVAL_COOKIE,
+    CONSENT_COOKIE,
+    REQUEST_COOKIE,
     TAILNET_INTENT_COOKIE,
     OAuthApprovalMiddleware,
     approval_cookie_value,
@@ -30,6 +33,14 @@ from .auth.approval import (
     safe_authorize_target,
     tailnet_approval_intent,
     verified_tailnet_login,
+)
+from .auth.redirects import (
+    check_consent,
+    consent_proof,
+    invalid_request,
+    remember_consent,
+    resolve_authorization,
+    unique_form,
 )
 from .auth.rest import TokenlessRestHostMiddleware
 from .auth.throttle import UNLOCK_FAILURES, client_key
@@ -123,7 +134,8 @@ def create_app() -> FastAPI:
         # Skipped when the worker retires on idle: it would only be spawned
         # to be torn down again before anyone searched.
         try:
-            from .rerank import ensure_warm as _warm_reranker, warm_at_boot
+            from .rerank import ensure_warm as _warm_reranker
+            from .rerank import warm_at_boot
 
             if warm_at_boot():
                 _warm_reranker()
@@ -228,10 +240,11 @@ def create_app() -> FastAPI:
             the owner approves a named client with named permissions, not a
             blank form (Jeff 2026-08-22: "should be as lit as logging into
             Claude Code")."""
-            from urllib.parse import parse_qs, urlsplit
+            from urllib.parse import urlsplit
 
-            q = parse_qs(urlsplit(next_target).query)
-            client_id = (q.get("client_id") or [""])[0]
+            from ..mcp.server import _shared_provider
+            resolved = await resolve_authorization(next_target, _shared_provider())
+            q = {key: [value] for key, value in resolved["query"].items()}
             from .auth.scopes import UnsupportedScope, effective_scopes
 
             requested = (
@@ -244,14 +257,7 @@ def create_app() -> FastAPI:
                 # The SDK will reject the authorize request. Do not present an
                 # unsupported permission as something the owner can grant.
                 scopes = []
-            name = ""
-            if client_id:
-                try:
-                    from ..mcp.server import _shared_provider
-                    info = await _shared_provider().get_client(client_id)
-                    name = (getattr(info, "client_name", None) or "") if info else ""
-                except Exception:  # pragma: no cover - a missing name is a generic heading
-                    name = ""
+            name = resolved["client"]
             resource_raw = (q.get("resource") or [""])[0]
             resource_path = urlsplit(resource_raw).path.rstrip("/")
             service = "vecgrep"
@@ -264,7 +270,7 @@ def create_app() -> FastAPI:
                     if sep and suffix and label and resource_path.endswith(suffix.strip().rstrip("/")):
                         service = label.strip()
                         break
-            return {"client": name, "scopes": scopes, "service": service}
+            return {**resolved, "client": name, "scopes": scopes, "service": service}
 
         _SCOPE_COPY = {
             "read": ("Search and read", "your indexed corpora"),
@@ -278,6 +284,7 @@ def create_app() -> FastAPI:
             ctx: dict | None = None,
             tailnet_login: str | None = None,
             throttled: int = 0,
+            nonce: str = "",
         ) -> HTMLResponse:
             safe_next = html.escape(safe_authorize_target(next_target), quote=True)
             ctx = ctx or {"client": "", "scopes": ["read"]}
@@ -285,7 +292,9 @@ def create_app() -> FastAPI:
             raw_service = ctx.get("service") or "vecgrep"
             service = html.escape(raw_service)
             heading = f"Connect {client} to {raw_service}" if client else f"Connect to {raw_service}"
-            from urllib.parse import urlsplit as _us, urlencode as _ue
+            from urllib.parse import urlencode
+            from urllib.parse import urlencode as _ue
+            from urllib.parse import urlsplit as _us
             host = html.escape(_us(_gs().oauth_issuer_url or "").hostname or "")
             scope_copy = (
                 _SCOPE_COPY
@@ -336,23 +345,29 @@ def create_app() -> FastAPI:
 <button type="submit">Approve &amp; continue</button>"""
                 if private_url:
                     controls += f'<input type="hidden" name="tailnet_login" value="{html.escape(tailnet_login, quote=True)}">'
+            elif ctx.get("browser_approved"):
+                approval_copy = "Approve this connection to continue."
+                controls = '<button type="submit">Approve &amp; continue</button>'
             else:
                 approval_copy = "Enter the owner approval code to allow it."
                 controls = """<label for="token">Owner approval code</label>
 <input id="token" name="token" type="password" autocomplete="current-password" placeholder="••••••••" required autofocus>
 <button type="submit">Approve &amp; continue</button>"""
-            callback_origin = oauth_callback_origin(next_target)
+            redirect_uri = ctx.get("redirect_uri", "")
+            callback_origin = oauth_callback_origin("/authorize?" + urlencode({"redirect_uri": redirect_uri}))
             form_action = "'self'" + (f" {callback_origin}" if callback_origin else "")
             if private_url and tailnet_login:
                 form_action += f" {public_origin}"
             # Name where the approval sends the code. A registered client chooses
-            # its own client_name; the destination host is the one line on this
-            # page the client cannot dress up (2026-10-19).
-            destination = html.escape(_us(callback_origin).hostname or "") if callback_origin else ""
+            # its own client_name; show the exact SDK-resolved callback so the
+            # destination cannot be hidden behind that label.
+            destination = html.escape(redirect_uri)
             destination_copy = (
                 f"After approval the connection returns to <b>{destination}</b>. " if destination else ""
             )
-            form_html = f'<form method="post" action="{html.escape(post_url, quote=True)}"><input type="hidden" name="next" value="{safe_next}">{controls}</form>'
+            nonce = nonce or secrets.token_urlsafe(24)
+            proof = consent_proof(_gs().oauth_approval_token or "", safe_authorize_target(next_target), redirect_uri, nonce)
+            form_html = f'<form method="post" action="{html.escape(post_url, quote=True)}"><input type="hidden" name="next" value="{safe_next}"><input type="hidden" name="consent" value="{proof}">{controls}</form>'
             if tailnet_link:
                 opened = " open" if error or throttled else ""
                 form_html = tailnet_link + f'<details{opened}><summary>Use approval code</summary>{form_html}</details>'
@@ -477,11 +492,20 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
                     samesite="strict",
                     path="/",
                 )
+            if not throttled:
+                response.set_cookie(CONSENT_COOKIE, nonce, max_age=600, secure=True,
+                                    httponly=True, samesite="strict", path="/")
             return response
 
         @app.get("/oauth/unlock", response_class=HTMLResponse)
         async def oauth_unlock(request: Request, next: str = "/authorize", method: str = ""):
+            if len(request.query_params.getlist("next")) > 1:
+                raise invalid_request()
             target = safe_authorize_target(next)
+            ctx = await _unlock_context(target)
+            ctx["browser_approved"] = hmac.compare_digest(
+                request.cookies.get(APPROVAL_COOKIE, ""),
+                approval_cookie_value(_gs().oauth_approval_token or ""))
             login = verified_tailnet_login(request.scope)
             private_url = _gs().oauth_tailnet_approval_url
             if private_url and not login and method != "code":
@@ -498,7 +522,8 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
                     )
             return _unlock_form(
                 target,
-                ctx=await _unlock_context(target),
+                ctx=ctx,
+                nonce=request.cookies.get(CONSENT_COOKIE, ""),
                 tailnet_login=login,
             )
 
@@ -507,10 +532,8 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
             content_type = request.headers.get("content-type", "").split(";", 1)[0]
             body = await request.body()
             if content_type != "application/x-www-form-urlencoded" or len(body) > 8192:
-                return _unlock_form("/authorize", error=True)
-            from urllib.parse import parse_qs
-
-            fields = parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True)
+                raise invalid_request()
+            fields = {key: [value] for key, value in unique_form(body).items()}
             # .strip(): the owner pastes this from a terminal (grep output,
             # a copied env line), and that copy near-universally carries a
             # trailing newline or trailing space. `expected` was already
@@ -519,6 +542,14 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
             provided = (fields.get("token") or [""])[0].strip()
             next_target = safe_authorize_target((fields.get("next") or [""])[0])
             expected = _gs().oauth_approval_token or ""
+            ctx = await _unlock_context(next_target)
+            if not (check_consent(expected, next_target, ctx["redirect_uri"],
+                                  request.cookies.get(CONSENT_COOKIE, ""),
+                                  (fields.get("consent") or [""])[0])
+                    or check_consent(expected, next_target, ctx["redirect_uri"],
+                                     request.cookies.get(REQUEST_COOKIE, ""))):
+                raise invalid_request()
+
             tailnet_login = verified_tailnet_login(request.scope)
             attempts_key = client_key(request.scope)
             retry_after = UNLOCK_FAILURES.retry_after(attempts_key)
@@ -527,6 +558,7 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
                     next_target,
                     throttled=retry_after,
                     ctx=await _unlock_context(next_target),
+                    nonce=request.cookies.get(CONSENT_COOKIE, ""),
                     tailnet_login=tailnet_login,
                 )
             # A private Serve page can post its signed approval to the public
@@ -569,7 +601,8 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
             code_approved = bool(
                 provided and hmac.compare_digest(provided, expected.strip())
             )
-            if not tailnet_approved and not code_approved:
+            remembered_approved = browser_approved and not provided and not provided_intent and not handoff_login
+            if not tailnet_approved and not code_approved and not remembered_approved:
                 if provided:
                     # Only a guessed code counts; a stale one-click intent is not a guess.
                     UNLOCK_FAILURES.record_failure(attempts_key)
@@ -577,6 +610,7 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
                     next_target,
                     error=True,
                     ctx=await _unlock_context(next_target),
+                    nonce=request.cookies.get(CONSENT_COOKIE, ""),
                     tailnet_login=tailnet_login,
                 )
             # Finish the form navigation on our origin. Otherwise browsers
@@ -603,6 +637,9 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
                 httponly=True,
                 samesite="strict",
             )
+            response.set_cookie(REQUEST_COOKIE, remember_consent(request.cookies.get(REQUEST_COOKIE, ""),
+                                    consent_proof(expected, next_target, ctx["redirect_uri"])),
+                                max_age=600, secure=True, httponly=True, samesite="strict", path="/")
             response.headers["Cache-Control"] = "no-store"
             return response
 
@@ -631,7 +668,14 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
                     status_code=403,
                     headers=headers,
                 )
-            target = html.escape(safe_authorize_target(next), quote=True)
+            if len(request.query_params.getlist("next")) > 1:
+                raise invalid_request()
+            resolved_target = safe_authorize_target(next)
+            ctx = await _unlock_context(resolved_target)
+            if not check_consent(secret, resolved_target, ctx["redirect_uri"],
+                                 request.cookies.get(REQUEST_COOKIE, "")):
+                raise invalid_request()
+            target = html.escape(resolved_target, quote=True)
             return HTMLResponse(
                 '<!doctype html><html lang="en"><head><meta charset="utf-8">'
                 '<title>Continue connection</title>'

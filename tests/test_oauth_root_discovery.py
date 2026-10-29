@@ -11,8 +11,8 @@ the right keys), not just status — the miss that bit us before.
 from __future__ import annotations
 
 import re
-from typing import Iterator
-from urllib.parse import parse_qs, urlsplit
+from collections.abc import Iterator
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
 
@@ -20,6 +20,7 @@ pytest.importorskip("mcp")
 
 from fastapi.testclient import TestClient
 
+from tests.oauth_flow import FormFields, submit
 from vecgrep.backend import config as cfg_mod
 from vecgrep.backend.auth.approval import (
     APPROVAL_COOKIE,
@@ -41,7 +42,10 @@ TAILNET_HEADERS = {
 
 @pytest.fixture
 def oauth_client(vg_home, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    from vecgrep.backend import rerank
     from vecgrep.mcp import server as mcp_server
+    # Authentication fixtures must not start model loading during app lifespan.
+    monkeypatch.setattr(rerank, "ensure_warm", lambda *args, **kwargs: None)
 
     monkeypatch.setenv("VECGREP_OAUTH_ENABLED", "1")
     monkeypatch.setenv("VECGREP_OAUTH_ISSUER_URL", "https://example.com:10000/mcp")
@@ -53,6 +57,10 @@ def oauth_client(vg_home, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClien
     if limiter is not None:
         limiter.reset()
     with TestClient(create_app(), base_url="https://example.com:10000") as client:
+        from mcp.shared.auth import OAuthClientInformationFull
+        for cid in ("x", "client"):
+            mcp_server._shared_provider().store.save_client(OAuthClientInformationFull(
+                client_id=cid, redirect_uris=["https://claude.ai/api/mcp/auth_callback"], scope="read propose"))
         yield client
 
 
@@ -85,7 +93,7 @@ def test_public_resource_preserves_secret_path_prefix():
 def test_authorize_requires_owner_approval(oauth_client):
     r = oauth_client.get("/authorize", params={
         "response_type": "code", "client_id": "x",
-        "redirect_uri": "https://claude.ai/cb",
+        "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
         "code_challenge": "a", "code_challenge_method": "S256",
     }, follow_redirects=False)
     assert r.status_code == 303
@@ -94,8 +102,7 @@ def test_authorize_requires_owner_approval(oauth_client):
 
 
 def test_owner_unlock_rejects_bad_code_without_echo(oauth_client):
-    r = oauth_client.post(
-        "/oauth/unlock",
+    r = submit(oauth_client,
         data={FORM_TOKEN_FIELD: "wrong-value", "next": "/authorize?client_id=x"},
     )
     assert r.status_code == 401
@@ -104,8 +111,7 @@ def test_owner_unlock_rejects_bad_code_without_echo(oauth_client):
 
 
 def test_owner_unlock_allows_authorize_flow(oauth_client):
-    r = oauth_client.post(
-        "/oauth/unlock",
+    r = submit(oauth_client,
         data={
             FORM_TOKEN_FIELD: TEST_APPROVAL,
             "next": "/authorize?response_type=code&client_id=x",
@@ -125,8 +131,7 @@ def test_owner_unlock_trims_pasted_whitespace(oauth_client):
     line) — that copy near-universally carries a trailing newline or space.
     A correct code with incidental whitespace around it must still unlock
     (Jeff 2026-08-22: pasted the real code, got rejected)."""
-    r = oauth_client.post(
-        "/oauth/unlock",
+    r = submit(oauth_client,
         data={
             FORM_TOKEN_FIELD: f"  {TEST_APPROVAL}\n",
             "next": "/authorize?response_type=code&client_id=x",
@@ -139,8 +144,7 @@ def test_owner_unlock_trims_pasted_whitespace(oauth_client):
 
 def test_approved_browser_ends_form_submission_before_callback_navigation(oauth_client):
     target = "/authorize?client_id=client&state=opaque%2Bstate%26value"
-    approved = oauth_client.post(
-        "/oauth/unlock",
+    approved = submit(oauth_client,
         data={FORM_TOKEN_FIELD: TEST_APPROVAL, "next": target},
         follow_redirects=False,
     )
@@ -166,16 +170,15 @@ def test_callback_continuation_requires_browser_approval(oauth_client):
 
 @pytest.mark.parametrize("target", ["https://evil.example/callback", "//evil.example/callback", "/api/search"])
 def test_callback_continuation_cannot_redirect_to_arbitrary_destinations(oauth_client, target):
-    oauth_client.post("/oauth/unlock", data={FORM_TOKEN_FIELD: TEST_APPROVAL}, follow_redirects=False)
+    submit(oauth_client, data={FORM_TOKEN_FIELD: TEST_APPROVAL, "next": "/authorize?client_id=x"}, follow_redirects=False)
     continuation = oauth_client.get("/oauth/continue", params={"next": target})
-    assert continuation.status_code == 200
-    assert 'content="0;url=/authorize"' in continuation.text
+    assert continuation.status_code == 400
+    assert 'http-equiv="refresh"' not in continuation.text
     assert target not in continuation.text
 
 
 def test_owner_unlock_rejects_whitespace_only_token(oauth_client):
-    r = oauth_client.post(
-        "/oauth/unlock",
+    r = submit(oauth_client,
         data={FORM_TOKEN_FIELD: "   \n\t  ", "next": "/authorize?client_id=x"},
     )
     assert r.status_code == 401
@@ -221,7 +224,7 @@ def test_verified_tailnet_owner_gets_csrf_bound_one_click_approval(oauth_client)
 
         approved = client.post(
             "/oauth/unlock",
-            data={"next": target, "tailnet_intent": match.group(1)},
+            data={"consent": FormFields(page.text).values["consent"], "next": target, "tailnet_intent": match.group(1)},
             headers=TAILNET_HEADERS,
             follow_redirects=False,
         )
@@ -243,7 +246,7 @@ def test_tailnet_one_click_rejects_missing_or_cross_site_intent(oauth_client):
         client.cookies.delete(TAILNET_INTENT_COOKIE)
         rejected = client.post(
             "/oauth/unlock",
-            data={"next": target, "tailnet_intent": intent},
+            data={"consent": FormFields(page.text).values["consent"], "next": target, "tailnet_intent": intent},
             headers=TAILNET_HEADERS | {"Origin": "https://evil.example"},
             follow_redirects=False,
         )
@@ -268,13 +271,12 @@ def test_funnel_or_unverified_proxy_still_requires_owner_code(oauth_client):
 
 
 def test_unlock_refuses_external_redirect(oauth_client):
-    r = oauth_client.post(
-        "/oauth/unlock",
+    r = oauth_client.post("/oauth/unlock",
         data={FORM_TOKEN_FIELD: TEST_APPROVAL, "next": "https://evil.example/steal"},
         follow_redirects=False,
     )
-    assert r.status_code == 303
-    assert parse_qs(urlsplit(r.headers["location"]).query)["next"] == ["/authorize"]
+    assert r.status_code == 400
+    assert "location" not in r.headers
 
 
 def test_approved_owner_can_reach_real_authorize_handler(oauth_client):
@@ -296,8 +298,7 @@ def test_approved_owner_can_reach_real_authorize_handler(oauth_client):
         "code_challenge": "A" * 43,
         "code_challenge_method": "S256",
     }
-    unlocked = oauth_client.post(
-        "/oauth/unlock",
+    unlocked = submit(oauth_client,
         data={
             FORM_TOKEN_FIELD: TEST_APPROVAL,
             "next": "/authorize?" + urlencode(params),
@@ -355,10 +356,10 @@ def test_unlock_page_names_the_client_and_its_scopes(oauth_client):
     assert "Connect Claude to vecgrep" in r.text
     assert "Search and read" in r.text and "Propose changes" in r.text
     assert "<script" not in r.text
-    # unknown client: generic heading, still the form
+    # Unknown clients cannot produce a consent form.
     r = oauth_client.get("/oauth/unlock?next=/authorize?client_id=nope")
-    assert r.status_code == 200
-    assert "Connect to vecgrep" in r.text
+    assert r.status_code == 400
+    assert 'name="token"' not in r.text
 
 
 def test_unlock_page_names_where_the_connection_returns(oauth_client):
@@ -373,8 +374,8 @@ def test_unlock_page_names_where_the_connection_returns(oauth_client):
     target = f"/authorize?client_id={cid}&redirect_uri=https%3A%2F%2Fevil.example%2Fcb&scope=read"
     r = oauth_client.get("/oauth/unlock", params={"next": target})
     assert r.status_code == 200
-    assert "returns to <b>evil.example</b>" in r.text
-    assert "/cb" not in r.text, "only the host is named, never the path"
+    assert "returns to <b>https://evil.example/cb</b>" in r.text
+    assert "https://evil.example/cb" in r.text
     bare = oauth_client.get("/oauth/unlock?next=/authorize?client_id=nope")
     assert "returns to" not in bare.text, "no destination line when the request names none"
 
@@ -455,7 +456,7 @@ def test_registration_capabilities_are_separate_from_consented_token_scopes(
     unauthorized = oauth_client.get("/authorize", params=params, follow_redirects=False)
     assert unauthorized.status_code == 303
     assert unauthorized.headers["location"].startswith("/oauth/unlock?")
-    oauth_client.post("/oauth/unlock", data={FORM_TOKEN_FIELD: TEST_APPROVAL}, follow_redirects=False)
+    submit(oauth_client, data={FORM_TOKEN_FIELD: TEST_APPROVAL, "next": "/authorize?" + urlencode(params)}, follow_redirects=False)
     authorization = oauth_client.get("/authorize", params=params, follow_redirects=False)
     assert authorization.status_code == 302
     callback = parse_qs(urlsplit(authorization.headers["location"]).query)
@@ -484,6 +485,7 @@ def test_metadata_advertises_public_clients(oauth_client):
 
 def test_token_store_survives_a_restart(tmp_path):
     from mcp.shared.auth import OAuthClientInformationFull
+
     from vecgrep.backend.auth.store import TokenStore
     path = str(tmp_path / "oauth_state.json")
     a = TokenStore(path=path)
@@ -494,13 +496,16 @@ def test_token_store_survives_a_restart(tmp_path):
     assert b.get_client("c1") is not None
     assert b.load_access_token(at.token) is not None
     assert b.load_refresh_token("c1", rt.token) is not None
-    import os, stat
+    import os
+    import stat
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
     b.revoke(at.token)
     assert TokenStore(path=path).load_access_token(at.token) is None
 
 
 def test_oauth_trace_does_not_break_the_flow(vg_home, monkeypatch):
+    from vecgrep.backend import rerank
+    monkeypatch.setattr(rerank, "ensure_warm", lambda *args, **kwargs: None)
     """The trace wrapper must wrap the SDK's request handlers as handlers —
     a wrong wrapper shape 500'd /authorize for 10 minutes on 2026-08-22."""
     monkeypatch.setenv("VECGREP_OAUTH_ENABLED", "1")
@@ -514,12 +519,12 @@ def test_oauth_trace_does_not_break_the_flow(vg_home, monkeypatch):
                                         "grant_types": ["authorization_code", "refresh_token"],
                                         "response_types": ["code"], "token_endpoint_auth_method": "none"})
         assert reg.status_code == 201
-        r = c.post("/oauth/unlock", data={FORM_TOKEN_FIELD: TEST_APPROVAL, "next": "/authorize"}, follow_redirects=False)
-        cookie = r.cookies.get(APPROVAL_COOKIE)
-        r = c.get("/authorize", params={"response_type": "code", "client_id": reg.json()["client_id"],
-                                        "redirect_uri": "https://claude.ai/cb", "code_challenge": "x" * 43,
-                                        "code_challenge_method": "S256", "state": "s"},
-                  cookies={APPROVAL_COOKIE: cookie}, follow_redirects=False)
+        params = {"response_type": "code", "client_id": reg.json()["client_id"],
+                  "redirect_uri": "https://claude.ai/cb", "code_challenge": "x" * 43,
+                  "code_challenge_method": "S256", "state": "s"}
+        approved = submit(c, data={FORM_TOKEN_FIELD: TEST_APPROVAL, "next": "/authorize?" + urlencode(params)}, follow_redirects=False)
+        assert APPROVAL_COOKIE in approved.cookies
+        r = c.get("/authorize", params=params, follow_redirects=False)
         assert r.status_code == 302, r.text
 
 
@@ -635,7 +640,7 @@ def test_public_unlock_redirects_to_one_private_consent_screen(oauth_client):
 
 def test_unverified_private_browser_gets_code_fallback_without_redirect_loop(oauth_client):
     cfg_mod.get_settings().oauth_tailnet_approval_url = "https://example.com:10000/oauth/unlock"
-    page = oauth_client.get("/oauth/unlock", follow_redirects=False)
+    page = oauth_client.get("/oauth/unlock", params={"next": "/authorize?client_id=x"}, follow_redirects=False)
     assert page.status_code == 200
     assert 'name="token"' in page.text
 
@@ -656,7 +661,7 @@ def test_private_approval_posts_proof_to_public_origin(oauth_client):
         with TestClient(create_app(), base_url="https://127.0.0.1:8766") as public:
             public.cookies.update(private.cookies)
             approved = public.post("/oauth/unlock", data={
-                "next": target, "tailnet_intent": intent,
+                "consent": FormFields(page.text).values["consent"], "next": target, "tailnet_intent": intent,
                 "tailnet_login": "owner@example.test",
             }, headers={"Origin": "https://127.0.0.1:8765"}, follow_redirects=False)
             assert approved.status_code == 303
@@ -676,7 +681,7 @@ def test_repeated_tailnet_handoff_requires_existing_approval_and_bound_proof(oau
         intent = re.search(r'name="tailnet_intent" value="([a-f0-9]+)"', page.text).group(1)
         with TestClient(create_app(), base_url="https://127.0.0.1:8766") as public:
             public.cookies.update(private.cookies)
-            data = {"next": target, "tailnet_intent": intent, "tailnet_login": "owner@example.test"}
+            data = {"consent": FormFields(page.text).values["consent"], "next": target, "tailnet_intent": intent, "tailnet_login": "owner@example.test"}
             origin = "https://127.0.0.1:8765"
             approved = public.post("/oauth/unlock", data=data, headers={"Origin": origin}, follow_redirects=False)
             assert approved.status_code == 303
@@ -692,7 +697,7 @@ def test_repeated_tailnet_handoff_requires_existing_approval_and_bound_proof(oau
             elif change == "origin":
                 origin = "https://evil.example"
             repeated = public.post("/oauth/unlock", data=data, headers={"Origin": origin}, follow_redirects=False)
-            assert repeated.status_code == (303 if change is None else 401)
+            assert repeated.status_code == (303 if change is None else 400 if change == "target" else 401)
             if change is None:
                 assert parse_qs(urlsplit(repeated.headers["location"]).query)["next"] == [target]
 
@@ -709,7 +714,7 @@ def test_public_handoff_rejects_unbound_or_forged_proof(oauth_client, change):
         intent = re.search(r'name="tailnet_intent" value="([a-f0-9]+)"', page.text).group(1)
         with TestClient(create_app(), base_url="https://127.0.0.1:8766") as public:
             public.cookies.update(private.cookies)
-            data = {"next": target, "tailnet_intent": intent, "tailnet_login": "owner@example.test"}
+            data = {"consent": FormFields(page.text).values["consent"], "next": target, "tailnet_intent": intent, "tailnet_login": "owner@example.test"}
             origin = "https://127.0.0.1:8765"
             if change == "origin": origin = "https://evil.example"
             if change == "target": data["next"] = "/authorize?client_id=other"
@@ -719,7 +724,7 @@ def test_public_handoff_rejects_unbound_or_forged_proof(oauth_client, change):
                 data["tailnet_intent"] = "0" * 64
                 public.cookies.set(TAILNET_INTENT_COOKIE, "0" * 64)
             denied = public.post("/oauth/unlock", data=data, headers={"Origin": origin}, follow_redirects=False)
-            assert denied.status_code == 401
+            assert denied.status_code == (400 if change in {"target", "cookie"} else 401)
             assert APPROVAL_COOKIE not in denied.cookies
             assert 'name="tailnet_intent"' not in denied.text
 
