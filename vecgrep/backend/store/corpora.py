@@ -70,6 +70,10 @@ class Corpus:
     # restore -- has to read it back, or the collection silently reverts to
     # float32 and the corpus quietly gets slower and bigger again.
     datatype: str = "float32"
+    # Optional Qdrant vector quantization ("int8" | "binary" | None). Like
+    # datatype, this is persisted on the corpus record so collection rebuilds,
+    # datatype migrations, crash recovery, and backup restores preserve it.
+    quantization: str | None = None
     # Operator-authored routing context for agents choosing the smallest
     # relevant search scope. These fields are metadata only: changing them
     # never requires a corpus rebuild.
@@ -96,6 +100,7 @@ def _copy_corpus(c: Corpus, *, include_sources: bool = True) -> Corpus:
         rank_weight=c.rank_weight,
         bm25_weight=c.bm25_weight,
         datatype=c.datatype,
+        quantization=c.quantization,
         description=c.description,
         use_for=list(c.use_for),
         avoid_for=list(c.avoid_for),

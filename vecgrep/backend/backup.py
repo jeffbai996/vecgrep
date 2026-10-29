@@ -147,10 +147,15 @@ class QdrantSnapshots:
         # anyway. Getting this wrong is silent: the restore succeeds and the
         # corpus is simply float32 again.
         try:
-            dtype = self.service.registry.get(corpus).datatype
+            reg_corpus = self.service.registry.get(corpus)
+            dtype = reg_corpus.datatype
+            quant = reg_corpus.quantization
         except Exception:  # noqa: BLE001 -- Backup rollback and cleanup must contain arbitrary storage-provider failures.
             dtype = "float32"
-        self.service.store.ensure_collection(collection, dim, datatype=dtype)
+            quant = None
+        self.service.store.ensure_collection(
+            collection, dim, datatype=dtype, quantization=quant
+        )
         ids: list[str] = []
         vectors: list[list[float]] = []
         payloads: list[dict] = []

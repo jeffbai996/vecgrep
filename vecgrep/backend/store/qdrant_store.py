@@ -169,6 +169,36 @@ class QdrantStore:
                 # works with unindexed evaluation.
                 pass
 
+    @staticmethod
+    def _quantization_config(quantization: str | None):
+        if quantization == "int8":
+            return qm.ScalarQuantization(
+                scalar=qm.ScalarQuantizationConfig(
+                    type=qm.ScalarType.INT8,
+                    quantile=0.99,
+                    always_ram=True,
+                )
+            )
+        if quantization == "binary":
+            return qm.BinaryQuantization(
+                binary=qm.BinaryQuantizationConfig(always_ram=True)
+            )
+        if quantization:
+            raise ValueError(f"unsupported quantization {quantization!r}")
+        return None
+
+    def set_quantization(self, name: str, quantization: str | None) -> None:
+        """Enable, change, or clear vector quantization on an existing collection."""
+        quant = (
+            qm.Disabled.DISABLED
+            if quantization is None
+            else self._quantization_config(quantization)
+        )
+        self.client.update_collection(
+            collection_name=name,
+            quantization_config=quant,
+        )
+
     def ensure_collection(
         self,
         name: str,
@@ -193,14 +223,7 @@ class QdrantStore:
         dt = {"float32": qm.Datatype.FLOAT32, "float16": qm.Datatype.FLOAT16}.get(datatype)
         if dt is None:
             raise ValueError(f"unsupported vector datatype {datatype!r}")
-        quant = None
-        if quantization == "int8":
-            quant = qm.ScalarQuantization(scalar=qm.ScalarQuantizationConfig(
-                type=qm.ScalarType.INT8, quantile=0.99, always_ram=False))
-        elif quantization == "binary":
-            quant = qm.BinaryQuantization(binary=qm.BinaryQuantizationConfig(always_ram=False))
-        elif quantization:
-            raise ValueError(f"unsupported quantization {quantization!r}")
+        quant = self._quantization_config(quantization)
         self.client.create_collection(
             collection_name=name,
             # Vecgrep corpora can grow well beyond available WSL RAM. Keep

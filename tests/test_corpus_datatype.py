@@ -57,3 +57,34 @@ def test_an_unknown_datatype_is_refused(svc, make_doc):
     with pytest.raises(ValueError):
         svc.migrate_datatype("c1", "bfloat16")
     assert svc.registry.get("c1").datatype == "float32"
+
+
+def test_quantization_persists_across_datatype_migration_and_reindex(
+    svc, make_doc, monkeypatch
+):
+    from qdrant_client import models as qm
+
+    svc.index(str(make_doc("a.md", "alpha beta gamma")), "c1")
+    updated = svc.set_quantization("c1", "int8")
+    assert updated.quantization == "int8"
+    assert svc.registry.get("c1").quantization == "int8"
+
+    created_quant: dict[str, object] = {}
+    orig_create = svc.store.client.create_collection
+
+    def spy_create(collection_name: str, **kwargs):
+        created_quant[collection_name] = kwargs.get("quantization_config")
+        return orig_create(collection_name=collection_name, **kwargs)
+
+    monkeypatch.setattr(svc.store.client, "create_collection", spy_create)
+    svc.migrate_datatype("c1", "float16")
+    live_col = _collection_for("c1")
+    info = svc.store.client.get_collection(live_col)
+    assert info.config.params.vectors.datatype == qm.Datatype.FLOAT16
+    qcfg = created_quant.get(live_col)
+    assert isinstance(qcfg, qm.ScalarQuantization)
+    assert qcfg.scalar.always_ram is True
+    assert svc.registry.get("c1").quantization == "int8"
+
+    svc.index(str(make_doc("b.md", "delta epsilon")), "c1")
+    assert svc.registry.get("c1").quantization == "int8"

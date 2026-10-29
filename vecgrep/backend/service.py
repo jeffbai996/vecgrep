@@ -695,6 +695,7 @@ class VecgrepService:
                 self.store.ensure_collection(
                     collection, int(metadata["dim"]),
                     datatype=str(metadata.get("datatype") or "float32"),
+                    quantization=metadata.get("quantization"),
                 )
             self.store.restore_source(collection, source_id, old_points)
         elif operation == "delete_source":
@@ -1013,6 +1014,7 @@ class VecgrepService:
             self.store.ensure_collection(
                 _collection_for(corpus_name), corpus.dim,
                 datatype=corpus.datatype,
+                quantization=corpus.quantization,
             )
 
         # Incremental updates may only advance a catalog that was complete for
@@ -1220,7 +1222,9 @@ class VecgrepService:
                     stale_ids = [oid for oid in old_by_id if oid not in new_id_set]
 
                     self.store.ensure_collection(
-                        collection, corpus.dim, datatype=corpus.datatype,
+                        collection, corpus.dim,
+                        datatype=corpus.datatype,
+                        quantization=corpus.quantization,
                     )
                     if incremental_update:
                         if stale_ids:
@@ -2350,22 +2354,24 @@ class VecgrepService:
         from qdrant_client.http import models as qm
 
         offset: object = None
+        batch_idx = 0
         while True:
             points, offset = self.store.client.scroll(
                 collection_name=src,
                 with_payload=True,
                 with_vectors=True,
-                limit=2048,
+                limit=512,
                 offset=offset,
             )
             if points:
+                batch_idx += 1
                 self.store.client.upsert(
                     collection_name=dst,
                     points=[
                         qm.PointStruct(id=p.id, vector=p.vector, payload=p.payload or {})
                         for p in points
                     ],
-                    wait=False,
+                    wait=(batch_idx % 8 == 0 or offset is None),
                 )
             if offset is None:
                 break
@@ -2433,7 +2439,12 @@ class VecgrepService:
             )
 
         self.store.drop_collection(live)
-        self.store.ensure_collection(live, corpus.dim, datatype=datatype)
+        self.store.ensure_collection(
+            live,
+            corpus.dim,
+            datatype=datatype,
+            quantization=corpus.quantization,
+        )
         self._copy_points(temp, live, src_n)
         final_n = self.store.client.count(live, exact=True).count
         if final_n != src_n:
@@ -2447,6 +2458,21 @@ class VecgrepService:
         corpus.datatype = datatype
         self.registry.upsert(corpus)
         return corpus
+
+    def set_quantization(self, name: str, quantization: str | None) -> Corpus:
+        """Enable, change, or clear Qdrant vector quantization on a corpus in
+        place and persist the choice on the corpus record so future rebuilds
+        and datatype migrations preserve it."""
+        if quantization not in (None, "int8", "binary"):
+            raise ValueError(f"unsupported quantization {quantization!r}")
+        with self.locks.write(name):
+            corpus = self.registry.get(name)
+            collection = _collection_for(name)
+            if self.store._has_collection(collection):
+                self.store.set_quantization(collection, quantization)
+            corpus.quantization = quantization
+            self.registry.upsert(corpus)
+            return corpus
 
     def _rerank_ready(self, model_name: str | None) -> bool:
         """Is the cross-encoder loaded (or loadable within the wait budget)?
@@ -3733,7 +3759,12 @@ class VecgrepService:
         self.store.drop_collection(dest)
         if self.registry.has(name):
             self.registry.delete(name)
-        self.store.ensure_collection(dest, target.dim, datatype=target.datatype)
+        self.store.ensure_collection(
+            dest,
+            target.dim,
+            datatype=target.datatype,
+            quantization=target.quantization,
+        )
         offset = None
         while True:
             points, offset = self.store.client.scroll(
