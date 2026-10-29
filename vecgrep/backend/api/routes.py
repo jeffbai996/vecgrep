@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from ..config import get_settings
 from ..embed import EmbedBackendError
+from ..store.qdrant_store import SearchBackendError
 from ..ingestion.adapters import AdapterError
 from ..rerank import RerankerError
 from ..service import VecgrepService
@@ -217,8 +218,8 @@ def index(req: IndexRequest) -> IndexResponse:
         )
     except AdapterError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except EmbedBackendError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+    except (EmbedBackendError, SearchBackendError):
+        raise HTTPException(status_code=503, detail="Search dependency unavailable; retry the request.")
     except CorpusError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return IndexResponse(docs=docs, chunks=chunks, skipped=skipped, failed=failed)
@@ -322,8 +323,8 @@ def search(req: SearchRequest) -> SearchResponse:
         )
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except EmbedBackendError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+    except (EmbedBackendError, SearchBackendError):
+        raise HTTPException(status_code=503, detail="Search dependency unavailable; retry the request.")
     except RerankerError as e:
         raise HTTPException(status_code=503, detail=str(e))
     return SearchResponse(
@@ -354,8 +355,8 @@ def timeline(req: TimelineRequest) -> list[TimelineGroup]:
         )
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except EmbedBackendError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+    except (EmbedBackendError, SearchBackendError):
+        raise HTTPException(status_code=503, detail="Search dependency unavailable; retry the request.")
     return [TimelineGroup(**g) for g in groups]
 
 
@@ -373,8 +374,8 @@ def incident(req: IncidentRequest) -> dict | None:
         )
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except EmbedBackendError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+    except (EmbedBackendError, SearchBackendError):
+        raise HTTPException(status_code=503, detail="Search dependency unavailable; retry the request.")
 
 
 @router.post("/browse")
@@ -495,12 +496,20 @@ def compare(req: dict) -> dict:
     """Temporal diff: {query, corpus, a_after?, a_before?, b_after?,
     b_before?, top_k?}. Same window grammar as after:/before: filters."""
     try:
+        if not isinstance(req.get("query"), str) or not isinstance(req.get("corpus"), str):
+            raise TypeError("query and corpus must be strings")
+        if int(req.get("top_k", 8)) <= 0:
+            raise ValueError("top_k must be positive")
         out = _service().compare(
             req["query"], req["corpus"],
             a_after=req.get("a_after"), a_before=req.get("a_before"),
             b_after=req.get("b_after"), b_before=req.get("b_before"),
-            top_k=int(req.get("top_k") or 8),
+            top_k=int(req.get("top_k") or 8), mode=req.get("mode", "hybrid"),
         )
+    except (EmbedBackendError, SearchBackendError):
+        raise HTTPException(status_code=503, detail="Search dependency unavailable; retry the query.")
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="Invalid comparison parameters.")
     except KeyError as e:
         raise HTTPException(status_code=400, detail=f"missing field: {e}")
     except CorpusError as e:

@@ -15,7 +15,7 @@ import re
 import tempfile
 import threading
 from collections import OrderedDict
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -384,10 +384,10 @@ class BM25Store:
             yield
             if corpus in self._cache:
                 self._persist_now(corpus)
-        finally:
-            self._bulk.discard(corpus)
             if m is not None and m.exists():
                 m.unlink()
+        finally:
+            self._bulk.discard(corpus)
             # Cross-corpus access may have temporarily exceeded the cache cap
             # while this corpus was pinned. Prefer retaining the just-finished
             # corpus and shed older unpinned entries now that persistence is
@@ -441,14 +441,21 @@ class BM25Store:
             return
         with self._lock:
             idx = self._load(corpus)
+            positions = {cid: i for i, cid in enumerate(idx.ids)}
             for cid, text, payload in zip(ids, texts, payloads):
                 clean = {k: v for k, v in payload.items() if k != "source_text"} if "source_text" in payload else payload
-                arr_pos = len(idx.ids)
-                idx.ids.append(cid)
-                idx.docs.append(tokenize(text))
-                idx.payloads.append(clean)
-                sid = clean.get("source_id", "")
-                idx.by_source.setdefault(sid, []).append(arr_pos)
+                if cid in positions:
+                    pos = positions[cid]
+                    idx.docs[pos] = tokenize(text)
+                    idx.payloads[pos] = clean
+                else:
+                    positions[cid] = len(idx.ids)
+                    idx.ids.append(cid)
+                    idx.docs.append(tokenize(text))
+                    idx.payloads.append(clean)
+            idx.by_source.clear()
+            for pos, payload in enumerate(idx.payloads):
+                idx.by_source.setdefault(payload.get("source_id", ""), []).append(pos)
             self._bm25_instances.pop(corpus, None)
             self._persist(corpus)
 
@@ -587,6 +594,7 @@ class BM25Store:
         top_k: int,
         *,
         source_ids: set[str] | None = None,
+        payload_filter: Callable[[dict], bool] | None = None,
     ) -> list[tuple[str, float, dict]]:
         if source_ids is not None and not source_ids:
             return []
@@ -617,6 +625,8 @@ class BM25Store:
             for i, s in enumerate(scores):
                 if allowed_positions is not None and i not in allowed_positions:
                     continue
+                if payload_filter is not None and not payload_filter(idx.payloads[i]):
+                    continue
                 if s <= 0:
                     continue
                 factor = _coverage_factor(q_tokens, idx.docs[i])
@@ -629,6 +639,8 @@ class BM25Store:
                 fallback: list[tuple[float, int]] = []
                 for i in range(len(idx.docs)):
                     if allowed_positions is not None and i not in allowed_positions:
+                        continue
+                    if payload_filter is not None and not payload_filter(idx.payloads[i]):
                         continue
                     factor = _coverage_factor(q_tokens, idx.docs[i])
                     if factor is None:

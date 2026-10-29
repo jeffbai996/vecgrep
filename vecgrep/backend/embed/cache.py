@@ -23,7 +23,7 @@ from array import array
 from pathlib import Path
 
 from ..config import DEFAULT_EMBED_CACHE_MAX_ROWS
-from .base import EmbedBackend
+from .base import EmbedBackend, EmbedBackendError
 
 logger = logging.getLogger(__name__)
 
@@ -509,6 +509,18 @@ class CachedBackend(EmbedBackend):
         self.model = inner.model
         self.dim = inner.dim
         self.bypass = False
+
+    def embed_one(self, text: str) -> list[float]:
+        # An ingestion fallback may have cached a zero vector. It is never a
+        # valid query embedding, and must not suppress dependency failover.
+        cached = self._cache.get_many(self.identity, [text]) if not self.bypass else {}
+        vector = cached.get(EmbedCache._sha(text))
+        if vector is None or not any(vector):
+            vector = self._inner.embed_one(text)
+            if not vector or not any(vector):
+                raise EmbedBackendError("Embedding backend could not produce a valid query vector.")
+            self._cache.put_many(self.identity, [text], [vector])
+        return vector
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:

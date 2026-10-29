@@ -1300,9 +1300,13 @@ def _commit_direct_edit(corpus: str, doc_id: str, content: str | None,
                 f"{doc_id} is tier: protected — human-only. Use propose_edit so a "
                 f"human confirms it with the exact-id ack.")})
 
-        body = _doc_body(corpus, doc_id)
-        if body is None:
-            return json.dumps({"error": f"could not read the body of {doc_id!r}."})
+        body = on_disk
+        if body.startswith("---") and meta:
+            end = body[3:].find("\n---")
+            if end != -1:
+                body = body[3 + end + 4:]
+                body = body.split("\n", 1)[1] if "\n" in body else ""
+        body = body.strip("\n")
 
         if is_patch:
             try:
@@ -2029,7 +2033,13 @@ def build_mcp_server() -> Any:
             else:
                 text = json.dumps({"error": f"unknown tool: {name}"})
         except Exception as exc:
-            text = json.dumps({"error": str(exc)})
+            from ..backend.embed.base import EmbedBackendError
+            from ..backend.store.qdrant_store import SearchBackendError
+            if isinstance(exc, (EmbedBackendError, SearchBackendError)):
+                text = json.dumps({"error": "Search dependency unavailable; retry the request.",
+                                   "code": "search_unavailable"})
+            else:
+                text = json.dumps({"error": str(exc)})
         return [TextContent(type="text", text=text)]
 
     return server

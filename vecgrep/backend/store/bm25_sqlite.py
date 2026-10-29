@@ -23,7 +23,7 @@ import logging
 import os
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -386,9 +386,17 @@ class BM25SqliteStore:
             conn = self._conn(corpus)
             pos = self._next_pos(conn)
             for cid, text, payload in zip(ids, texts, payloads):
-                self._insert(conn, pos, cid, payload.get("source_id", "") or "",
+                old_positions = [row[0] for row in conn.execute(
+                    "SELECT pos FROM chunks WHERE cid = ? ORDER BY pos", (cid,))]
+                if old_positions:
+                    conn.executemany("DELETE FROM chunks_fts WHERE rowid = ?",
+                                     [(old,) for old in old_positions])
+                    conn.execute("DELETE FROM chunks WHERE cid = ?", (cid,))
+                target = old_positions[0] if old_positions else pos
+                self._insert(conn, target, cid, payload.get("source_id", "") or "",
                              " ".join(tokenize(text)), payload)
-                pos += 1
+                if not old_positions:
+                    pos += 1
             if corpus not in self._bulk:
                 conn.commit()
             self._counts.pop(corpus, None)
@@ -482,6 +490,7 @@ class BM25SqliteStore:
         top_k: int,
         *,
         source_ids: set[str] | None = None,
+        payload_filter: Callable[[dict], bool] | None = None,
     ) -> list[tuple[str, float, dict]]:
         if source_ids is not None and not source_ids:
             return []
@@ -497,6 +506,11 @@ class BM25SqliteStore:
                 source_params = sorted(source_ids)
                 placeholders = ",".join("?" for _ in source_params)
                 source_clause = f" AND c.source_id IN ({placeholders})"
+
+            if payload_filter is not None:
+                conn.create_function("eligible_payload", 1,
+                                     lambda raw: int(payload_filter(json.loads(raw))))
+                source_clause += " AND eligible_payload(c.payload)"
 
             # Two-stage retrieval:
             # 1) Fetch lightweight (pos, cid, tokens, bm25) rows WITHOUT

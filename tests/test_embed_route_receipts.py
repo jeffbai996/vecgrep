@@ -200,7 +200,9 @@ def test_a_primary_batch_transport_failure_records_its_reason(receipt_db, error,
         if isinstance(json.loads(req.content)["input"], list):
             raise error
         return _answer(req)
-    _primary_only(primary).embed(["a", "b"])
+    from vecgrep.backend.embed.base import EmbedBackendError
+    with pytest.raises(EmbedBackendError):
+        _primary_only(primary).embed(["a", "b"])
     assert routes(receipt_db) == [("primary", "fallback", reason)]
 
 

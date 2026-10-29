@@ -37,15 +37,19 @@ document size). The carrier layout keeps every reader exact for ~40x less.
 """
 from __future__ import annotations
 
+import threading
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-import threading
 
 import httpx
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
+
+
+class SearchBackendError(RuntimeError):
+    """Search storage is unavailable; callers must not report a zero-hit success."""
 
 
 _PAYLOAD_INDEX_FIELDS: tuple[tuple[str, qm.PayloadSchemaType], ...] = (
@@ -422,8 +426,8 @@ class QdrantStore:
             if query_filter is not None:
                 kwargs["query_filter"] = query_filter
             response = self.client.query_points(**kwargs)
-        except Exception:
-            return []
+        except Exception as exc:
+            raise SearchBackendError("Search storage is unavailable; retry the query.") from exc
         results = response.points
         hits: list[StoredHit] = []
         for r in results:

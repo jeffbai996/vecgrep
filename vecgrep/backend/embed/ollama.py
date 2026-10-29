@@ -121,6 +121,9 @@ class OllamaBackend(EmbedBackend):
             timeout=httpx.Timeout(read, connect=connect)
         )
 
+    def embed_one(self, text: str) -> list[float]:
+        return self._embed_one_resilient(text, allow_zero=False)
+
     def _probe_dim(self) -> int:
         vec = self.embed_one("probe")
         return len(vec)
@@ -237,7 +240,7 @@ class OllamaBackend(EmbedBackend):
             ) from e
         except httpx.HTTPError as e:
             failed(_transport_reason(e))
-            return None
+            raise EmbedBackendError("Embedding request failed; retry the query.") from e
         if r.status_code != 200:
             # Let the per-chunk path decide: it already distinguishes a fatal
             # 404/4xx from a transient 5xx, so error messages stay identical.
@@ -260,7 +263,7 @@ class OllamaBackend(EmbedBackend):
         record(data, model=self.model, route=route)
         return rows
 
-    def _embed_one_resilient(self, text: str) -> list[float]:
+    def _embed_one_resilient(self, text: str, *, allow_zero: bool = True) -> list[float]:
         """Embed one chunk, tolerating per-chunk NaN failures.
 
         Some models (notably bge-m3) make Ollama 500 with "unsupported value:
@@ -304,7 +307,7 @@ class OllamaBackend(EmbedBackend):
                     "Start it with `ollama serve` (or set VECGREP_OLLAMA_URL)."
                 ) from e
             except httpx.HTTPError as e:
-                raise EmbedBackendError(f"Ollama request failed: {e}") from e
+                raise EmbedBackendError("Embedding request failed; retry the query.") from e
 
             if r.status_code == 404:
                 raise EmbedBackendError(
@@ -322,12 +325,21 @@ class OllamaBackend(EmbedBackend):
                     text = text[: len(text) // 2]
                     logger.info("Ollama rejected a chunk as too long for its batch; retrying with %d chars", len(text))
                     continue
-                raise EmbedBackendError(f"Ollama returned {r.status_code}: {r.text[:200]}")
+                if _is_too_long(r.text):
+                    raise EmbedBackendError("Input exceeds the embedding context length after bounded clipping.")
+                raise EmbedBackendError(f"Embedding backend rejected the request (HTTP {r.status_code}).")
             if r.status_code >= 500:
-                last_reason = f"HTTP {r.status_code}: {r.text[:120]}"
+                if "nan" not in r.text.lower():
+                    raise EmbedBackendError("Embedding backend is unavailable; retry the query.")
+                last_reason = "non-finite embedding"
                 continue
 
-            data = r.json()
+            try:
+                data = r.json()
+            except ValueError as exc:
+                raise EmbedBackendError("Embedding backend returned an invalid response.") from exc
+            if not isinstance(data, dict):
+                raise EmbedBackendError("Embedding backend returned an invalid response.")
             record(data, model=self.model)
             # /api/embed nests under "embeddings" (a list, one row per input);
             # the legacy endpoint used a flat "embedding". Read both so a
@@ -345,6 +357,8 @@ class OllamaBackend(EmbedBackend):
                 continue
             return vec
 
+        if not allow_zero or not getattr(self, "dim", None):
+            raise EmbedBackendError("Embedding backend could not produce a valid query vector.")
         logger.warning(
             "Ollama embed failed for a chunk after retry (%s); using zero vector "
             "so the chunk stays keyword-searchable but never wins on cosine. "

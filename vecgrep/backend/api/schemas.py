@@ -23,7 +23,7 @@ class SearchRequest(BaseModel):
     query: str
     corpus: str | None = None
     corpora: list[str] | None = None
-    top_k: int | None = None
+    top_k: int | None = Field(None, ge=1)
     mode: str = "hybrid"
     rerank: bool = False  # opt-in: benchmark showed +127ms tax + quality wash on default-on
     rerank_model: str | None = None
@@ -122,9 +122,9 @@ class Calibration(BaseModel):
 class TimelineRequest(BaseModel):
     query: str
     corpus: str | None = None
-    top_k: int = 10
-    max_groups: int = 4
-    padding: int = 1200
+    top_k: int = Field(10, ge=1)
+    max_groups: int = Field(4, ge=1)
+    padding: int = Field(1200, ge=0)
     mode: str = "hybrid"
     filters: list[str] = []
 

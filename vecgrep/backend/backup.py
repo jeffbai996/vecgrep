@@ -178,7 +178,28 @@ class BackupManager:
             if settings.backup_destination
             else settings.home / "backups"
         )
-        self.service_factory = service_factory or (lambda: VecgrepService(settings=settings))
+        self._borrowed_service = None
+        self.service_factory = service_factory or self._default_service
+
+    def _default_service(self) -> VecgrepService:
+        # The HTTP/scheduler process already owns embedded Qdrant's lock.
+        # Reuse that handle; CLI backup jobs still own their isolated service.
+        from .api import routes
+        active = routes._SERVICE
+        if active is not None and active.settings.home == self.settings.home:
+            self._borrowed_service = active
+            return active
+        self._borrowed_service = None
+        return VecgrepService(settings=self.settings)
+
+    def _release_service(self, service: VecgrepService, *, replace: bool = False) -> None:
+        if service is self._borrowed_service and not replace:
+            return
+        if service is self._borrowed_service:
+            from .api import routes
+            if routes._SERVICE is service:
+                routes._SERVICE = None
+        service.store.client.close()
 
     @contextlib.contextmanager
     def mutation_lock(self) -> Iterator[None]:
@@ -281,7 +302,7 @@ class BackupManager:
             finally:
                 if service is not None:
                     try:
-                        service.store.client.close()
+                        self._release_service(service)
                     except Exception:
                         pass
         return destination
@@ -371,7 +392,7 @@ class BackupManager:
                 )
 
             try:
-                service.store.client.close()
+                self._release_service(service, replace=True)
             except Exception:
                 pass
 
@@ -420,7 +441,7 @@ class BackupManager:
                         break
             issues = service.diagnose()
             try:
-                service.store.client.close()
+                self._release_service(service, replace=True)
             except Exception:
                 pass
         return {"restored": manifest["backup_id"], "issues": issues}
