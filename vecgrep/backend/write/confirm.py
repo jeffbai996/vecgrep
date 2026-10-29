@@ -63,8 +63,8 @@ def _run_writethrough(cmd: str, *, op: str, corpus: str, doc_id: str,
         proc = subprocess.run(
             ["bash", "-lc", cmd], input=payload, text=True,
             capture_output=True, timeout=60,
-        )
-    except Exception as e:
+         check=False)
+    except Exception as e:  # noqa: BLE001 -- Write failures become explicit confirmation results instead of losing the user operation.
         return ConfirmResult(ok=False, doc_id=doc_id, path="",
                              message=f"write-through spawn failed: {e}")
     if proc.returncode != 0:
@@ -140,7 +140,7 @@ def _verify_searchable(svc, corpus: str, doc_id: str, content: str) -> bool:
     probe = (content or "").strip().split("\n", 1)[0][:120] or doc_id
     try:
         results = svc.search(probe, corpus_name=corpus, top_k=10)
-    except Exception:
+    except Exception:  # noqa: BLE001 -- Write failures become explicit confirmation results instead of losing the user operation.
         return False
     for r in results:
         sid = getattr(r, "source_id", "") or ""
@@ -279,7 +279,7 @@ def _confirm_locked(
         index_note = ""
         try:
             svc.delete_file(corpus, str(target))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 -- Write failures become explicit confirmation results instead of losing the user operation.
             index_note = f" (de-index warning: {e}; a reindex will reconcile)"
         try:
             target.unlink()
@@ -346,7 +346,7 @@ def _confirm_locked(
     # edit replaces the doc's chunks instead of adding a second copy.
     try:
         svc.index(str(target), corpus)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- Write failures become explicit confirmation results instead of losing the user operation.
         # The file is on disk (truth); flag the embed failure rather than
         # pretending success. A re-index later recovers it.
         store.delete(proposal_id)
@@ -370,7 +370,7 @@ def _confirm_locked(
             # reindex reconciles), never vectors pointing at nothing.
             try:
                 svc.delete_file(corpus, str(p))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 -- Write failures become explicit confirmation results instead of losing the user operation.
                 index_notes.append(f"{did}: de-index warning: {e}")
             try:
                 p.unlink(missing_ok=True)

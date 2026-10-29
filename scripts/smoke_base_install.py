@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import importlib.util
-from importlib.resources import files
 import os
-from pathlib import Path
 import tempfile
+from importlib.resources import files
+from pathlib import Path
 
 
 def main() -> None:
@@ -20,12 +20,13 @@ def main() -> None:
                 del os.environ[key]
         os.environ["VECGREP_HOME"] = str(Path(directory) / "home")
 
-        from vecgrep.backend.main import app
+        from pypdf import PdfWriter
+        from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
         from vecgrep.backend.ingestion.adapters import detect_adapter
         from vecgrep.backend.ingestion.adapters.image import ImageAdapter
         from vecgrep.backend.ingestion.adapters.pdf import PDFAdapter
-        from pypdf import PdfWriter
-        from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+        from vecgrep.backend.main import app
 
         assert app is not None
         frontend = files("vecgrep").joinpath("frontend", "dist")

@@ -133,6 +133,7 @@ def test_set_decay_rejects_nonpositive(svc, make_doc):
     p = make_doc("d.md", "content")
     svc.index(str(p), "c")
     import pytest
+
     from vecgrep.backend.store import CorpusError
 
     with pytest.raises(CorpusError):

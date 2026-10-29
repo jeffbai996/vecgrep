@@ -1,8 +1,8 @@
 """Order handling for a small shop."""
 import asyncio
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 RETRY_LIMIT = 3
 

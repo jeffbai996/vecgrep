@@ -13,7 +13,6 @@ import threading
 from pathlib import Path
 from typing import TypeAlias
 
-
 CatalogGeneration: TypeAlias = tuple[float, int, int]
 
 

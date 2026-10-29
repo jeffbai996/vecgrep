@@ -7,7 +7,6 @@ the merge mechanics (those live in test_propose_merge/test_confirm_merge).
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -73,7 +72,9 @@ def test_mcp_merge_surfaces_proposal_errors(home):
 
 def test_stdio_merge_dispatches_with_the_same_corpus_inference(monkeypatch):
     import asyncio
+
     from mcp.types import CallToolRequest, CallToolRequestParams
+
     from vecgrep.mcp import server
     calls = []
     monkeypatch.setattr(server, '_run_propose_merge',

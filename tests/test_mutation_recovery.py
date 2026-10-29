@@ -163,7 +163,7 @@ def test_registry_is_saved_once_per_index_run_not_once_per_source(svc, make_doc,
         real_save()
 
     monkeypatch.setattr(svc.registry, "_save", counted)
-    docs, chunks, skipped = svc.index(str(folder), "notes")
+    docs, _unused_chunks, skipped = svc.index(str(folder), "notes")
     assert docs >= 5
     assert saves["n"] == 1, f"registry saved {saves['n']}x for a {docs}-source run"
     corpus = svc.registry.get("notes")

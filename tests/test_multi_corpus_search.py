@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 

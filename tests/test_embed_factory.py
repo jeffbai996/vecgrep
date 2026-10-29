@@ -13,7 +13,6 @@ import pytest
 from vecgrep.backend.config import Settings
 from vecgrep.backend.embed import factory
 from vecgrep.backend.embed.ollama import OllamaBackend
-from vecgrep.backend.embed.openai import OpenAIBackend
 
 
 def _settings(**kw) -> Settings:

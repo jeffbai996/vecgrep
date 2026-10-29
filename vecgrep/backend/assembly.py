@@ -24,8 +24,9 @@ from __future__ import annotations
 
 import difflib
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard (service imports us)
     from .service import SearchResult
@@ -87,7 +88,7 @@ def estimate_tokens(text: str) -> int:
     return len(text) // _CHARS_PER_TOKEN
 
 
-def _stub_of(r: "SearchResult") -> ResultStub:
+def _stub_of(r: SearchResult) -> ResultStub:
     snippet = " ".join(r.chunk.split())[:_SNIPPET_CHARS]
     return ResultStub(
         chunk_id=r.chunk_id,
@@ -105,11 +106,11 @@ def _stub_of(r: "SearchResult") -> ResultStub:
 
 
 def split_full_and_stubs(
-    results: list["SearchResult"],
+    results: list[SearchResult],
     full_k: int = DEFAULT_FULL_K,
     max_total: int = DEFAULT_MAX_TOTAL,
     token_ceiling: int = DEFAULT_STUB_TOKEN_CEILING,
-) -> tuple[list["SearchResult"], list[ResultStub]]:
+) -> tuple[list[SearchResult], list[ResultStub]]:
     """Split a ranked result list into (full head, stub tail).
 
     The head keeps full context; the tail is stubbed and emitted in rank
@@ -130,7 +131,7 @@ def split_full_and_stubs(
     return full, stubs
 
 
-def _normalized(r: "SearchResult") -> str:
+def _normalized(r: SearchResult) -> str:
     """Whitespace-collapsed lowercase chunk text, cached on the result."""
     cached = getattr(r, "_asm_norm", None)
     if cached is None:
@@ -139,7 +140,7 @@ def _normalized(r: "SearchResult") -> str:
     return cached
 
 
-def _shingles(r: "SearchResult") -> frozenset:
+def _shingles(r: SearchResult) -> frozenset:
     """Token 8-gram shingles of the normalized text (cached). Only shingles
     long enough to be distinctive (>= MIN_CLONE_CHARS chars) are kept."""
     cached = getattr(r, "_asm_shingles", None)
@@ -155,7 +156,7 @@ def _shingles(r: "SearchResult") -> frozenset:
     return cached
 
 
-def span_overlap_ratio(a: "SearchResult", b: "SearchResult") -> float:
+def span_overlap_ratio(a: SearchResult, b: SearchResult) -> float:
     """Char-span overlap as a fraction of the shorter span (same source only)."""
     lo = max(a.chunk_start, b.chunk_start)
     hi = min(a.chunk_end, b.chunk_end)
@@ -165,7 +166,7 @@ def span_overlap_ratio(a: "SearchResult", b: "SearchResult") -> float:
     return max(0, hi - lo) / shorter
 
 
-def _text_similarity(a: "SearchResult", b: "SearchResult") -> float:
+def _text_similarity(a: SearchResult, b: SearchResult) -> float:
     """difflib ratio on normalized text; 0.0 when either side is too short to
     judge. quick_ratio bounds the real ratio from above, so use it as a cheap
     bail-out before the quadratic comparison."""
@@ -178,7 +179,7 @@ def _text_similarity(a: "SearchResult", b: "SearchResult") -> float:
     return sm.ratio()
 
 
-def pair_similarity(a: "SearchResult", b: "SearchResult") -> float:
+def pair_similarity(a: SearchResult, b: SearchResult) -> float:
     """How redundant is b given a (symmetric)? 0.0 across sources — different
     files are never duplicates of each other. Within a source: the max of
     span overlap, text-clone similarity, and the shared-verbatim-message
@@ -194,10 +195,10 @@ def pair_similarity(a: "SearchResult", b: "SearchResult") -> float:
 
 
 def dedup_near_duplicates(
-    results: list["SearchResult"],
+    results: list[SearchResult],
     min_overlap: float = 0.5,
     clone_threshold: float = CLONE_THRESHOLD,
-) -> list["SearchResult"]:
+) -> list[SearchResult]:
     """Hard collapse of same-source near-duplicates, keeping the higher score.
 
     Collides on char-span overlap >= min_overlap of the shorter span (the
@@ -225,12 +226,12 @@ def dedup_near_duplicates(
 
 
 def mmr_select(
-    results: list["SearchResult"],
+    results: list[SearchResult],
     k: int,
     lambda_: float = MMR_LAMBDA,
     exclude_sim: float = EXCLUDE_SIM,
-    key: Callable[["SearchResult"], float] | None = None,
-) -> list["SearchResult"]:
+    key: Callable[[SearchResult], float] | None = None,
+) -> list[SearchResult]:
     """Greedy MMR selection of up to k results.
 
     Relevance is `key(r)` (default: fused score) min-max normalized within the
@@ -270,6 +271,5 @@ def mmr_select(
         remaining.remove(pick)
         for r in remaining:
             sim = pair_similarity(pick, r)
-            if sim > max_sim[id(r)]:
-                max_sim[id(r)] = sim
+            max_sim[id(r)] = max(max_sim[id(r)], sim)
     return selected

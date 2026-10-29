@@ -15,7 +15,6 @@ from vecgrep.eval import harness
 from vecgrep.eval.gold import GoldCase, load_gold
 from vecgrep.eval.metrics import score_case, summarize
 
-
 # ── gold loading ─────────────────────────────────────────────────────────────
 
 def test_gold_loads_native_and_legacy_shapes(tmp_path: Path) -> None:

@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import json
+
+import pytest
 from click.testing import CliRunner
 from pydantic import ValidationError
-import pytest
 
-from vecgrep.backend.api.schemas import CorpusContextRequest, SearchRequest
 from vecgrep.backend.api import routes
+from vecgrep.backend.api.schemas import CorpusContextRequest, SearchRequest
 from vecgrep.backend.assembly import ResultStub
-from vecgrep.cli import main as cli_main
 from vecgrep.backend.service import SearchOutcome, SearchWarning
+from vecgrep.cli import main as cli_main
 from vecgrep.mcp import server as mcp_server
 
 

@@ -10,8 +10,8 @@ One Document per conversation, like the Claude adapter. Title in metadata.
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 from .base import Adapter, Document, load_json_file, try_load_json_file
 from .registry import register_adapter

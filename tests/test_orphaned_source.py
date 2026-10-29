@@ -45,7 +45,7 @@ def test_reconcile_purges_the_orphan_from_both_backends(svc, make_doc):
     svc.reconcile(corpora={"fixture"})
 
     # Vector side: no points left for the dead source.
-    collection = f"vecgrep__fixture"
+    collection = "vecgrep__fixture"
     assert svc.store.source_counts(collection).get(str(dead), 0) == 0
 
     # BM25 side: this is the half-purge trap. A keyword query that the dead
@@ -64,7 +64,7 @@ def test_reconcile_leaves_a_present_source_alone(svc, make_doc):
 
     svc.reconcile(corpora={"fixture"})
 
-    collection = f"vecgrep__fixture"
+    collection = "vecgrep__fixture"
     assert svc.store.source_counts(collection).get(str(keep), 0) > 0
     corpus = svc.registry.get("fixture")
     assert str(keep) in corpus.sources

@@ -9,12 +9,10 @@ silently changed.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
-from vecgrep.backend.write import proposal as P
 import vecgrep.backend.write.confirm as C
+from vecgrep.backend.write import proposal as P
 
 
 @pytest.fixture

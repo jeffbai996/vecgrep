@@ -45,12 +45,13 @@ def test_proposed_entry_origin_is_bot_suggested(home):
     from vecgrep.mcp import server as S
     S._run_propose("notes", "x")
     h = os.environ["VECGREP_HOME"]
-    pend = json.loads(open(glob.glob(f"{h}/write/_pending/*.json")[0]).read())
+    pend = json.loads(Path(glob.glob(f"{h}/write/_pending/*.json")[0]).read_text())
     assert pend["meta"]["origin"] == "bot-suggested"  # the wall: bots propose
 
 
 def test_cli_confirm_turns_proposal_into_write(home):
     from click.testing import CliRunner
+
     from vecgrep.cli.main import cli
     from vecgrep.mcp import server as S
 
@@ -65,7 +66,7 @@ def test_cli_confirm_turns_proposal_into_write(home):
     assert c.exit_code == 0, c.output
     h = os.environ["VECGREP_HOME"]
     f = glob.glob(f"{h}/write/notes/notes-*.md")
-    assert f and "confirm me into existence" in open(f[0]).read()
+    assert f and "confirm me into existence" in Path(f[0]).read_text()
     # proposal consumed — confirming again fails
     c2 = runner.invoke(cli, ["confirm", pid])
     assert c2.exit_code != 0
@@ -73,6 +74,7 @@ def test_cli_confirm_turns_proposal_into_write(home):
 
 def test_pending_empty_when_none(home):
     from click.testing import CliRunner
+
     from vecgrep.cli.main import cli
     r = CliRunner().invoke(cli, ["pending"])
     assert r.exit_code == 0
@@ -92,6 +94,7 @@ def test_default_propose_corpus_is_claude_ai(home):
 
 def test_discard_removes_proposal_without_writing(home):
     from click.testing import CliRunner
+
     from vecgrep.cli.main import cli
     from vecgrep.mcp import server as S
 
@@ -249,6 +252,7 @@ def test_propose_delete_rejects_path_escape(home):
 
 def test_confirm_delete_removes_file_and_pending(home):
     from click.testing import CliRunner
+
     from vecgrep.cli.main import cli
     from vecgrep.mcp import server as S
     _seed_doc("notes", "notes-001", "doomed entry")
@@ -275,6 +279,7 @@ def test_confirm_delete_removes_file_and_pending(home):
 
 def test_discard_cancels_a_delete_proposal(home):
     from click.testing import CliRunner
+
     from vecgrep.cli.main import cli
     from vecgrep.mcp import server as S
     _seed_doc("notes", "notes-001", "keep me actually")
@@ -304,7 +309,7 @@ def test_propose_edit_patch_single_match(home):
     assert r["is_edit"] is True and r["doc_id"] == "notes-001"
     # the pending proposal carries the patched body, only the one token changed
     h = os.environ["VECGREP_HOME"]
-    pend = json.loads(open(glob.glob(f"{h}/write/_pending/*.json")[0]).read())
+    pend = json.loads(Path(glob.glob(f"{h}/write/_pending/*.json")[0]).read_text())
     assert "July 17" in pend["rendered"] and "July 25" not in pend["rendered"]
     assert "the launch is" in pend["rendered"] and "ship it" in pend["rendered"]
 
@@ -409,6 +414,7 @@ def test_propose_edit_rejects_outside_targets_before_read(
 
 def test_propose_edit_patch_confirm_round_trip(home):
     from click.testing import CliRunner
+
     from vecgrep.cli.main import cli
     from vecgrep.mcp import server as S
     _seed_doc("notes", "notes-001", "release date is July 25 for sure")
@@ -419,7 +425,7 @@ def test_propose_edit_patch_confirm_round_trip(home):
     c = CliRunner().invoke(cli, ["confirm", pid])
     assert c.exit_code == 0, c.output
     h = os.environ["VECGREP_HOME"]
-    body = open(f"{h}/write/notes/notes-001.md").read()
+    body = Path(f"{h}/write/notes/notes-001.md").read_text()
     assert "July 17" in body and "July 25" not in body
     # frontmatter (the id line) survived the body-only patch
     assert "id: notes-001" in body

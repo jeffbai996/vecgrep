@@ -12,14 +12,20 @@ This package is built in phases. Phase 2 (here) is propose + preview only —
 it constructs a Proposal and renders the file it WOULD write, but writes
 nothing and mutates no state.
 """
-from .proposal import Proposal, ProposalError, propose, render_doc, next_doc_id
 # NOTE: we intentionally do NOT re-export the `confirm` function here — that name
 # collides with the `confirm` submodule and would shadow it (so
 # `write.confirm.ProposalStore` would resolve to the function). Import the
 # pipeline from its module: `from vecgrep.backend.write.confirm import confirm`.
 from .confirm import ConfirmError, ConfirmResult, ProposalStore
+from .proposal import Proposal, ProposalError, next_doc_id, propose, render_doc
 
 __all__ = [
-    "Proposal", "ProposalError", "propose", "render_doc", "next_doc_id",
-    "ConfirmError", "ConfirmResult", "ProposalStore",
+    "ConfirmError",
+    "ConfirmResult",
+    "Proposal",
+    "ProposalError",
+    "ProposalStore",
+    "next_doc_id",
+    "propose",
+    "render_doc",
 ]

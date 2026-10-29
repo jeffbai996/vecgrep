@@ -19,6 +19,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -61,7 +62,7 @@ def test_direct_write_commits_immediately(home):
     h = os.environ["VECGREP_HOME"]
     docs = glob.glob(f"{h}/write/external/external-*.md")
     assert len(docs) == 1
-    body = open(docs[0]).read()
+    body = Path(docs[0]).read_text()
     assert "a directly written fact" in body
     # Stamped honestly: neither 'human' (nobody approved it) nor 'bot-suggested'
     # (nothing was suggested — it was committed).
@@ -75,7 +76,7 @@ def test_metadata_is_recorded(home):
     r = json.loads(S._run_direct_write("body text", source_kind="memory",
                                        tags=["alpha", "beta"], title="A Title"))
     assert "error" not in r, r
-    body = open(glob.glob(f"{os.environ['VECGREP_HOME']}/write/external/*.md")[0]).read()
+    body = Path(glob.glob(f"{os.environ['VECGREP_HOME']}/write/external/*.md")[0]).read_text()
     assert "source_kind: memory" in body
     assert "alpha" in body and "beta" in body
     assert "A Title" in body
@@ -87,6 +88,7 @@ def test_corpus_is_not_a_caller_parameter(home):
     """The signature must not accept a corpus. A blocked parameter can be argued
     around by a clever caller; an ABSENT one cannot be expressed at all."""
     import inspect
+
     from vecgrep.mcp import server as S
     params = inspect.signature(S._run_direct_write).parameters
     assert "corpus" not in params
@@ -111,6 +113,7 @@ def test_no_edit_or_delete_on_this_path(home):
     """Append-only by construction: a bad direct write is NOISE, never
     destruction. Edits/deletes stay propose-only for every corpus."""
     import inspect
+
     from vecgrep.mcp import server as S
     params = inspect.signature(S._run_direct_write).parameters
     for forbidden in ("edit_id", "doc_id", "delete_id", "old_str", "new_str"):

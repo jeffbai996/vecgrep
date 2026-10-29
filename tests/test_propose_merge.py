@@ -62,7 +62,7 @@ def test_merge_writes_nothing(tmp_path):
 
 def test_proposal_backcompat_without_merge_absorbs():
     # On-disk pending proposals predating the field must still load.
-    d = dict(proposal_id="p1", doc_id="note-1", corpus="note",
-             target_path="/tmp/x.md", rendered="x", is_edit=False, meta={})
+    d = {"proposal_id": "p1", "doc_id": "note-1", "corpus": "note",
+             "target_path": "/tmp/x.md", "rendered": "x", "is_edit": False, "meta": {}}
     pr = P.Proposal(**d)
     assert pr.merge_absorbs == []

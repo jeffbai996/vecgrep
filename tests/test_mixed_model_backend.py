@@ -6,8 +6,6 @@ service query corpora embedded with different models without the old hard-error.
 """
 from __future__ import annotations
 
-import pytest
-
 from vecgrep.backend.config import Settings
 from vecgrep.backend.embed.factory import get_embed_backend
 

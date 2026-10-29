@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 
 from vecgrep.backend.auth.google_bearers import GoogleBearerRegistry, digest
 
@@ -28,7 +29,7 @@ def test_the_file_holds_digests_never_token_values(tmp_path):
     reg = _registry(tmp_path)
     reg.record({digest("bearer-secret-value"): time.time() + DAY}, issuer="one")
 
-    assert "bearer-secret-value" not in open(reg.path).read()
+    assert "bearer-secret-value" not in Path(reg.path).read_text()
 
 
 def test_a_revoked_bearer_is_not_live_and_recording_it_again_does_not_undo_that(tmp_path):
@@ -101,7 +102,7 @@ def test_an_unreadable_registry_accepts_nothing_and_is_not_overwritten(tmp_path)
 
     assert reg.lookup(digest("bearer-1")) is None
     assert reg.lookup(digest("bearer-2")) is None
-    assert open(reg.path).read() == "{torn"
+    assert Path(reg.path).read_text() == "{torn"
 
 
 def test_expired_entries_are_dropped_on_the_next_write(tmp_path):
@@ -110,7 +111,7 @@ def test_expired_entries_are_dropped_on_the_next_write(tmp_path):
     reg.record({digest("old"): now + 10}, issuer="one", now=now)
     reg.record({digest("new"): now + DAY}, issuer="one", now=now + 20)
 
-    assert list(json.load(open(reg.path))["bearers"]) == [digest("new")]
+    assert list(json.loads(Path(reg.path).read_text())["bearers"]) == [digest("new")]
 
 
 def test_the_registry_file_is_private(tmp_path):

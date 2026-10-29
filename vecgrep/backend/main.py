@@ -60,7 +60,7 @@ def _try_build_mcp_http_app() -> Any | None:
     """
     try:
         from ..mcp.server import build_http_app
-    except Exception as e:  # pragma: no cover - defensive
+    except Exception as e:  # noqa: BLE001 -- Optional transport, warm-up and background cleanup failures are reported without stopping the app. pragma: no cover - defensive
         logger.warning("MCP HTTP endpoint disabled: %s", e)
         return None
     from .config import get_settings
@@ -141,7 +141,7 @@ def create_app() -> FastAPI:
                 _warm_reranker()
             else:
                 logger.info("reranker is lazy: loads on first rerank, retires when idle")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- Optional transport, warm-up and background cleanup failures are reported without stopping the app.
             logger.warning("reranker warm-up could not start: %s", exc)
 
         stop = threading.Event()
@@ -162,7 +162,7 @@ def create_app() -> FastAPI:
                 )
                 try:
                     scheduler.run_if_due()
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 -- Optional transport, warm-up and background cleanup failures are reported without stopping the app.
                     logger.error("scheduled backup failed: %s", exc)
 
         backup_thread = threading.Thread(target=_backup_loop, name="vecgrep-backups", daemon=True)
@@ -183,7 +183,7 @@ def create_app() -> FastAPI:
                 from .api.routes import flush_embed_cache_if_started
 
                 flush_embed_cache_if_started()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 -- Optional transport, warm-up and background cleanup failures are reported without stopping the app.
                 logger.warning("embed cache flush on shutdown failed: %s", exc)
 
     app = FastAPI(title="vecgrep", version=__version__, lifespan=lifespan)
@@ -232,7 +232,7 @@ def create_app() -> FastAPI:
             from ..mcp.server import build_oauth_root_routes
             for _r in build_oauth_root_routes(_s.oauth_issuer_url):
                 app.router.routes.append(_r)
-        except Exception as e:  # pragma: no cover - defensive
+        except Exception as e:  # noqa: BLE001 -- Optional transport, warm-up and background cleanup failures are reported without stopping the app. pragma: no cover - defensive
             logger.warning("OAuth root routes not mounted: %s", e)
 
         async def _unlock_context(next_target: str) -> dict:

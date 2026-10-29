@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-import pytest
 from click.testing import CliRunner
 
 from vecgrep import __version__
@@ -162,8 +161,9 @@ def test_status_renders_updated_age_column(vg_home: Path) -> None:
 def test_relative_time_helper_handles_ranges() -> None:
     """The helper covers the bands we care about: now, minutes, hours,
     days, and 'unknown' for a zero/missing timestamp."""
-    from vecgrep.cli.main import _relative_age
     import time
+
+    from vecgrep.cli.main import _relative_age
 
     now = time.time()
     assert "now" in _relative_age(now).lower() or "s" in _relative_age(now)

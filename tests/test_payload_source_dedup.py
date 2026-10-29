@@ -156,7 +156,7 @@ def test_get_source_returns_whole_document(svc, make_doc) -> None:
 def test_browse_tail_sees_whole_document(svc, make_doc) -> None:
     """tail=N is 'the last N messages of the document'. A truncated window
     would silently return the last N of a 4KB slice instead."""
-    src = _index(svc, make_doc)
+    _index(svc, make_doc)
     groups = svc.browse("dedup", source_path="*doc.md", tail=5)
     events = [e for g in groups for e in g["events"]]
     assert len(events) == 5
@@ -185,7 +185,7 @@ def test_build_timeline_slice_matches_absolute_offsets(svc, make_doc) -> None:
 
 
 def test_get_chunk_window_bounded_and_full(svc, make_doc) -> None:
-    src = _index(svc, make_doc)
+    _index(svc, make_doc)
     payloads = _points(svc)
     # pick a chunk in the middle so both sides have room
     pid = sorted(payloads, key=lambda k: payloads[k]["chunk_index"])[
@@ -274,7 +274,7 @@ def test_first_chunk_empty_context_is_preserved(svc, make_doc) -> None:
     """chunk 0 genuinely has no text before it -- that empty string must
     survive as an empty string, not trigger a legacy re-derive."""
     _index(svc, make_doc)
-    first = [p for p in _points(svc).values() if p["chunk_index"] == 0][0]
+    first = next(p for p in _points(svc).values() if p["chunk_index"] == 0)
     assert first["context_before"] == ""
     r = svc.search("message number 0 about beta", "dedup", top_k=5)
     assert r

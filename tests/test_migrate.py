@@ -69,6 +69,7 @@ def test_migrate_no_op_raises(svc, make_doc):
     p = make_doc("doc.md", "noop test content here")
     svc.index(str(p), "test")
     import pytest
+
     from vecgrep.backend.store import CorpusError
 
     # Asking to migrate to the same backend+model the corpus is already on

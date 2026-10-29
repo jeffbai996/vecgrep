@@ -19,7 +19,6 @@ import pytest
 
 from vecgrep.backend.write.proposal import ProposalError, propose
 
-
 # --- P1: path traversal in edit_id -----------------------------------------
 
 @pytest.mark.parametrize(

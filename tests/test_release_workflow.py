@@ -1,8 +1,7 @@
 """Security and compatibility contracts for the release workflow."""
 
-from pathlib import Path
 import re
-
+from pathlib import Path
 
 WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "release.yml"
 MANUAL_TAG_REF = (

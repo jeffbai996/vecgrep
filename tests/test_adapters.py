@@ -8,12 +8,11 @@ Past bugs / risks covered:
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from vecgrep.backend.ingestion.adapters import detect_adapter
-from vecgrep.backend.ingestion.adapters.discord_jsonl import DiscordJSONLAdapter
-from vecgrep.backend.ingestion.adapters.claude_export import ClaudeExportAdapter
 from vecgrep.backend.ingestion.adapters.chatgpt_export import ChatGPTExportAdapter
+from vecgrep.backend.ingestion.adapters.claude_export import ClaudeExportAdapter
+from vecgrep.backend.ingestion.adapters.discord_jsonl import DiscordJSONLAdapter
 from vecgrep.backend.ingestion.adapters.markdown import MarkdownAdapter
 from vecgrep.backend.ingestion.adapters.plaintext import PlaintextAdapter
 

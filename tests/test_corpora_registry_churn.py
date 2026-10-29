@@ -9,8 +9,6 @@ information gained.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 from vecgrep.backend.store.corpora import Corpus, CorpusRegistry
 
 

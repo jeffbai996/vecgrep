@@ -57,7 +57,7 @@ def test_none_when_no_text_date_and_no_path() -> None:
 
 def test_date_deep_in_body_does_not_win() -> None:
     """A date mentioned far down in prose must not be treated as the doc date."""
-    body = "\n".join(["line %d" % i for i in range(40)] + ["Saved: 2020-01-01"])
+    body = "\n".join([f"line {i}" for i in range(40)] + ["Saved: 2020-01-01"])
     assert extract_timestamp(body) is None  # past the 15-line head window
 
 

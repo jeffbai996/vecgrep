@@ -335,14 +335,14 @@ def _validate_mcp_allowed_host(value: str) -> None:
     if "*" in value and not value.endswith(":*"):
         raise ConfigError("MCP allowed hosts support only a terminal :* port wildcard")
 
-    base = value[:-2] if value.endswith(":*") else value
+    base = value.removesuffix(":*")
     if "*" in base or any(char in base for char in "/?#@"):
         raise ConfigError(f"MCP allowed host is invalid: {value!r}")
     parsed = urlparse(f"//{base}")
     if not parsed.hostname or parsed.username or parsed.password or parsed.path:
         raise ConfigError(f"MCP allowed host is invalid: {value!r}")
     try:
-        parsed.port
+        _ = parsed.port  # Accessing the property validates a present port.
     except ValueError as exc:
         raise ConfigError(f"MCP allowed host has an invalid port: {value!r}") from exc
 
@@ -353,7 +353,7 @@ def _validate_mcp_allowed_origin(value: str) -> None:
     if "*" in value and not value.endswith(":*"):
         raise ConfigError("MCP allowed origins support only a terminal :* port wildcard")
 
-    base = value[:-2] if value.endswith(":*") else value
+    base = value.removesuffix(":*")
     if "*" in base:
         raise ConfigError(f"MCP allowed origin is invalid: {value!r}")
     parsed = urlparse(base)
@@ -369,7 +369,7 @@ def _validate_mcp_allowed_origin(value: str) -> None:
     ):
         raise ConfigError(f"MCP allowed origin must be an http(s) origin: {value!r}")
     try:
-        parsed.port
+        _ = parsed.port  # Accessing the property validates a present port.
     except ValueError as exc:
         raise ConfigError(f"MCP allowed origin has an invalid port: {value!r}") from exc
 
@@ -501,16 +501,16 @@ def update_config(
     """
     unknown = set(updates) - EDITABLE_FIELDS
     if unknown:
-        raise ConfigError(f"Unknown or non-editable setting: {sorted(unknown)[0]}")
+        raise ConfigError(f"Unknown or non-editable setting: {min(unknown)}")
     env_attrs = {attr for env, attr in ENV_MAP.items() if env in os.environ}
     overridden = set(updates) & env_attrs
     if overridden:
-        raise ConfigError(f"Setting is controlled by environment: {sorted(overridden)[0]}")
+        raise ConfigError(f"Setting is controlled by environment: {min(overridden)}")
 
     current = load_settings()
-    if "qdrant_url" in updates and updates["qdrant_url"] != current.qdrant_url:
-        if confirm_qdrant != updates["qdrant_url"]:
-            raise ConfigError("Qdrant URL change requires typed confirmation of the new URL")
+    if ("qdrant_url" in updates and updates["qdrant_url"] != current.qdrant_url
+            and confirm_qdrant != updates["qdrant_url"]):
+        raise ConfigError("Qdrant URL change requires typed confirmation of the new URL")
 
     candidate = Settings(**{
         name: getattr(current, name)

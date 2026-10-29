@@ -80,6 +80,11 @@ pip install -e ".[dev]"
 pytest -q
 ```
 
+The dev extra includes the image/PDF libraries required by the visual fixture
+tests. Add the `mcp` and `code` extras when running the complete HTTP, OAuth
+and parser coverage: `pip install -e ".[dev,mcp,code]"`.
+
+
 Hermetic — no Ollama, no network, no shared `~/.vecgrep`. Every test
 gets its own `VECGREP_HOME` under `tmp_path` and a deterministic stub
 embedding backend (see `tests/conftest.py`). Coverage spans the service
@@ -87,3 +92,16 @@ layer, BM25 store, adapters, embedding cache, export/import, and
 backend/model migration — i.e. the surfaces where shipped bugs have
 historically lived. New extension points (adapters, chunkers, embed
 backends) should land with a unit test in the matching `test_*.py`.
+
+## Lint
+
+Install the dev extra and run `ruff check .`. The dev extra pins Ruff to the
+validated minor release so the gate does not depend on a developer's global
+tool version. The only excluded Python source is
+`tests/fixtures/code_symbols/broken.py`, deliberately invalid input used by
+the parser-failure tests.
+
+Broad exception handlers are retained only at documented backend, worker,
+cleanup and protocol boundaries. Their local annotations preserve established
+failure isolation and error responses; new ordinary application code should
+catch the errors it can handle.

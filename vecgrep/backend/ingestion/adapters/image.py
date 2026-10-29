@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
+from ..visual_queue import VisualQueue, enabled
 from .base import Adapter, AdapterError, Document
 from .registry import register_adapter
-from ..visual_queue import VisualQueue, enabled
 
 
 @register_adapter

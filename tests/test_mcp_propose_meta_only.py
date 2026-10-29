@@ -5,6 +5,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -36,7 +37,7 @@ def test_meta_only_edit_keeps_body_and_sets_tags(home):
     assert "unchanged body" in out["preview"]
     assert "tags: [ops, runbook]" in out["preview"]
     h = os.environ["VECGREP_HOME"]
-    pend = json.loads(open(glob.glob(f"{h}/write/_pending/*.json")[0]).read())
+    pend = json.loads(Path(glob.glob(f"{h}/write/_pending/*.json")[0]).read_text())
     assert pend["meta"].get("meta_only") is True
     # The marker is routing metadata, never rendered frontmatter.
     assert "meta_only" not in pend["rendered"]

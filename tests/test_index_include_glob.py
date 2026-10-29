@@ -21,7 +21,7 @@ def test_include_glob_restricts_directory_walk(svc, tmp_path):
         '{"author": "fed", "content": "Labor data softened in the spring."}'
     )
 
-    docs, chunks, _ = svc.index(str(d), "md_only", include="*.md")
+    docs, _unused_chunks, _ = svc.index(str(d), "md_only", include="*.md")
     assert docs == 2, f"expected only the 2 .md files, indexed {docs}"
 
     # Every indexed source must be a .md — no .jsonl leaked in.

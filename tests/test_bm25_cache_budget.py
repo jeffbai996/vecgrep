@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pickle
 
-from vecgrep.backend.store.bm25_store import BM25Store, DEFAULT_CACHE_BYTES
+from vecgrep.backend.store.bm25_store import DEFAULT_CACHE_BYTES, BM25Store
 
 
 def _corpus(store: BM25Store, name: str, filler_bytes: int) -> None:

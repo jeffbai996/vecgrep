@@ -58,7 +58,7 @@ def test_full_overwrite(home):
     r = json.loads(S._run_direct_edit(doc_id, content="totally new body"))
     assert "error" not in r, r
     assert r["committed"] is True
-    body = open(r["path"]).read()
+    body = Path(r["path"]).read_text()
     assert "totally new body" in body
     assert "original body text here" not in body
     # frontmatter survives an edit
@@ -74,7 +74,7 @@ def test_backup_kept_before_overwrite(home):
     assert "error" not in r, r
     baks = glob.glob(f"{os.environ['VECGREP_HOME']}/write/external/{doc_id}.md.bak*")
     assert len(baks) == 1, baks
-    assert "precious original" in open(baks[0]).read()
+    assert "precious original" in Path(baks[0]).read_text()
 
 
 # ── surgical patch ───────────────────────────────────────────────────────────
@@ -87,7 +87,7 @@ def test_edit_stamps_edited_at(home):
     doc_id = _seed("before")
     r = json.loads(S._run_direct_edit(doc_id, content="after"))
     assert "error" not in r, r
-    body = open(r["path"]).read()
+    body = Path(r["path"]).read_text()
     assert "edited_at:" in body
 
 
@@ -96,7 +96,7 @@ def test_patch_mode(home):
     doc_id = _seed("alpha beta gamma")
     r = json.loads(S._run_direct_edit(doc_id, old_str="beta", new_str="DELTA"))
     assert "error" not in r, r
-    body = open(r["path"]).read()
+    body = Path(r["path"]).read_text()
     assert "alpha DELTA gamma" in body
 
 
@@ -137,6 +137,7 @@ def test_needs_content_or_patch(home):
 def test_no_corpus_parameter(home):
     """Same reasoning as direct write: an absent parameter can't be argued around."""
     import inspect
+
     from vecgrep.mcp import server as S
     assert "corpus" not in inspect.signature(S._run_direct_edit).parameters
 
@@ -191,6 +192,7 @@ def test_refuses_corpus_with_writethrough(home, monkeypatch):
 
 def test_no_delete_capability(home):
     import inspect
+
     from vecgrep.mcp import server as S
     params = inspect.signature(S._run_direct_edit).parameters
     for forbidden in ("delete", "delete_id", "remove"):
@@ -204,12 +206,12 @@ def test_protected_doc_refused(home):
     from vecgrep.mcp import server as S
     doc_id = _seed("guard this")
     p = f"{os.environ['VECGREP_HOME']}/write/external/{doc_id}.md"
-    s = open(p).read().replace("tier: normal", "tier: protected")
-    open(p, "w").write(s)
+    s = Path(p).read_text().replace("tier: normal", "tier: protected")
+    Path(p).write_text(s)
     r = json.loads(S._run_direct_edit(doc_id, content="should not land"))
     assert "error" in r and "protected" in r["error"].lower()
-    assert "guard this" in open(p).read()
+    assert "guard this" in Path(p).read_text()
 
 
 def _body_on_disk(doc_id: str) -> str:
-    return open(f"{os.environ['VECGREP_HOME']}/write/external/{doc_id}.md").read()
+    return Path(f"{os.environ['VECGREP_HOME']}/write/external/{doc_id}.md").read_text()

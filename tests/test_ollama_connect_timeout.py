@@ -10,9 +10,6 @@ time out in ~1-2s; the read phase can stay long (big embed batches are slow).
 """
 from __future__ import annotations
 
-import httpx
-import pytest
-
 from vecgrep.backend.embed.ollama import OllamaBackend
 
 

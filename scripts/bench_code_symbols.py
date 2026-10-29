@@ -93,8 +93,8 @@ def run(parse: bool, symbols_first: bool = False, repeats: int = 50) -> dict:
             else:
                 span_exact = False
 
-            def hit(query: str) -> tuple[bool, float | None]:
-                f, c, a, b = top(query)
+            def hit(query: str, *, name: str = name, first: int = first, last: int = last) -> tuple[bool, float | None]:
+                f, _unused_c, a, b = top(query)
                 ok = f == name and a <= first and b >= min(last, first)
                 return ok, ((b - a + 1) / (last - first + 1) if ok else None)
 
@@ -102,26 +102,26 @@ def run(parse: bool, symbols_first: bool = False, repeats: int = 50) -> dict:
             simple = qual.split(".")[-1]
             unique = names.count(simple) == 1
             n_ok = hit(simple)[0] if unique else None
-            rows.append(dict(file=name, symbol=qual, owned=bool(owned), covered=bool(owned) or nested,
-                             span_exact=span_exact, qualified_hit=q_ok, noise=noise,
-                             name_hit=n_ok))
+            rows.append({"file": name, "symbol": qual, "owned": bool(owned), "covered": bool(owned) or nested,
+                             "span_exact": span_exact, "qualified_hit": q_ok, "noise": noise,
+                             "name_hit": n_ok})
     total = len(rows)
     hits = [r for r in rows if r["qualified_hit"]]
     uniques = [r for r in rows if r["name_hit"] is not None]
-    return dict(
-        symbols=total,
-        coverage=sum(r["covered"] for r in rows),
-        owned=sum(r["owned"] for r in rows),
-        span_exact=sum(r["span_exact"] for r in rows),
-        qualified_at_1=sum(r["qualified_hit"] for r in rows),
-        name_at_1=f"{sum(r['name_hit'] for r in uniques)}/{len(uniques)}",
-        noise=round(sum(r["noise"] for r in hits) / len(hits), 2) if hits else None,
-        parse_failures=parse_failures,
-        content_kept=content_kept,
-        chunks=len(corpus),
-        ms_per_file=round(ms_per_file, 3),
-        rows=rows,
-    )
+    return {
+        "symbols": total,
+        "coverage": sum(r["covered"] for r in rows),
+        "owned": sum(r["owned"] for r in rows),
+        "span_exact": sum(r["span_exact"] for r in rows),
+        "qualified_at_1": sum(r["qualified_hit"] for r in rows),
+        "name_at_1": f"{sum(r['name_hit'] for r in uniques)}/{len(uniques)}",
+        "noise": round(sum(r["noise"] for r in hits) / len(hits), 2) if hits else None,
+        "parse_failures": parse_failures,
+        "content_kept": content_kept,
+        "chunks": len(corpus),
+        "ms_per_file": round(ms_per_file, 3),
+        "rows": rows,
+    }
 
 
 def main() -> int:
@@ -134,7 +134,7 @@ def main() -> int:
             "noise", "parse_failures", "content_kept", "chunks", "ms_per_file"]
     print(f"{'metric':<16}" + "".join(f"{name:>13}" for name in results))
     for key in keys:
-        print(f"{key:<16}" + "".join(f"{str(r[key]):>13}" for r in results.values()))
+        print(f"{key:<16}" + "".join(f"{r[key]!s:>13}" for r in results.values()))
     print()
     print("per symbol: Q = qualified@1 hit, S = exact span, O = owns a chunk")
     flag = lambda r: ("Q" if r["qualified_hit"] else "-") + ("S" if r["span_exact"] else "-") + ("O" if r["owned"] else "-")

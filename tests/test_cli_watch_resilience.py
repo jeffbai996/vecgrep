@@ -47,9 +47,8 @@ def test_keyboard_interrupt_still_propagates(tmp_path: Path) -> None:
     """Ctrl+C must stop the watcher — the guard is for failures, not intent."""
     p = _file(tmp_path)
     m._WATCH_SEEN_HASHES.clear()
-    with patch.object(m, "_do_index", side_effect=KeyboardInterrupt):
-        with pytest.raises(KeyboardInterrupt):
-            m._watch_index_resilient(p, "c", "auto", None)
+    with patch.object(m, "_do_index", side_effect=KeyboardInterrupt), pytest.raises(KeyboardInterrupt):
+        m._watch_index_resilient(p, "c", "auto", None)
 
 
 def test_successful_index_reports_clean(tmp_path: Path) -> None:

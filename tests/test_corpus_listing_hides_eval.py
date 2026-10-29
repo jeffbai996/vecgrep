@@ -17,8 +17,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 
 class TestTheHiddenPredicate:
     def test_eval_prefixed_corpora_are_hidden(self, svc):

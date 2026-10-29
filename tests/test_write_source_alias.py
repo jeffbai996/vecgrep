@@ -76,7 +76,7 @@ def any_bm25_svc(request, vg_home, stub_backend, monkeypatch):
     yield svc
     try:
         svc.store.client.close()
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 -- Test cleanup must not mask the alias assertions.
         pass
 
 

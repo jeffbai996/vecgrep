@@ -5,7 +5,7 @@ occurrence before ranking — a document shattered into 400 chunks must not get
 from __future__ import annotations
 
 import statistics
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .gold import GoldCase
 
@@ -59,7 +59,7 @@ def _quantile(xs: list[float], q: float) -> float:
     if not xs:
         return 0.0
     xs = sorted(xs)
-    idx = min(len(xs) - 1, max(0, int(round(q * (len(xs) - 1)))))
+    idx = min(len(xs) - 1, max(0, round(q * (len(xs) - 1))))
     return xs[idx]
 
 

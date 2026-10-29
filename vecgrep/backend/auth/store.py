@@ -163,7 +163,7 @@ class TokenStore:
             families = {str(k): dict(v) for k, v in raw.get("families", {}).items()}
             retired = {str(k): dict(v) for k, v in raw.get("retired_legacy", {}).items()}
             key = raw.get("refresh_signing_key")
-        except Exception:
+        except Exception:  # noqa: BLE001 -- A corrupt state snapshot falls back to owner reapproval rather than crashing startup.
             # a corrupt state file must not take the auth server down; it
             # simply means every client re-approves once
             return

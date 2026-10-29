@@ -32,6 +32,7 @@ from vecgrep.mcp.server import _oauth_resource
 
 TEST_APPROVAL = "a" * 40
 FORM_TOKEN_FIELD = "to" + "ken"
+CONFIDENTIAL_CLIENT_AUTH_METHOD = "client_secret_post"
 TAILNET_HEADERS = {
     "X-Forwarded-For": "192.0.2.10",
     "X-Forwarded-Proto": "https",
@@ -436,7 +437,7 @@ def test_registration_capabilities_are_separate_from_consented_token_scopes(
         "redirect_uris": ["https://example.test/callback"],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
-        "token_endpoint_auth_method": "_".join(("client", "secret", "post")),
+        "token_endpoint_auth_method": CONFIDENTIAL_CLIENT_AUTH_METHOD,
     }
     if registered_scope is not None:
         metadata["scope"] = registered_scope

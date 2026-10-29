@@ -12,7 +12,6 @@ from vecgrep.backend.ingestion.adapters.markdown import parse_frontmatter
 from vecgrep.backend.write.confirm import _body_of
 from vecgrep.backend.write.proposal import ProposalError, propose, render_doc
 
-
 _LINE_SEPARATORS = [
     "\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85",
     "\u2028", "\u2029",
@@ -149,7 +148,7 @@ def test_direct_write_returns_clean_error_for_multiline_title(direct_write_home)
 
 
 def test_direct_edit_refuses_whitespace_variant_protected_tier(direct_write_home):
-    home, server = direct_write_home
+    _unused_home, server = direct_write_home
     created = json.loads(server._run_direct_write("guard this"))
     target = Path(created["path"])
     original = target.read_text().replace("tier: normal", "tier:\tprotected")

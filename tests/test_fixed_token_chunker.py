@@ -11,7 +11,6 @@ import pytest
 
 from vecgrep.backend.ingestion.chunkers.fixed_token import FixedTokenChunker
 
-
 DOCS = {
     "prose": "The quick brown fox jumps over the lazy dog. " * 20,
     "code_like": "def f(x):\n    return x+1\n\n" * 25,

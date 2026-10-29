@@ -20,7 +20,12 @@ import json
 import httpx
 import pytest
 
-from vecgrep.backend.config import ConfigError, Settings, load_settings, validate_settings
+from vecgrep.backend.config import (
+    ConfigError,
+    Settings,
+    load_settings,
+    validate_settings,
+)
 from vecgrep.backend.embed import factory
 from vecgrep.backend.embed.ollama import OllamaBackend
 
@@ -81,7 +86,7 @@ def test_single_text_query_stays_on_primary() -> None:
 
 def test_overflow_refusal_sends_the_batch_to_primary_not_zero_vectors() -> None:
     """A switched-off overflow answers 503. That must not become zero vectors."""
-    b, calls = _backend(lambda req: httpx.Response(503, text="gpu in use"))
+    b, _unused_calls = _backend(lambda req: httpx.Response(503, text="gpu in use"))
     out = b.embed(["a", "b"])
     assert out == [PRIMARY_VEC] * 2
     assert [0.0] * DIM not in out
@@ -127,7 +132,7 @@ def test_overflow_is_retried_after_the_cooldown() -> None:
     def flaky(req):
         return _rows(req, OVERFLOW_VEC) if state["up"] else httpx.Response(503)
 
-    b, calls = _backend(flaky, clock=clock)
+    b, _unused_calls = _backend(flaky, clock=clock)
     b.embed(["a", "b"])
     state["up"] = True
     clock.now += b.overflow_cooldown_s + 1

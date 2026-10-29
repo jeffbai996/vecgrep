@@ -70,7 +70,7 @@ def test_expand_ascii_needs_word_boundary() -> None:
 
 def test_expand_cjk_matches_by_containment() -> None:
     # CJK has no word boundaries — containment is the right test.
-    q, matched = expand_query("今天小艾说了什么", MAP)
+    _unused_q, matched = expand_query("今天小艾说了什么", MAP)
     assert matched == ["alice"]
 
 

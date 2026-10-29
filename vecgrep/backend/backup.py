@@ -20,17 +20,21 @@ import threading
 import time
 import uuid
 import zipfile
-from dataclasses import asdict
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Callable, Iterator
 
 import httpx
 
 from .. import __version__
-from .config import EDITABLE_FIELDS, SECRET_FIELDS, Settings, _atomic_write_json, _load_json
+from .config import (
+    EDITABLE_FIELDS,
+    SECRET_FIELDS,
+    Settings,
+    _atomic_write_json,
+    _load_json,
+)
 from .service import VecgrepService, _collection_for
-from .store import CorpusError
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +148,7 @@ class QdrantSnapshots:
         # corpus is simply float32 again.
         try:
             dtype = self.service.registry.get(corpus).datatype
-        except Exception:
+        except Exception:  # noqa: BLE001 -- Backup rollback and cleanup must contain arbitrary storage-provider failures.
             dtype = "float32"
         self.service.store.ensure_collection(collection, dim, datatype=dtype)
         ids: list[str] = []
@@ -303,7 +307,7 @@ class BackupManager:
                 if service is not None:
                     try:
                         self._release_service(service)
-                    except Exception:
+                    except Exception:  # noqa: BLE001, S110 -- Backup rollback and cleanup must contain arbitrary storage-provider failures.
                         pass
         return destination
 
@@ -366,7 +370,7 @@ class BackupManager:
                 rollback = self.verify(safety)
                 try:
                     self._restore_verified(safety, rollback)
-                except Exception as rollback_exc:
+                except Exception as rollback_exc:  # noqa: BLE001 -- Backup rollback and cleanup must contain arbitrary storage-provider failures.
                     raise BackupError(
                         f"restore failed ({exc}); automatic rollback also failed ({rollback_exc})"
                     ) from exc
@@ -393,7 +397,7 @@ class BackupManager:
 
             try:
                 self._release_service(service, replace=True)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 -- Backup rollback and cleanup must contain arbitrary storage-provider failures.
                 pass
 
             current_config = _load_json(self.settings.config_file)
@@ -442,7 +446,7 @@ class BackupManager:
             issues = service.diagnose()
             try:
                 self._release_service(service, replace=True)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 -- Backup rollback and cleanup must contain arbitrary storage-provider failures.
                 pass
         return {"restored": manifest["backup_id"], "issues": issues}
 
@@ -498,6 +502,6 @@ class BackupScheduler:
         while not stop.wait(30):
             try:
                 self.run_if_due()
-            except Exception:
+            except Exception:  # noqa: BLE001, S112 -- Backup rollback and cleanup must contain arbitrary storage-provider failures.
                 # Server logging owns surfacing; a failed run is retried next poll.
                 continue

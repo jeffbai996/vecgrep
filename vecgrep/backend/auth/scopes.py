@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-
 VALID_SCOPES = ("read", "propose")
 DEFAULT_SCOPES = ("read",)
 

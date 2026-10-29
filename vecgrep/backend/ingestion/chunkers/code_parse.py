@@ -25,7 +25,7 @@ class Symbol:
     end_line: int             # 1-based, inclusive
     parent: str | None = None
     exported: bool = False
-    children: list["Symbol"] = field(default_factory=list)
+    children: list[Symbol] = field(default_factory=list)
 
     def walk(self):
         yield self
@@ -82,7 +82,7 @@ def _parse_python(text: str) -> ParsedFile | None:
     try:
         # ast.parse drops a byte order mark from bytes but refuses one in a
         # str. It is one character on line 1, so line numbers do not move.
-        tree = ast.parse(text[1:] if text.startswith("﻿") else text)
+        tree = ast.parse(text.removeprefix("﻿"))
     except (SyntaxError, ValueError):
         return None
     lines = _split_lines(text, _PY_NEWLINE)

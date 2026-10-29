@@ -96,6 +96,7 @@ def test_corrupt_registry_raises_instead_of_wiping(tmp_path):
     dropping every corpus. The recurring "corpora vanished" bug. Loading a
     corrupt file raises so the mutation aborts and disk data survives."""
     import pytest
+
     from vecgrep.backend.store.corpora import CorpusError
 
     path = tmp_path / "corpora.json"

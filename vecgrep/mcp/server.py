@@ -41,7 +41,6 @@ import json
 from dataclasses import asdict
 from typing import Any, Literal
 
-
 # --- MCP server icon (SEP-973) ------------------------------------------
 # A lens over scattered points: nearest-neighbour search in a vector space.
 # Teal #56d4bc, chosen to stay legible on both light and dark (this SDK
@@ -120,14 +119,14 @@ def _close_svc(svc: VecgrepService) -> None:
     qdrant (holds a dir lock + noisy destructor at interpreter shutdown)."""
     try:
         svc.store.client.close()
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 -- Tool and optional metadata failures are converted to their established protocol results.
         pass
 
 
 def _svc() -> VecgrepService:
     global _SVC
-    from ..backend.config import get_settings
     from ..backend.api import routes as _routes
+    from ..backend.config import get_settings
 
     settings = get_settings()
     key = id(settings)
@@ -140,9 +139,8 @@ def _svc() -> VecgrepService:
             and _SVC[1] is not _routes._SERVICE
         )
     ):
-        if _SVC is not None:
-            if _routes._SERVICE is None or _SVC[1] is not _routes._SERVICE:
-                _close_svc(_SVC[1])  # settings changed — release the old handles
+        if _SVC is not None and (_routes._SERVICE is None or _SVC[1] is not _routes._SERVICE):
+            _close_svc(_SVC[1])  # settings changed — release the old handles
         if _routes._SERVICE is not None and _routes._SERVICE.settings is settings:
             service = _routes._SERVICE
         else:
@@ -181,6 +179,7 @@ def _require_remote_scope(required: str) -> str | None:
 
 
 import atexit as _atexit
+
 _atexit.register(lambda: _reset_service_cache())
 
 
@@ -292,7 +291,7 @@ def _should_rerank(svc, args: dict) -> bool:
         if not name:
             return _fanout_chunk_count(svc, args) >= RERANK_AUTO_MIN_POINTS
         return _corpus_chunk_counts(svc).get(name, 0) >= RERANK_AUTO_MIN_POINTS
-    except Exception:
+    except Exception:  # noqa: BLE001 -- Tool and optional metadata failures are converted to their established protocol results.
         return False
 
 
@@ -322,31 +321,35 @@ def _should_budget(svc, args: dict) -> bool:
         if not name:
             return False
         return _corpus_chunk_counts(svc).get(name, 0) >= RERANK_AUTO_MIN_POINTS
-    except Exception:
+    except Exception:  # noqa: BLE001 -- Tool and optional metadata failures are converted to their established protocol results.
         return False
 
 
 def _run_search(args: dict) -> str:
-    from .search_policy import (resolve_search, bounded_payload,
-                               DEFAULT_RESPONSE_TOKEN_CEILING, lookup_evidence_status)
+    from .search_policy import (
+        DEFAULT_RESPONSE_TOKEN_CEILING,
+        bounded_payload,
+        lookup_evidence_status,
+        resolve_search,
+    )
 
     explicit_top_k = args.get("top_k") is not None
     args = resolve_search(args)
     svc = _svc()
-    common = dict(
-        corpus_name=args.get("corpus"),
-        corpus_names=args.get("corpora"),
-        mode=args.get("mode", "hybrid"),
-        rerank=_should_rerank(svc, args),
-        filters=args.get("filters") or None,
+    common = {
+        'corpus_name': args.get("corpus"),
+        'corpus_names': args.get("corpora"),
+        'mode': args.get("mode", "hybrid"),
+        'rerank': _should_rerank(svc, args),
+        'filters': args.get("filters") or None,
         # Superseded versions are hidden by default (a stale revision is not
         # current truth). Reading history is the one legitimate reason to want
         # them, and it was the only search flag the MCP layer never exposed.
-        include_superseded=bool(args.get("include_superseded") or False),
+        'include_superseded': bool(args.get("include_superseded") or False),
         # Bots use the raw retriever breakdown to interpret a blended display
         # score. It is assembled from scores already in hand; no extra search.
-        explain=True,
-    )
+        'explain': True,
+    }
     if _should_budget(svc, args):
         # Breadth mode: full head + one-line stub tail under a token ceiling.
         # Stubs carry chunk_id — expand any of them with the get_chunk tool.
@@ -485,7 +488,7 @@ def _run_related(args: dict) -> str:
         results = svc.related(
             args["chunk_id"], args["corpus"], top_k=int(args.get("top_k") or 8)
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- Tool and optional metadata failures are converted to their established protocol results.
         return json.dumps({"error": str(e)})
     return json.dumps(
         [_result_payload(r) for r in results], indent=2, ensure_ascii=False
@@ -505,7 +508,7 @@ def _run_compare(args: dict) -> str:
             b_before=args.get("b_before"),
             top_k=int(args.get("top_k") or 8),
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- Tool and optional metadata failures are converted to their established protocol results.
         return json.dumps({"error": str(e)})
     out["a"]["results"] = [_result_payload(r) for r in out["a"]["results"]]
     out["b"]["results"] = [_result_payload(r) for r in out["b"]["results"]]
@@ -518,7 +521,7 @@ def _run_stats(args: dict) -> str:
     try:
         return json.dumps(svc.corpus_stats(args["corpus"]), indent=2,
                           ensure_ascii=False)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- Tool and optional metadata failures are converted to their established protocol results.
         return json.dumps({"error": str(e)})
 
 
@@ -535,7 +538,7 @@ def _run_summarize(args: dict) -> str:
             ),
             indent=2, ensure_ascii=False,
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- Tool and optional metadata failures are converted to their established protocol results.
         return json.dumps({"error": str(e)})
 
 
@@ -607,6 +610,7 @@ def _run_get_corpus(name: str) -> str:
 # corpus for agent-contributed entries keeps them separate from human-authored
 # and ingested corpora. Override with VECGREP_DEFAULT_PROPOSE_CORPUS.
 import os as _os
+
 DEFAULT_PROPOSE_CORPUS = _os.environ.get(
     "VECGREP_DEFAULT_PROPOSE_CORPUS", "claude-ai")
 
@@ -659,7 +663,7 @@ def _corpus_doc_dir(corpus: str):
                 d = Path(c.sources[0]).parent
                 if d.is_dir():
                     return d
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 -- Tool and optional metadata failures are converted to their established protocol results.
         pass
     return wd
 
@@ -988,7 +992,6 @@ def _run_direct_write(content: str, source_kind: str | None = None,
 
     Stamped `origin: agent-direct` so an audit can always tell an unreviewed
     write from a human-confirmed one."""
-    from ..backend.write import proposal as _P
 
     denied = _require_remote_scope("propose")
     if denied:
@@ -1046,7 +1049,8 @@ def _commit_direct_write(corpus: str, content: str, title: str | None,
                 f"for {corpus!r}). This is runaway-loop protection; wait, or raise "
                 f"VECGREP_DIRECT_WRITE_MAX_PER_HOUR.")})
 
-        from datetime import datetime as _datetime, timezone as _timezone
+        from datetime import datetime as _datetime
+        from datetime import timezone as _timezone
 
         corpus_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
@@ -1229,7 +1233,6 @@ def _run_direct_edit(doc_id: str, content: str | None = None,
 
     Deletes are deliberately absent: propose_delete stays the only route, for
     every corpus. Losing an entry should always cross a human."""
-    from ..backend.write import proposal as _P
 
     denied = _require_remote_scope("propose")
     if denied:
@@ -1326,7 +1329,8 @@ def _commit_direct_edit(corpus: str, doc_id: str, content: str | None,
         # an unreviewed edit touched it (and when) for audit. Render before the
         # backup so invalid legacy metadata leaves no mutation or backup debris.
         meta.update({"corpus": corpus, "origin": "agent-direct"})
-        from datetime import datetime as _datetime, timezone as _timezone
+        from datetime import datetime as _datetime
+        from datetime import timezone as _timezone
         meta["edited_at"] = _datetime.now(_timezone.utc).isoformat(timespec="seconds")
         try:
             rendered = _P.render_doc(doc_id, new_body, meta)
@@ -1358,6 +1362,7 @@ def _commit_direct_edit(corpus: str, doc_id: str, content: str | None,
 def _direct_edit_target(corpus_dir, doc_id: str):
     """Return one canonical, regular, non-symlink Markdown doc in corpus_dir."""
     from pathlib import Path
+
     from ..backend.write.proposal import _ID_RE
 
     if not _ID_RE.fullmatch(doc_id):
@@ -1437,8 +1442,8 @@ def _fire_propose_hook(pr) -> None:
         subprocess.run(
             hook, shell=True, input=payload, text=True,
             timeout=10, capture_output=True,
-        )
-    except Exception:
+         check=False)
+    except Exception:  # noqa: BLE001, S110 -- Tool and optional metadata failures are converted to their established protocol results.
         # Notification is a nicety; the write path's correctness does not
         # depend on it. Swallow everything.
         pass
@@ -2032,7 +2037,7 @@ def build_mcp_server() -> Any:
                 text = _run_get_corpus(args.get("name", ""))
             else:
                 text = json.dumps({"error": f"unknown tool: {name}"})
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- Tool and optional metadata failures are converted to their established protocol results.
             from ..backend.embed.base import EmbedBackendError
             from ..backend.store.qdrant_store import SearchBackendError
             if isinstance(exc, (EmbedBackendError, SearchBackendError)):
@@ -2167,16 +2172,18 @@ def _shared_provider(oauth_issuer_url: str | None = None):
 
 def _oauth_issuer(issuer_url: str):
     """Auth-server issuer = the ORIGIN ROOT (strip any /mcp path)."""
-    from pydantic import AnyHttpUrl
     from urllib.parse import urlsplit
+
+    from pydantic import AnyHttpUrl
     p = urlsplit(issuer_url)
     return AnyHttpUrl(f"{p.scheme}://{p.netloc}")
 
 
 def _oauth_resource(issuer_url: str):
     """Protected resource = the exact public MCP endpoint, prefix included."""
-    from pydantic import AnyHttpUrl
     from urllib.parse import urlsplit
+
+    from pydantic import AnyHttpUrl
     p = urlsplit(issuer_url)
     path = p.path.rstrip("/") or "/mcp"
     return AnyHttpUrl(f"{p.scheme}://{p.netloc}{path}")
@@ -2187,8 +2194,9 @@ def _mcp_transport_security(
     additional_hosts: list[str] | None,
     additional_origins: list[str] | None,
 ):
-    from mcp.server.fastmcp.server import TransportSecuritySettings
     from urllib.parse import urlsplit
+
+    from mcp.server.fastmcp.server import TransportSecuritySettings
 
     local_hosts = [
         "localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*",
@@ -2217,6 +2225,7 @@ def _oauth_client_reg():
     """Dynamic Client Registration (RFC 7591): claude.ai self-registers instead
     of needing a pre-shared client_id."""
     from mcp.server.auth.settings import ClientRegistrationOptions
+
     from ..backend.auth.scopes import VALID_SCOPES
     return ClientRegistrationOptions(
         enabled=True,
@@ -2234,8 +2243,10 @@ def build_oauth_root_routes(oauth_issuer_url: str) -> list:
     claude.ai looks. Shares the provider with the /mcp bearer gate."""
     _require_mcp()
     from mcp.server.auth.routes import (
-        create_auth_routes, create_protected_resource_routes,
+        create_auth_routes,
+        create_protected_resource_routes,
     )
+
     from ..backend.auth.scopes import VALID_SCOPES
     issuer = _oauth_issuer(oauth_issuer_url)
     resource = _oauth_resource(oauth_issuer_url)
@@ -2299,6 +2310,7 @@ def _trace_oauth(route):
     the wrong shape 500s the route (it did, 2026-08-22)."""
     import inspect
     import os
+
     from starlette.routing import Route
     if os.environ.get("VECGREP_OAUTH_TRACE", "").strip() != "1":
         return route
@@ -2526,7 +2538,7 @@ class _LoopbackResourceMetadata:
                     resource_path = "/" + resource_path.split("/", 1)[1] if "/" in resource_path else "/mcp"
                     meta["resource"] = f"http://{server_host}:{server_port}{resource_path}"
                     body = _json.dumps(meta).encode()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 -- Tool and optional metadata failures are converted to their established protocol results.
                 pass
         headers = [(k, v) for k, v in start.get("headers", []) if k.lower() != b"content-length"]
         headers.append((b"content-length", str(len(body)).encode()))
@@ -2560,7 +2572,7 @@ class _PublicClientMetadata:
             if "none" not in methods:
                 meta["token_endpoint_auth_methods_supported"] = ["none", *methods]
             body = _json.dumps(meta).encode()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 -- Tool and optional metadata failures are converted to their established protocol results.
             pass
         headers = [(k, v) for k, v in start.get("headers", []) if k.lower() != b"content-length"]
         headers.append((b"content-length", str(len(body)).encode()))

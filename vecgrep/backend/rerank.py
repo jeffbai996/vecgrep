@@ -18,10 +18,10 @@ import json
 import logging
 import math
 import os
-from collections import OrderedDict
-from pathlib import Path
 import threading
 import time
+from collections import OrderedDict
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -218,7 +218,7 @@ def _release_cuda_cache() -> None:
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    except Exception:  # noqa: BLE001 -- releasing memory must never fail a search
+    except Exception:  # noqa: BLE001, S110 -- External model and process failures cross this worker boundary as explicit error results.
         pass
 
 
@@ -331,7 +331,7 @@ def _worker_main(
     try:
         try:
             model = _construct_model(model_name)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- External model and process failures cross this worker boundary as explicit error results.
             connection.send(("load-error", type(exc).__name__, str(exc)))
             return
         connection.send(("ready",))
@@ -350,7 +350,7 @@ def _worker_main(
             try:
                 raw = _predict_length_grouped(model, query, texts, batch_size=batch_size)
                 scores = [float(score) for score in raw]
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 -- External model and process failures cross this worker boundary as explicit error results.
                 connection.send(("error", type(exc).__name__, str(exc)))
                 return
             finally:
@@ -560,7 +560,7 @@ class _WorkerClient:
                 raise RerankerError(detail or "reranker worker failed to load")
             self._mark_ready()
             logger.info("reranker worker %s ready pid=%s", self.model_name, process.pid)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- External model and process failures cross this worker boundary as explicit error results.
             logger.warning("reranker worker %s failed to start: %s", self.model_name, exc)
             if parent_connection is not None:
                 try:
@@ -725,7 +725,7 @@ def ensure_warm(model_name: str = DEFAULT_RERANKER) -> threading.Event:
         try:
             _load(model_name)
             logger.info("reranker %s ready", model_name)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- External model and process failures cross this worker boundary as explicit error results.
             with _lock:
                 _failed_at[model_name] = time.monotonic()
             logger.warning("reranker %s failed to load: %s", model_name, exc)
@@ -760,7 +760,7 @@ def wait_ready(
     return is_ready(model_name)
 
 
-_score_cache: "OrderedDict[str, float]" = OrderedDict()
+_score_cache: OrderedDict[str, float] = OrderedDict()
 _score_lock = threading.Lock()
 
 

@@ -115,7 +115,7 @@ class GoogleBearerRegistry:
                         changed = True
                 if changed:
                     self._write(bearers, now)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- Registry failures retain the logged auth-boundary error contract.
             log.error("Google bearer registry was not updated: %s", exc)
 
     def lookup(self, key: str, now: float | None = None) -> dict | None:
@@ -124,7 +124,7 @@ class GoogleBearerRegistry:
         try:
             with self._locked():
                 entry = self._read().get(key)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- Registry failures retain the logged auth-boundary error contract.
             log.error("Google bearer registry was not read: %s", exc)
             return None
         if (not isinstance(entry, dict) or entry.get("revoked_at") is not None
@@ -136,7 +136,7 @@ class GoogleBearerRegistry:
         try:
             with self._locked():
                 entry = self._read().get(key)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- Registry failures retain the logged auth-boundary error contract.
             log.error("Google bearer registry was not read: %s", exc)
             return False
         return isinstance(entry, dict) and entry.get("revoked_at") is not None
@@ -166,5 +166,5 @@ class GoogleBearerRegistry:
                         changed = True
                 if changed:
                     self._write(bearers, now)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- Registry failures retain the logged auth-boundary error contract.
             log.error("Google bearer registry revocation was not written: %s", exc)

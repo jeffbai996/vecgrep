@@ -8,10 +8,6 @@ cache looking cold and eviction would pick victims at random.
 """
 from __future__ import annotations
 
-import sqlite3
-
-from vecgrep.backend.embed.cache import EmbedCache
-
 
 def test_service_flush_persists_pending_touches(tmp_path, monkeypatch):
     from vecgrep.backend.service import VecgrepService

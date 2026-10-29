@@ -13,8 +13,9 @@ import importlib.util
 import json
 import math
 import os
-from pathlib import Path
 import platform
+from pathlib import Path
+
 try:
     import resource
 except ImportError:  # Windows has no stdlib resource module.
@@ -83,7 +84,7 @@ def load_cases(path):
         raise ValueError("fixture exceeds 8 MiB budget")
     cases = json.loads(raw)["cases"]
     if not isinstance(cases, list):
-        raise ValueError("cases must be a list")
+        raise ValueError("cases must be a list")  # noqa: TRY004 -- Malformed benchmark content uses one ValueError contract.
     if not 1 <= len(cases) <= 50:
         raise ValueError("use 1..50 frozen cases")
     ids = set()
@@ -93,7 +94,7 @@ def load_cases(path):
             raise ValueError("duplicate case ID")
         ids.add(case["id"])
         if not isinstance(case.get("negative", False), bool):
-            raise ValueError("negative must be boolean")
+            raise ValueError("negative must be boolean")  # noqa: TRY004 -- Malformed benchmark content uses one ValueError contract.
         if any(isinstance(w, bool) or not isinstance(w, (str, int)) for w in case.get("want", [])):
             raise ValueError("want must contain source strings or legacy numeric IDs")
         case["want"] = list(contract._normalize_want(case.get("want", [])))

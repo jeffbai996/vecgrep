@@ -11,7 +11,6 @@ No new retrieval — pure assembly.
 """
 from __future__ import annotations
 
-
 # ── 8a: line anchors ─────────────────────────────────────────────────────────
 
 def test_results_carry_line_ranges(svc, make_doc) -> None:
@@ -37,7 +36,7 @@ def test_anchor_string_format(svc, make_doc) -> None:
     a = h.anchor
     assert a.startswith(h.source_id)
     assert f"#L{h.line_start}" in a
-    assert a.endswith(f"-L{h.line_end}") or a.endswith(f"#L{h.line_start}")
+    assert a.endswith((f"-L{h.line_end}", f"#L{h.line_start}"))
 
 
 def test_eval_fixture_lines_are_plausible(svc) -> None:

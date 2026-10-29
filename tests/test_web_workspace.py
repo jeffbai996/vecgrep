@@ -9,7 +9,6 @@ from pydantic import ValidationError
 from vecgrep.backend.api import routes
 from vecgrep.backend.api.schemas import BrowseRequest, IncidentRequest, SearchRequest
 
-
 FRONTEND = Path(__file__).parent.parent / "vecgrep" / "frontend" / "src"
 
 

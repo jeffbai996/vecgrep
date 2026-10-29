@@ -3,8 +3,8 @@ import sqlite3
 
 import pytest
 
-from vecgrep.backend.config import Settings, ConfigError, load_settings
-from vecgrep.backend.service import VecgrepService, CorpusError
+from vecgrep.backend.config import Settings
+from vecgrep.backend.service import CorpusError, VecgrepService
 from vecgrep.backend.store.bm25_sqlite import BM25SqliteStore
 
 

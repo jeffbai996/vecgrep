@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -127,13 +127,13 @@ def test_real_cli_reports_aliases_and_refuses_a_healthy_exit(svc, tmp_path, fix)
     if fix:
         args.append("--fix")
     human = subprocess.run(args, cwd=root, env=env, text=True,
-                           capture_output=True, timeout=30)
+                           capture_output=True, timeout=30, check=False)
     assert human.returncode == 1, human.stderr
     assert "source_path_aliases" in human.stdout
     assert "confirm canonical coverage" in human.stdout
     assert "vecgrep index <source>" not in human.stdout
     machine = subprocess.run([*args, "--json"], cwd=root, env=env, text=True,
-                             capture_output=True, timeout=30)
+                             capture_output=True, timeout=30, check=False)
     assert machine.returncode == 1, machine.stderr
     report = json.loads(machine.stdout)
     assert report["remaining_issues"][0]["kind"] == "source_path_aliases"

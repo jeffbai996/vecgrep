@@ -1,11 +1,8 @@
 """Regression tests for the 2026-10-28 vecgrep scaling audit (Phases 1-3)."""
 from __future__ import annotations
 
-import pytest
-
 from vecgrep.backend.mutation_journal import MutationJournal
 from vecgrep.backend.service import (
-    CANDIDATE_POOL,
     SearchResult,
     _collection_for,
 )

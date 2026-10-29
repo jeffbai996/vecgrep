@@ -3,8 +3,8 @@ import sqlite3
 import httpx
 import pytest
 
-from vecgrep.backend.embed.ollama import OllamaBackend
 from vecgrep.backend.embed.local_usage import record
+from vecgrep.backend.embed.ollama import OllamaBackend
 
 
 @pytest.fixture

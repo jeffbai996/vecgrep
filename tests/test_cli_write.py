@@ -9,6 +9,7 @@ they're immediately searchable.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -33,10 +34,11 @@ def test_write_creates_and_indexes_a_doc(runner_home):
     # ids are nanosecond timestamps now (notes-<digits>), not a serial.
     assert re.search(r"notes-\d+", r.output)  # assigned id reported
     # the markdown doc was written to the corpus dir (files-are-truth)
-    import glob, os as _os
+    import glob
+    import os as _os
     files = glob.glob(f"{_os.environ['VECGREP_HOME']}/write/notes/notes-*.md")
     assert files, "doc file should exist on disk"
-    assert "Cats sit on mats" in open(files[0]).read()
+    assert "Cats sit on mats" in Path(files[0]).read_text()
     # (full semantic-search retrieval needs a live embedder — covered by the
     #  service-layer tests, not this hermetic CLI test.)
 
@@ -50,7 +52,7 @@ def test_write_records_metadata_and_confirmer(runner_home):
     import glob
     files = glob.glob(f"{home}/write/notes/notes-*.md")
     assert files
-    body = open(files[0]).read()
+    body = Path(files[0]).read_text()
     assert "source_kind: decision" in body
     assert "origin: human" in body            # CLI writes are human-origin
     assert "confirmed_by:" in body            # the local user recorded
@@ -67,7 +69,7 @@ def test_edit_overwrites_existing(runner_home):
     r = runner_home.invoke(cli, ["edit", doc_id, "new content"])
     assert r.exit_code == 0, r.output
     f = glob.glob(f"{os.environ['VECGREP_HOME']}/write/notes/{doc_id}.md")[0]
-    body = open(f).read()
+    body = Path(f).read_text()
     assert "new content" in body and "old content" not in body
 
 

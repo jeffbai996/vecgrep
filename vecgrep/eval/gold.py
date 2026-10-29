@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -61,7 +61,7 @@ def _match(pattern: str, source_id: str) -> bool:
     m = _ID_RE.match(pattern)
     if m:
         stem = sid.rsplit("/", 1)[-1]
-        stem = stem[:-3] if stem.endswith(".md") else stem
+        stem = stem.removesuffix(".md")
         return stem == pattern
     return pattern in sid
 

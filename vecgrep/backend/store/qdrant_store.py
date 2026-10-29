@@ -163,7 +163,7 @@ class QdrantStore:
                     field_schema=field_schema,
                     wait=False,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 -- The storage adapter retains its existing missing-item and optional-index error contract.
                 # Embedded local mode or older server builds may ignore or
                 # reject index creation on specific field types; search still
                 # works with unindexed evaluation.
@@ -251,7 +251,7 @@ class QdrantStore:
             return 0
         try:
             return self.client.count(collection_name=name, exact=True).count
-        except Exception:
+        except Exception:  # noqa: BLE001 -- The storage adapter retains its existing missing-item and optional-index error contract.
             with self._lock_for_meta():
                 if getattr(self, "_known_collections", None) is not None:
                     self._known_collections.discard(name)
@@ -351,7 +351,7 @@ class QdrantStore:
             for point in points:
                 vector = point.vector
                 if isinstance(vector, dict):
-                    raise RuntimeError("named-vector collections are unsupported")
+                    raise RuntimeError("named-vector collections are unsupported")  # noqa: TRY004 -- Unsupported backend snapshot shape retains the RuntimeError contract.
                 records.append(
                     {
                         "id": str(point.id),
@@ -465,7 +465,7 @@ class QdrantStore:
                 with_payload=False,
                 with_vectors=True,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 -- The storage adapter retains its existing missing-item and optional-index error contract.
             return None
         if not points or points[0].vector is None:
             return None
@@ -484,7 +484,7 @@ class QdrantStore:
                 with_payload=True,
                 with_vectors=False,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 -- The storage adapter retains its existing missing-item and optional-index error contract.
             return None
         if not points:
             return None
@@ -507,7 +507,7 @@ class QdrantStore:
                 with_payload=True,
                 with_vectors=False,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 -- The storage adapter retains its existing missing-item and optional-index error contract.
             return {}
         return {str(p.id): (p.payload or {}) for p in points}
 

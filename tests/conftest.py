@@ -7,8 +7,8 @@ tmp_path, isolated from any real ~/.vecgrep on the dev box.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 
@@ -108,7 +108,7 @@ def svc(vg_home: Path, stub_backend: StubEmbed) -> Iterator[VecgrepService]:
     # the single-process lock when running in the same pytest session.
     try:
         s.store.client.close()
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 -- Teardown must not mask the test result if a backend close fails.
         pass
 
 

@@ -6,16 +6,16 @@ session lifecycle behaviour is the mcp SDK's responsibility.
 from __future__ import annotations
 
 import json
-from typing import Iterator
+from collections.abc import Iterator
 
 import pytest
 
 pytest.importorskip("mcp")
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from vecgrep.backend import config as cfg_mod  # noqa: E402
-from vecgrep.backend.main import create_app  # noqa: E402
+from vecgrep.backend import config as cfg_mod
+from vecgrep.backend.main import create_app
 
 
 @pytest.fixture

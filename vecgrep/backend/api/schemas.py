@@ -39,7 +39,7 @@ class SearchRequest(BaseModel):
     token_ceiling: int = Field(4000, ge=100, le=20000)
 
     @model_validator(mode="after")
-    def validate_budget_shape(self) -> "SearchRequest":
+    def validate_budget_shape(self) -> SearchRequest:
         if self.full_k > self.max_total:
             raise ValueError("full_k cannot exceed max_total")
         if self.corpus is not None and self.corpora is not None:
@@ -215,7 +215,7 @@ class CorpusContextRequest(BaseModel):
     avoid_for: list[str] = Field(default_factory=list, max_length=8)
 
     @model_validator(mode="after")
-    def validate_hints(self) -> "CorpusContextRequest":
+    def validate_hints(self) -> CorpusContextRequest:
         self.description = self.description.strip()
         self.use_for = [hint.strip() for hint in self.use_for]
         self.avoid_for = [hint.strip() for hint in self.avoid_for]

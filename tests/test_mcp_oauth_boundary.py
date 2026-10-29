@@ -11,15 +11,14 @@ pytest.importorskip("mcp")
 from fastapi.testclient import TestClient
 
 from vecgrep.backend import config as cfg_mod
-from vecgrep.backend.main import create_app
 from vecgrep.backend.auth.ingress import PRIVATE_INGRESS
+from vecgrep.backend.main import create_app
 from vecgrep.mcp import server as mcp_server
 from vecgrep.mcp.server import (
     _has_loopback_server,
     _is_direct_loopback_mcp,
     _is_verified_tailnet_mcp,
 )
-
 
 TEST_ISSUER = "https://example.com:10000/mcp"
 TEST_APPROVAL = "a" * 40
@@ -316,8 +315,9 @@ def test_public_mcp_enforces_token_resource(loopback_client, resource, expected)
 def test_http_code_and_refresh_tokens_initialize_and_list_tools(loopback_client, authorization_resource):
     import base64
     import hashlib
-    import anyio
     from urllib.parse import parse_qs, urlsplit
+
+    import anyio
     from mcp.server.auth.provider import AuthorizationParams
     from mcp.shared.auth import OAuthClientInformationFull
 

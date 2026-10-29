@@ -9,22 +9,22 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from ..config import get_settings
 from ..embed import EmbedBackendError
-from ..store.qdrant_store import SearchBackendError
 from ..ingestion.adapters import AdapterError
 from ..rerank import RerankerError
 from ..service import VecgrepService
 from ..store import CorpusError
+from ..store.qdrant_store import SearchBackendError
 from .schemas import (
-    Calibration,
     BrowseRequest,
+    Calibration,
     ChunkWindow,
     ConfigOut,
     CorpusContextRequest,
     CorpusOut,
     DecayRequest,
+    IncidentRequest,
     IndexRequest,
     IndexResponse,
-    IncidentRequest,
     SearchHit,
     SearchRequest,
     SearchResponse,
@@ -34,7 +34,6 @@ from .schemas import (
     TimelineRequest,
     WeightRequest,
 )
-
 
 # Server-side caps on chunk-window expansion. Keeps a leaked unauthed endpoint
 # from being abused to dump entire huge sources via repeated calls.
@@ -259,13 +258,13 @@ def search(req: SearchRequest) -> SearchResponse:
     svc = _service()
     if req.mode not in ("hybrid", "vector", "bm25"):
         raise HTTPException(status_code=400, detail=f"Unknown search mode: {req.mode}")
-    common = dict(
-        mode=req.mode,
-        rerank=req.rerank,
-        rerank_model=req.rerank_model,
-        filters=req.filters or None,
-        explain=req.explain,
-    )
+    common = {
+        "mode": req.mode,
+        "rerank": req.rerank,
+        "rerank_model": req.rerank_model,
+        "filters": req.filters or None,
+        "explain": req.explain,
+    }
     try:
         if req.budget:
             # Breadth mode: full head + one-line stub tail. Expand a stub via
@@ -400,7 +399,7 @@ def browse(req: BrowseRequest) -> list[dict]:
 @router.get("/explorer/{corpus}")
 def explore_corpus(
     corpus: str,
-    path: list[str] = Query(default=[]),
+    path: list[str] = Query(default=[]),  # noqa: B008 -- FastAPI reads Query metadata at route construction.
     q: str = Query(default="", max_length=200),
     sort: str = Query(default="name"),
     offset: int = Query(default=0, ge=0),

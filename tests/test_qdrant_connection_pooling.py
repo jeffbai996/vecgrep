@@ -11,8 +11,8 @@ Qdrant, so it stays hermetic like the rest of the suite.
 from __future__ import annotations
 
 import pytest
-
 from qdrant_client import QdrantClient
+
 from vecgrep.backend.store.qdrant_store import QdrantStore
 
 

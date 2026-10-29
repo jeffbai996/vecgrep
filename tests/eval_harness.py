@@ -241,7 +241,7 @@ def main() -> int:
         report = run_eval(svc)
         try:
             svc.store.client.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 -- Evaluation teardown must not replace its collected result.
             pass
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

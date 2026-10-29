@@ -13,7 +13,7 @@ import pytest
 
 mcp = pytest.importorskip("mcp")
 
-from vecgrep.mcp.server import build_http_app, build_mcp_server  # noqa: E402
+from vecgrep.mcp.server import build_http_app, build_mcp_server
 
 
 def test_build_mcp_server_registers_tools() -> None:

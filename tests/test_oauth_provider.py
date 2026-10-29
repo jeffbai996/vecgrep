@@ -13,8 +13,8 @@ import json
 from pathlib import Path
 
 import pytest
+from mcp.server.auth.provider import AuthorizationParams, AuthorizeError
 from mcp.shared.auth import OAuthClientInformationFull
-from mcp.server.auth.provider import AuthorizeError, AuthorizationParams
 
 from vecgrep.backend.auth.provider import VecgrepOAuthProvider
 
@@ -158,6 +158,7 @@ async def test_revoke_kills_access_token(provider):
 def test_read_scope_cannot_invoke_mutation_tools(provider):
     from mcp.server.auth.middleware.auth_context import auth_context_var
     from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
+
     from vecgrep.mcp.server import _require_remote_scope
 
     at = provider.store.issue_access_token("claude-ai", ["read"])
@@ -174,6 +175,7 @@ def test_read_scope_cannot_invoke_mutation_tools(provider):
 def test_propose_scope_allows_mutation_tool_boundary(provider):
     from mcp.server.auth.middleware.auth_context import auth_context_var
     from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
+
     from vecgrep.mcp.server import _require_remote_scope
 
     at = provider.store.issue_access_token("claude-ai", ["read", "propose"])

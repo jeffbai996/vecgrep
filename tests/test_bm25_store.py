@@ -380,8 +380,8 @@ def test_penalty_mode_default_exponent_demotes_partial_below_full(monkeypatch: p
         ids=["a", "b", "f1", "f2", "f3", "f4"],
         texts=[
             "glucose monitoring stuff random words filler more text padding here",
-            "monitoring monitoring monitoring monitoring monitoring monitoring "
-            "monitoring monitoring monitoring monitoring monitoring server",
+            ("monitoring monitoring monitoring monitoring monitoring monitoring "
+            "monitoring monitoring monitoring monitoring monitoring server"),
             "glucose filler doc one with other vocabulary",
             "glucose filler doc two completely different",
             "glucose filler doc three entirely separate",

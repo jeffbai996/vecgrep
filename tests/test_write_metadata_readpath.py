@@ -10,9 +10,7 @@ These exercise the service search() filtering directly with the stub backend.
 """
 from __future__ import annotations
 
-import pytest
-
-from vecgrep.backend.service import _passes_filters, SearchResult
+from vecgrep.backend.service import SearchResult, _passes_filters
 
 
 def _result(text="t", metadata=None, corpus="c", source_id="s"):

@@ -1,5 +1,7 @@
-from pathlib import Path
+from typing import ClassVar
+
 import pytest
+
 from vecgrep.backend.ingestion.visual_queue import VisualQueue
 
 
@@ -109,7 +111,7 @@ def test_pdf_keeps_native_text_when_vision_is_pending(tmp_path, monkeypatch):
     class Page:
         def extract_text(self): return 'Native report text'
     class Reader:
-        pages = [Page()]
+        pages: ClassVar[list[Page]] = [Page()]
     monkeypatch.setattr(pdf, 'PdfReader', lambda _: Reader())
     source = tmp_path / 'report.pdf'
     source.write_bytes(b'pdf')
@@ -172,6 +174,7 @@ def test_delayed_delivery_cannot_resurrect_deleted_source(svc, tmp_path, monkeyp
 
 def test_worker_delivery_retries_index_failures(tmp_path):
     import httpx
+
     from vecgrep.backend.ingestion.visual_worker import deliver
     source = tmp_path / 'scan.png'
     source.write_bytes(b'scan')
@@ -188,8 +191,9 @@ def test_worker_delivery_retries_index_failures(tmp_path):
 
 
 def test_processor_renders_image_and_uses_ocr_when_laptop_is_offline(tmp_path, monkeypatch):
-    from PIL import Image
     import httpx
+    from PIL import Image
+
     from vecgrep.backend.ingestion import visual_processor as vp
     source = tmp_path / 'scan.png'
     Image.new('RGB', (200, 100), 'white').save(source)
@@ -203,6 +207,7 @@ def test_processor_renders_image_and_uses_ocr_when_laptop_is_offline(tmp_path, m
 
 def test_pdf_render_has_page_anchors_and_rejects_excess_pages(tmp_path):
     from pypdf import PdfWriter
+
     from vecgrep.backend.ingestion.visual_processor import page_images
     source = tmp_path / 'report.pdf'
     writer = PdfWriter()
@@ -217,6 +222,7 @@ def test_pdf_render_has_page_anchors_and_rejects_excess_pages(tmp_path):
 def test_pdf_ocr_preserves_each_page_when_vision_is_offline(tmp_path, monkeypatch):
     import httpx
     from pypdf import PdfWriter
+
     from vecgrep.backend.ingestion import visual_processor as vp
 
     source = tmp_path / 'report.pdf'
@@ -268,13 +274,13 @@ def test_reverting_file_content_requeues_cancelled_work(tmp_path):
 
 
 def test_visual_size_limit_does_not_block_native_pdf_text(tmp_path, monkeypatch):
-    from vecgrep.backend.ingestion.adapters import pdf
     from vecgrep.backend.ingestion import visual_queue
+    from vecgrep.backend.ingestion.adapters import pdf
     monkeypatch.setenv('VECGREP_VISUAL_ENABLED', '1')
     class Page:
         def extract_text(self): return 'Native report text'
     class Reader:
-        pages = [Page()]
+        pages: ClassVar[list[Page]] = [Page()]
     monkeypatch.setattr(pdf, 'PdfReader', lambda _: Reader())
     monkeypatch.setattr(visual_queue, 'MAX_SOURCE_BYTES', 2)
     source = tmp_path / 'report.pdf'

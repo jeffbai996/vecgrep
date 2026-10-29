@@ -7,9 +7,7 @@ every rerank raised `CUDA error: unknown error`. The search endpoint returned
 in the fused result set. Reranking reorders an answer we already have — losing
 it is a quality hit, not a failure.
 """
-import pytest
 
-from vecgrep.backend import service as svc_mod
 
 
 def test_a_rerank_that_raises_still_returns_results(svc, make_doc, monkeypatch):

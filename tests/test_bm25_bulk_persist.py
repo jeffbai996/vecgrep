@@ -35,7 +35,7 @@ def test_directory_index_persists_bm25_once_and_stays_searchable(svc, tmp_path, 
         return real(self, corpus)
 
     monkeypatch.setattr(BM25Store, "_persist_now", counting)
-    docs, chunks, _ = svc.index(str(root), "docs")
+    docs, _unused_chunks, _ = svc.index(str(root), "docs")
     assert docs == 6
     assert calls.count("docs") == 1, f"expected ONE persist for a 6-doc directory, got {calls.count('docs')}"
     assert not (svc.settings.home / "bm25" / "docs.pkl.dirty").exists()
@@ -82,8 +82,8 @@ def test_interrupted_bulk_leaves_marker_and_next_service_rebuilds_from_qdrant(sv
     inner = svc._backend_cache["auto"]._inner
     svc.store.client.close()   # embedded qdrant admits one process at a time
 
-    from vecgrep.backend.service import VecgrepService
     from vecgrep.backend.embed.cache import CachedBackend
+    from vecgrep.backend.service import VecgrepService
     svc2 = VecgrepService(ephemeral=False)
     svc2._backend_cache["auto"] = CachedBackend(inner, svc2._embed_cache)
     try:
@@ -96,7 +96,7 @@ def test_interrupted_bulk_leaves_marker_and_next_service_rebuilds_from_qdrant(sv
     finally:
         try:
             svc2.store.client.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 -- Cleanup of a deliberately interrupted store must not mask the assertion.
             pass
 
 

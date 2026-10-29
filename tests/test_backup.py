@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from vecgrep.backend.backup import BackupError, BackupManager, BackupScheduler, QdrantSnapshots
+from vecgrep.backend.backup import (
+    BackupError,
+    BackupManager,
+    BackupScheduler,
+    QdrantSnapshots,
+)
 from vecgrep.backend.config import Settings
 
 

@@ -72,7 +72,7 @@ def test_wrappers_default_to_none_not_false():
     reverts to a bool default, the corresponding auto gate silently dies."""
     import inspect
     sig = inspect.signature(
-        [t for t in [S.build_mcp_server] if t][0])  # module import smoke
+        next(t for t in [S.build_mcp_server] if t))  # module import smoke
     assert sig is not None
     src = inspect.getsource(S)
     assert "budget: bool | None = None," in src

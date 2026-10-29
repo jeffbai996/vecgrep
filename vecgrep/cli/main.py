@@ -65,7 +65,7 @@ def _raise_for_status(r: httpx.Response) -> None:
     if r.status_code >= 400:
         try:
             detail = r.json().get("detail", r.text)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- Adapter failures become CLI errors while independent watched sources remain active.
             detail = r.text
         raise click.ClickException(detail)
 
@@ -1152,7 +1152,7 @@ def watch(path: str, corpus: str, chunker: str, debounce: float,
             _do_index(str(target), corpus, chunker, force=False, include=include)
         except KeyboardInterrupt:
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 -- Adapter failures become CLI errors while independent watched sources remain active.
             click.echo(
                 f"  error: initial pass incomplete for {target} "
                 f"({type(e).__name__}: {e}) — watching anyway", err=True)
@@ -1191,7 +1191,7 @@ def watch(path: str, corpus: str, chunker: str, debounce: float,
                         raise
                     except click.ClickException as e:
                         click.echo(f"  error: {e.message}", err=True)
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001 -- Adapter failures become CLI errors while independent watched sources remain active.
                         click.echo(f"  error: {type(e).__name__}: {e}", err=True)
                 elif not _watch_is_quiet(p, quiet_period):
                     # A live session is still writing this file. Indexing
@@ -1268,7 +1268,7 @@ def _watch_index_resilient(p: str, corpus: str, chunker: str,
         raise
     except click.ClickException as e:
         click.echo(f"  error: {e.message}", err=True)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- Adapter failures become CLI errors while independent watched sources remain active.
         click.echo(f"  error: {type(e).__name__}: {e}", err=True)
     _WATCH_SEEN_HASHES.pop(p, None)
     return False
@@ -1568,7 +1568,7 @@ def status(json_out: bool) -> None:
         try:
             svc = VecgrepService()
             corpora = [asdict(c) for c in svc.list_corpora()]
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 -- Adapter failures become CLI errors while independent watched sources remain active.
             # Most common failure: the qdrant lock file is held by the
             # daemon's process that we just thought was dead — surface
             # that as an explicit error rather than an empty list.
@@ -1771,8 +1771,9 @@ def _do_write(corpus: str, content: str, edit_id: str | None,
     human, so confirmed_by = the local user (the wall's human-confirm). origin
     is 'human' for the same reason."""
     import getpass
-    from ..backend.write import proposal as _P
+
     from ..backend.write import confirm as _C
+    from ..backend.write import proposal as _P
 
     corpus_dir = _write_dir(corpus)
     corpus_dir.mkdir(parents=True, exist_ok=True)
@@ -1841,7 +1842,7 @@ def pending() -> None:
     for f in files:
         try:
             d = json.loads(Path(f).read_text())
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 -- Adapter failures become CLI errors while independent watched sources remain active.
             continue
         kind = ("delete" if d.get("is_delete")
                 else "edit" if d.get("is_edit") else "new")
@@ -1858,6 +1859,7 @@ def confirm(proposal_id: str, ack: str | None) -> None:
     what turns an MCP-proposed entry into an actual write — bots propose, you
     confirm."""
     import getpass
+
     from ..backend.write import confirm as _C
 
     store = _C.ProposalStore(get_settings().home / "write" / "_pending")

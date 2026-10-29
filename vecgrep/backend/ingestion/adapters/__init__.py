@@ -1,30 +1,31 @@
 from .base import Adapter, AdapterError, Document
-from .registry import detect_adapter, register_adapter, ADAPTERS
+from .chatgpt_export import ChatGPTExportAdapter
+
 # More-specific adapters first so the registry tries them before generic
 # plaintext/markdown — `matches()` validates schema so order is correctness-
 # neutral, but predictable order makes detection cheaper for the common case.
 from .claude_export import ClaudeExportAdapter
-from .chatgpt_export import ChatGPTExportAdapter
 from .discord_jsonl import DiscordJSONLAdapter
-from .pdf import PDFAdapter
 from .image import ImageAdapter
-from .url import URLAdapter
 from .markdown import MarkdownAdapter
+from .pdf import PDFAdapter
 from .plaintext import PlaintextAdapter
+from .registry import ADAPTERS, detect_adapter, register_adapter
+from .url import URLAdapter
 
 __all__ = [
+    "ADAPTERS",
     "Adapter",
     "AdapterError",
+    "ChatGPTExportAdapter",
+    "ClaudeExportAdapter",
+    "DiscordJSONLAdapter",
     "Document",
-    "ADAPTERS",
-    "detect_adapter",
-    "register_adapter",
-    "PlaintextAdapter",
+    "ImageAdapter",
     "MarkdownAdapter",
     "PDFAdapter",
-    "ImageAdapter",
+    "PlaintextAdapter",
     "URLAdapter",
-    "DiscordJSONLAdapter",
-    "ClaudeExportAdapter",
-    "ChatGPTExportAdapter",
+    "detect_adapter",
+    "register_adapter",
 ]

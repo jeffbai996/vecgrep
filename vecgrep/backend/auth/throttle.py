@@ -6,7 +6,7 @@ import math
 import threading
 import time
 from collections import deque
-from typing import Callable, Deque
+from collections.abc import Callable
 
 from starlette.types import Scope
 
@@ -45,7 +45,7 @@ class FailureWindow:
         self._clock = clock
         self._max_keys = max_keys
         self._lock = threading.Lock()
-        self._failures: dict[str, Deque[float]] = {}
+        self._failures: dict[str, deque[float]] = {}
 
     def reset(self) -> None:
         with self._lock:
@@ -73,7 +73,7 @@ class FailureWindow:
                 if oldest != key:
                     self._failures.pop(oldest, None)
 
-    def _prune(self, key: str, now: float) -> Deque[float]:
+    def _prune(self, key: str, now: float) -> deque[float]:
         recent = self._failures.get(key)
         if recent is None:
             return deque()

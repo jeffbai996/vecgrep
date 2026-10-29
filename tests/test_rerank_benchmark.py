@@ -1,8 +1,8 @@
 """Benchmark results must distinguish predictions, cache hits and artifact identity."""
 import importlib.util
 import json
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -135,7 +135,7 @@ def test_failed_model_start_replaces_previous_green_report(tmp_path):
     import sys
     result = subprocess.run([sys.executable, str(root/"scripts/rerank_benchmark.py"),
         "--baseline-root", str(tmp_path), "--candidate-root", str(tmp_path),
-        "--cases", str(cases), "--output", str(output), "--run"], capture_output=True)
+        "--cases", str(cases), "--output", str(output), "--run"], capture_output=True, check=False)
     assert result.returncode != 0
     assert json.loads(output.read_text())["result"] != "COMPLETED"
 

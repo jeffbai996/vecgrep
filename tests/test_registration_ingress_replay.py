@@ -16,6 +16,7 @@ def test_registration_replay_hands_receive_back_to_the_client_after_the_body():
     loop waiting for http.disconnect blocks instead of spinning on synthetic
     empty bodies and starving the event loop."""
     import asyncio
+
     from vecgrep.mcp.server import _RegistrationIngress
 
     seen: list[dict] = []

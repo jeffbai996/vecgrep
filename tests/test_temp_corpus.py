@@ -13,6 +13,7 @@ import glob
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -102,7 +103,7 @@ def test_temp_write_records_expiry_and_condition(temp_env):
     assert r["committed"] is True, r
     assert r["corpus"] == "temp"
     assert r["expires_in"] == "2d" or r["expires_in"] == "3d"
-    body = open(_temp_docs(temp_env)[0]).read()
+    body = Path(_temp_docs(temp_env)[0]).read_text()
     assert "expires_at: " in body
     assert "until: the GPU is back" in body
     assert "origin: agent-direct" in body
@@ -131,7 +132,7 @@ def test_renew_extends_the_expiry(temp_env):
     doc_id = json.loads(S._run_temp_write("short", expires="1h"))["doc_id"]
     r = json.loads(S._run_temp_renew(doc_id, expires="5d"))
     assert r["expires_in"] in ("4d", "5d"), r
-    body = open(_temp_docs(temp_env)[0]).read()
+    body = Path(_temp_docs(temp_env)[0]).read_text()
     assert "short" in body and body.count("expires_at:") == 1
 
 
@@ -207,6 +208,7 @@ def test_sweep_is_a_no_op_when_temp_is_off(svc, vg_home):
 
 def test_cli_sweep_removes_expired_temp_docs(vg_home, monkeypatch):
     from click.testing import CliRunner
+
     from vecgrep.cli.main import cli
     monkeypatch.setenv("VECGREP_TEMP_CORPUS", "temp")
     old = _doc(vg_home / "write" / "temp" / "temp-1.md", "stale",

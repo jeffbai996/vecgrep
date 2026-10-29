@@ -14,11 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from vecgrep.backend.ingestion.adapters.markdown import parse_frontmatter
-from vecgrep.backend.write import proposal as P
 # Import the submodule explicitly — the package __init__ re-exports a `confirm`
 # FUNCTION, which would shadow the module name under `from ... import confirm`.
 import vecgrep.backend.write.confirm as C
+from vecgrep.backend.ingestion.adapters.markdown import parse_frontmatter
+from vecgrep.backend.write import proposal as P
 
 
 @pytest.fixture

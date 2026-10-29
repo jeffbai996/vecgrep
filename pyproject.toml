@@ -47,7 +47,7 @@ mcp = ["mcp>=1.30.0,<2"]
 watch = ["watchfiles>=1.2.0"]
 # Parser-backed TypeScript symbols for the code_symbol chunker; Python needs nothing.
 code = ["tree-sitter>=0.25", "tree-sitter-typescript>=0.23"]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.17.3,<0.18", "Pillow>=11.0", "pypdfium2>=4.30"]
 visual = ["Pillow>=11.0", "pypdfium2>=4.30"]
 
 [tool.pytest.ini_options]
@@ -72,3 +72,8 @@ exclude = ["vecgrep.frontend*"]
 
 [tool.setuptools.package-data]
 vecgrep = ["frontend/dist/**/*"]
+
+[tool.ruff]
+required-version = ">=0.17.3,<0.18"
+# Deliberately malformed input used to test parser failure handling.
+extend-exclude = ["tests/fixtures/code_symbols/broken.py"]

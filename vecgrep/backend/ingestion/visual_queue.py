@@ -1,14 +1,14 @@
 """Durable optional enrichment, independent of search and embedding services."""
 from __future__ import annotations
 
-from contextlib import contextmanager
 import hashlib
 import os
 import sqlite3
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 PROCESSOR_VERSION = 'visual-v1'
 MAX_SOURCE_BYTES = 200 * 1024 * 1024

@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
-import os
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Literal
-
+from typing import Literal
 
 LockMode = Literal["read", "write"]
 
@@ -202,7 +201,7 @@ class CorpusLocks:
         try:
             if path is not None:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                handle = open(path, "a+")
+                handle = open(path, "a+")  # noqa: SIM115 -- Reentrant lock state owns the handle until the existing finally closes it.
                 # A file-lock timeout unwinds through this same finally, so the
                 # thread lock taken above is released and nothing stays half
                 # held.

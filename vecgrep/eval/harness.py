@@ -18,7 +18,8 @@ from vecgrep.backend import service as service_mod
 from vecgrep.backend.service import VecgrepService, _collection_for
 from vecgrep.backend.store.corpora import Corpus
 
-from .gold import GoldCase, load_gold
+from .gold import GoldCase
+from .gold import load_gold as load_gold  # noqa: PLC0414 -- Preserve the existing public re-export.
 from .metrics import CaseResult, per_case_rows, score_case, summarize
 
 EVAL_PREFIX = "eval-"
@@ -181,7 +182,7 @@ def settle_collection(svc: VecgrepService, corpus: str, timeout_s: float = 600.0
         try:
             info = svc.store.client.get_collection(coll)
             status = str(getattr(info, "status", "unknown")).split(".")[-1].lower()
-        except Exception:
+        except Exception:  # noqa: BLE001 -- Failed readiness and warm-up attempts remain isolated from measured evaluation cases.
             status = "error"
         if status == "green":
             break
@@ -302,7 +303,7 @@ def run_config(
                                None if cfg.unscoped else actual_corpora[c0.corpus],
                                top_k=cfg.top_k, mode=cfg.mode, rerank=cfg.rerank,
                                rerank_model=cfg.rerank_model)
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 -- Failed readiness and warm-up attempts remain isolated from measured evaluation cases.
                     pass
             for case in cases:
                 actual = None if cfg.unscoped else actual_corpora[case.corpus]

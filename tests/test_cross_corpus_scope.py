@@ -12,8 +12,6 @@ own build.
 """
 from __future__ import annotations
 
-import pytest
-
 
 def _index(svc, make_doc, name, corpus, text="alpha beta gamma delta. epsilon zeta eta theta."):
     p = make_doc(name, text)

@@ -78,9 +78,8 @@ def test_small_writes_do_not_escalate(tmp_path, caplog):
     root = tmp_path / "db"
     lite = BM25SqliteStore(root)
 
-    with caplog.at_level(logging.INFO, logger="vecgrep.backend.store.bm25_sqlite"):
-        with lite.bulk("c"):
-            lite.upsert("c", ["a"], ["alpha token"], [{"source_id": "/a"}])
+    with caplog.at_level(logging.INFO, logger="vecgrep.backend.store.bm25_sqlite"), lite.bulk("c"):
+        lite.upsert("c", ["a"], ["alpha token"], [{"source_id": "/a"}])
 
     # A WAL already inside its limit needs no TRUNCATE attempt.
     assert "truncate" not in caplog.text.lower()

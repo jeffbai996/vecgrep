@@ -4,7 +4,7 @@ import json
 import pytest
 import tiktoken
 
-from vecgrep.mcp.search_policy import resolve_search, bounded_payload
+from vecgrep.mcp.search_policy import bounded_payload, resolve_search
 
 
 def test_presets_and_explicit_overrides_preserve_scope():
@@ -74,7 +74,9 @@ def test_mcp_budget_reports_ignored_knob_and_scope(monkeypatch):
 
 def test_stdio_schema_exposes_policy():
     import asyncio
+
     from mcp.types import ListToolsRequest
+
     from vecgrep.mcp.server import build_mcp_server
     server = build_mcp_server()
     result = asyncio.run(server.request_handlers[ListToolsRequest](ListToolsRequest(method='tools/list')))
@@ -150,6 +152,7 @@ def test_oversized_top_hit_does_not_displace_next_fitting_passage():
 
 def test_lookup_labels_weak_candidates_without_hiding_them(monkeypatch):
     from types import SimpleNamespace
+
     from vecgrep.mcp import server
     class Service:
         def search_with_diagnostics(self, *args, **kwargs):
@@ -168,9 +171,11 @@ def test_lookup_labels_weak_candidates_without_hiding_them(monkeypatch):
 
 def test_http_and_stdio_advertise_same_search_controls_and_operation_hints(monkeypatch):
     import asyncio
-    from mcp.types import ListToolsRequest
+
     from mcp.server.fastmcp import FastMCP
-    from vecgrep.mcp.server import build_mcp_server, build_http_app
+    from mcp.types import ListToolsRequest
+
+    from vecgrep.mcp.server import build_http_app, build_mcp_server
     captured = []
     original = FastMCP.streamable_http_app
     def capture(self):

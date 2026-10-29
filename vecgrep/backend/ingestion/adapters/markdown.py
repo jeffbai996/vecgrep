@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
-from ..dates import extract_timestamp
 from ...write.proposal import FRONTMATTER_FIELDS
+from ..dates import extract_timestamp
 from .base import Adapter, AdapterError, Document
 from .registry import register_adapter
 

@@ -8,8 +8,8 @@ under tmp_path.
 """
 from __future__ import annotations
 
-import json
 import time
+from pathlib import Path
 
 from mcp.shared.auth import OAuthClientInformationFull
 
@@ -62,7 +62,7 @@ def test_a_bearer_issued_to_gemini_is_recorded_by_digest(tmp_path):
 
     entry = _registry(tmp_path).lookup(digest(at.token))
     assert entry["issuer"] == "vecgrep"
-    assert at.token not in open(_paths(tmp_path)[1]).read()
+    assert at.token not in Path(_paths(tmp_path)[1]).read_text()
 
 
 def test_a_bearer_another_mcp_registered_is_accepted_under_this_approval(tmp_path):

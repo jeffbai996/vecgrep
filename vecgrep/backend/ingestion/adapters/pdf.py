@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
+from ..visual_queue import VisualQueue, enabled
 from .base import Adapter, AdapterError, Document
 from .registry import register_adapter
-from ..visual_queue import VisualQueue, enabled
 
 
 @register_adapter
@@ -37,7 +37,7 @@ class PDFAdapter(Adapter):
         for i, page in enumerate(reader.pages, start=1):
             try:
                 txt = page.extract_text() or ""
-            except Exception:
+            except Exception:  # noqa: BLE001 -- One unreadable PDF page must not discard text from the other pages.
                 txt = ""
             if txt.strip():
                 parts.append(f"[page {i}]\n{txt.strip()}")

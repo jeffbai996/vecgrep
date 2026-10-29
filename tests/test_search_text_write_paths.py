@@ -67,7 +67,7 @@ def test_journal_recovery_keeps_qualified_names_searchable(svc, tmp_path, monkey
     (src / "extra.py").write_text("VALUE = 1\n", encoding="utf-8")
     try:
         svc.index(str(src), "code", chunker_name="code_symbol")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 -- The following assertions verify recovery after the injected indexing failure.
         pass
     monkeypatch.setattr(svc.bm25, "upsert", real)
     assert calls, "the simulated failure never ran"

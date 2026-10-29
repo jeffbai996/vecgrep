@@ -31,10 +31,10 @@ import pytest
 
 pytest.importorskip("mcp")
 
-from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp.server.fastmcp import FastMCP
 
-from vecgrep.mcp import server as mcp_server  # noqa: E402
-from vecgrep.mcp.server import ToolBusyError  # noqa: E402
+from vecgrep.mcp import server as mcp_server
+from vecgrep.mcp.server import ToolBusyError
 
 
 def _patched() -> FastMCP:

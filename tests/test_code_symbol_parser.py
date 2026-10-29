@@ -4,8 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vecgrep.backend.ingestion.chunkers import CodeSymbolChunker
-from vecgrep.backend.ingestion.chunkers import code_symbol
+from vecgrep.backend.ingestion.chunkers import CodeSymbolChunker, code_symbol
 
 FIXTURES = Path(__file__).parent / "fixtures" / "code_symbols"
 
@@ -38,7 +37,7 @@ def test_identical_names_in_different_classes_stay_apart():
 
 
 def test_decorators_and_a_comment_directly_above_belong_to_the_definition():
-    text, chunks = chunks_for("orders.py")
+    _unused_text, chunks = chunks_for("orders.py")
     named = by_qualname(chunks)
     assert named["Exporter.header"].text.lstrip().startswith("@staticmethod")
     assert named["Exporter.run"].text.lstrip().startswith("# Writes orders back out.")
@@ -72,7 +71,7 @@ def test_offsets_address_the_text_and_no_content_is_lost():
 
 
 def test_a_syntax_error_falls_back_to_the_heuristic_and_says_so():
-    text, chunks = chunks_for("broken.py")
+    _unused_text, chunks = chunks_for("broken.py")
     assert chunks and all(c.meta.get("parse_error") for c in chunks)
     assert "class StillHere" in "".join(c.text for c in chunks)
 

@@ -5,11 +5,8 @@ corpus lifecycle so callers don't have to coordinate four subsystems.
 """
 from __future__ import annotations
 
-from bisect import bisect_left, bisect_right
 import contextlib
-
 import fnmatch
-from concurrent.futures import Future, ThreadPoolExecutor
 import hashlib
 import json
 import logging
@@ -20,17 +17,14 @@ import threading
 import time
 import uuid
 import weakref
+from bisect import bisect_left, bisect_right
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, get_args
 
-from .symbol_query import definition_boost, pin_definitions, symbol_query
-from .config import Settings, get_settings
-from .embed import EmbedBackend, EmbedBackendError, get_embed_backend
-from .store.qdrant_store import SearchBackendError
 from .aliases import aliases_path, expand_query, load_alias_map_cached
-from .source_labels import apply_labels, load_source_labels_cached, source_labels_path
 from .assembly import (
     DEFAULT_FULL_K,
     DEFAULT_MAX_TOTAL,
@@ -40,11 +34,11 @@ from .assembly import (
     mmr_select,
     split_full_and_stubs,
 )
+from .config import Settings, get_settings
+from .embed import EmbedBackend, EmbedBackendError, get_embed_backend
 from .embed.cache import CachedBackend, EmbedCache
 from .explorer import ExplorerCatalog, build_catalog, list_catalog
 from .explorer_store import CatalogGeneration, ExplorerStore
-from .ingestion.enrich import chunk_enrichment
-from .write.temp import is_expired
 from .ingestion.adapters import (
     AdapterError,
     Document,
@@ -52,32 +46,37 @@ from .ingestion.adapters import (
 )
 from .ingestion.chunkers import (
     Chunker,
+    CodeSymbolChunker,
     FixedTokenChunker,
     MarkdownSectionChunker,
-    CodeSymbolChunker,
     SentenceWindowChunker,
     TurnWindowChunker,
 )
+from .ingestion.enrich import chunk_enrichment
+from .mutation import CorpusLocks
+from .mutation_journal import MutationJournal
+from .source_labels import apply_labels, load_source_labels_cached, source_labels_path
 from .store import (
+    EPHEMERAL_NAME,
     BM25SqliteStore,
     BM25Store,
     Corpus,
     CorpusError,
     CorpusRegistry,
-    EPHEMERAL_NAME,
     QdrantStore,
     StoredHit,
 )
+from .store.qdrant_store import SearchBackendError
+from .symbol_query import definition_boost, pin_definitions, symbol_query
 from .timeline import (
+    _EVENT_HEADER,
     ANCHOR_TOP_K,
     MAX_GROUPS,
     SLICE_PADDING,
-    _EVENT_HEADER,
     build_timeline,
     parse_events,
 )
-from .mutation import CorpusLocks
-from .mutation_journal import MutationJournal
+from .write.temp import is_expired
 
 
 def _env_int(name: str, default: int | None) -> int | None:
@@ -136,7 +135,7 @@ class SearchWarning:
 
 @dataclass
 class SearchOutcome:
-    results: list["SearchResult"]
+    results: list[SearchResult]
     warnings: list[SearchWarning]
     # Milliseconds per stage; see _StageTimer for what each key means.
     timings_ms: dict[str, float] = field(default_factory=dict)
@@ -203,7 +202,7 @@ class _SearchRuntime:
 
     def query_vector(
         self,
-        service: "VecgrepService",
+        service: VecgrepService,
         corpus: Corpus,
         query: str,
     ) -> list[float]:
@@ -224,7 +223,7 @@ class _SearchRuntime:
         if owns_work:
             try:
                 vector = service._embed_query_with_failover(corpus, query)
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
                 # Resolve before removal so every waiter already holding this
                 # Future observes the same failure. A later request may retry.
                 future.set_exception(exc)
@@ -290,7 +289,7 @@ class _QueryVectorMemo:
     retain their independent fan-out and failures still surface per corpus.
     """
 
-    def __init__(self, service: "VecgrepService", query: str) -> None:
+    def __init__(self, service: VecgrepService, query: str) -> None:
         self._service = service
         self._query = query
         self._lock = threading.Lock()
@@ -310,7 +309,7 @@ class _QueryVectorMemo:
                 vector = self._service._embed_query_singleflight(
                     corpus, self._query
                 )
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
                 # Always resolve the Future: a waiting corpus must observe the
                 # same backend failure rather than hang behind a dead owner.
                 future.set_exception(exc)
@@ -633,7 +632,7 @@ class VecgrepService:
             ):
                 text = payload.get("text")
                 if not isinstance(text, str):
-                    raise RuntimeError(
+                    raise RuntimeError(  # noqa: TRY004 -- Malformed persisted chunk data retains the RuntimeError contract.
                         f"cannot rebuild BM25 for {corpus.name}: {point_id} has no chunk text"
                     )
                 # Qdrant is the canonical source payload store. The scroll
@@ -1031,7 +1030,7 @@ class VecgrepService:
                     self.explorer_store.generation(corpus.name)
                     == self._explorer_generation(corpus)
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
                 logger.warning(
                     "explorer catalog state read failed for %s: %s",
                     corpus_name,
@@ -1088,7 +1087,7 @@ class VecgrepService:
                     try:
                         chunks = (chunker.chunk_doc(doc)
                                   if hasattr(chunker, "chunk_doc") else chunker.chunk(doc.text))
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
                         # One file the chunker cannot handle must not cost every
                         # file after it. Its previous chunks and recorded hash stay,
                         # so the next run tries it again.
@@ -1334,7 +1333,7 @@ class VecgrepService:
                         self.explorer_store.set_generation(
                             corpus.name, self._explorer_generation(corpus)
                         )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
                     catalog_sync_ok = False
                     logger.warning(
                         "explorer catalog update failed for %s: %s", corpus_name, exc,
@@ -1513,7 +1512,7 @@ class VecgrepService:
                 try:
                     results.extend(future.result())
                     successful.append(c.name)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
                     failures.append((c, exc))
         else:
             for c in corpora:
@@ -1523,7 +1522,7 @@ class VecgrepService:
                         query_vectors=query_vectors, timer=timer,
                     ))
                     successful.append(c.name)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
                     failures.append((c, exc))
 
         timer.add("retrieve", time.monotonic() - retrieve_started)
@@ -1594,7 +1593,7 @@ class VecgrepService:
                     results = self._apply_rerank(
                         query, results, top_k, rerank_model, explain=explain)
                 reranked = True
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
                 # Readiness only proves the model LOADED. predict() can still
                 # blow up later — a wedged GPU is the live example: the host's
                 # card started reporting a garbage VRAM figure and every
@@ -1859,11 +1858,10 @@ class VecgrepService:
                 if have != channel:
                     continue
             ts = rec.get("doc_timestamp")
-            if day_start is not None:
-                if ts is None or not (
-                    day_start <= float(ts) < day_start + _SECONDS_IN_DAY
-                ):
-                    continue
+            if day_start is not None and (ts is None or not (
+                day_start <= float(ts) < day_start + _SECONDS_IN_DAY
+            )):
+                continue
             if source_path is not None and not fnmatch.fnmatch(
                 source_id, source_path
             ):
@@ -1990,7 +1988,7 @@ class VecgrepService:
                 if catalog_is_current
                 else None
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
             logger.warning(
                 "explorer catalog read failed for %s: %s", corpus.name, exc
             )
@@ -2011,7 +2009,7 @@ class VecgrepService:
                 )
             try:
                 self.explorer_store.replace(corpus.name, records, generation)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
                 logger.warning(
                     "explorer catalog backfill persist failed for %s: %s",
                     corpus.name,
@@ -2038,7 +2036,7 @@ class VecgrepService:
     def _drop_explorer_catalog(self, corpus_name: str) -> None:
         try:
             self.explorer_store.drop(corpus_name)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
             logger.warning(
                 "explorer catalog drop failed for %s: %s", corpus_name, exc
             )
@@ -2383,7 +2381,7 @@ class VecgrepService:
             f"{self.store.client.count(dst, exact=True).count} of {expect} points"
         )
 
-    def migrate_datatype(self, name: str, datatype: str) -> "Corpus":
+    def migrate_datatype(self, name: str, datatype: str) -> Corpus:
         """Rebuild a corpus's qdrant collection with a different on-disk vector
         datatype, in place, WITHOUT re-embedding anything.
 
@@ -2415,7 +2413,7 @@ class VecgrepService:
         with self.locks.write(name):
             return self._migrate_datatype_locked(name, datatype, corpus)
 
-    def _migrate_datatype_locked(self, name: str, datatype: str, corpus) -> "Corpus":
+    def _migrate_datatype_locked(self, name: str, datatype: str, corpus) -> Corpus:
         live = _collection_for(name)
         temp = _collection_for(f"{name}__dt")
         src_n = self.store.client.count(live, exact=True).count
@@ -2460,7 +2458,7 @@ class VecgrepService:
         name = model_name or DEFAULT_RERANKER
         try:
             ready = wait_ready(name)
-        except Exception as exc:   # never let warming break a search
+        except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work. never let warming break a search
             logger.warning("reranker readiness check failed: %s", exc)
             return False
         if not ready:
@@ -2478,7 +2476,8 @@ class VecgrepService:
         model_name: str | None,
         explain: bool = False,
     ) -> list[SearchResult]:
-        from .rerank import DEFAULT_RERANKER, rerank as _rerank
+        from .rerank import DEFAULT_RERANKER
+        from .rerank import rerank as _rerank
 
         if not candidates:
             return []
@@ -2524,11 +2523,11 @@ class VecgrepService:
         # near-clones; selection order starts from the best hit, so the
         # reranked ordering survives for everything selected. Do NOT re-sort
         # by similarity_pct here (that would undo the rerank).
-        key = lambda r: r.explain.get("rerank_score", 0.0)  # noqa: E731
+        key = lambda r: r.explain.get("rerank_score", 0.0)
         if getattr(self.settings, "rerank_prior", False):
             self._apply_rerank_prior(out)
             out.sort(key=lambda r: r.explain["rerank_ranked"], reverse=True)
-            key = lambda r: r.explain["rerank_ranked"]  # noqa: E731
+            key = lambda r: r.explain["rerank_ranked"]
         selected = mmr_select(out, top_k, key=key)
         if tail and len(selected) < top_k:
             # Backfill from the unscored tail, in fusion order. These carry no
@@ -2982,7 +2981,7 @@ class VecgrepService:
             return
         try:
             self._embed_cache.flush_touches()
-        except Exception as exc:  # bookkeeping only -- never block shutdown
+        except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work. bookkeeping only -- never block shutdown
             logger.warning("embed cache flush on shutdown failed: %s", exc)
 
     def cache_sweep(
@@ -3187,7 +3186,7 @@ class VecgrepService:
             catalog_sync_ok = True
             try:
                 self.explorer_store.delete_source(corpus.name, source_id)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
                 catalog_sync_ok = False
                 logger.warning(
                     "explorer catalog delete failed for %s: %s",
@@ -3208,7 +3207,7 @@ class VecgrepService:
                     self.explorer_store.set_generation(
                         target.name, self._explorer_generation(target)
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
                     logger.warning(
                         "explorer catalog commit failed for %s: %s",
                         corpus_name,
@@ -3895,7 +3894,6 @@ class VecgrepService:
             # index is rebuilt from the imported documents on the next index
             # (bm25_store load is a no-op when the .pkl is absent), so skipping
             # the untrusted pickle is safe and closes the RCE vector.
-            pass
 
             # Corpus dataclass defaults make old archives compatible; using
             # the complete metadata mapping means new routing/weight/storage
@@ -3940,7 +3938,7 @@ class VecgrepService:
                     break
             if ids:
                 self.bm25.upsert(target_name, ids, texts, payloads)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
             # BM25 rebuild is best-effort — a restored corpus still works on the
             # vector half; the next index of any doc rebuilds BM25 anyway.
             pass
@@ -3956,7 +3954,7 @@ def _collection_for(corpus_name: str) -> str:
     return f"{_COLLECTION_PREFIX}{corpus_name}"
 
 
-def _journal_corpus(corpus: "Corpus | None") -> dict | None:
+def _journal_corpus(corpus: Corpus | None) -> dict | None:
     """The corpus as the crash journal should remember it: metadata only.
 
     Recovery rebuilds `sources` and `source_hashes` from the live Qdrant
@@ -4111,7 +4109,7 @@ def _filter_matches(
     """One filter's verdict for one result. Returns True/False (matched / not),
     None (unknown form — ignored for back-compat), or _INVALID (recognized
     form, unparseable value — the caller fails closed)."""
-    if f.startswith("source:") or f.startswith("source_path:"):
+    if f.startswith(("source:", "source_path:")):
         pat = f.split(":", 1)[1]
         return fnmatch.fnmatch(result.source_id, pat)
     if f.startswith("corpus:"):
@@ -4138,7 +4136,7 @@ def _filter_matches(
         want = f[len("channel:"):].strip()
         have = str(result.metadata.get("channel", "")).strip().strip("\"'")
         return have == want
-    if f.startswith("speaker:") or f.startswith("author:"):
+    if f.startswith(("speaker:", "author:")):
         # Chunk-level membership: a chunk containing ANY line by NAME passes.
         # Case-insensitive; the archiver's " [bot]" suffix is stripped on both
         # sides so `speaker:analysis_bot` matches "analysis_bot [bot]".
@@ -4250,11 +4248,11 @@ def _expand(source: str, adapter, include: str | None = None) -> list[Document]:
                 continue
             try:
                 sub_adapter_cls = detect_adapter(str(sub))
-            except Exception:
+            except Exception:  # noqa: BLE001, S112 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
                 continue
             try:
                 docs.extend(sub_adapter_cls().load(str(sub)))
-            except Exception:
+            except Exception:  # noqa: BLE001, S112 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
                 continue
         return docs
     return list(adapter.load(source))
@@ -4484,9 +4482,7 @@ def _chunk_payload_unchanged(old_pl: dict | None, new_pl: dict) -> bool:
     ):
         if old_pl.get(key) != new_pl.get(key):
             return False
-    if "source_text" in new_pl and old_pl.get("source_text") != new_pl.get("source_text"):
-        return False
-    return True
+    return not ("source_text" in new_pl and old_pl.get("source_text") != new_pl.get("source_text"))
 
 
 def _has_invalid_filter(filters: list[str], now: float | None = None) -> bool:
@@ -4508,7 +4504,7 @@ def _has_invalid_filter(filters: list[str], now: float | None = None) -> bool:
     for f in filters:
         if ":" not in f and "=" not in f:
             continue
-        form = f[1:] if f.startswith("-") else f
+        form = f.removeprefix("-")
         if _filter_matches(dummy, form, now=now) is _INVALID:
             return True
     return False
@@ -4541,7 +4537,7 @@ def _filter_corpus_sources(corpus: Corpus, filters: list[str]) -> set[str] | Non
     for f in filters:
         negated = f.startswith("-")
         form = f[1:] if negated else f
-        if form.startswith("source:") or form.startswith("source_path:"):
+        if form.startswith(("source:", "source_path:")):
             source_clauses.append((negated, form.split(":", 1)[1]))
     if not source_clauses:
         return None
@@ -4556,7 +4552,7 @@ def _filter_corpus_sources(corpus: Corpus, filters: list[str]) -> set[str] | Non
 
 def _has_non_source_filters(filters: list[str]) -> bool:
     for f in filters:
-        form = f[1:] if f.startswith("-") else f
+        form = f.removeprefix("-")
         if form.startswith(("source:", "source_path:", "corpus:")):
             continue
         if ":" in form or "=" in form:

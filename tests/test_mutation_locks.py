@@ -58,13 +58,10 @@ def test_different_corpora_do_not_block_each_other(tmp_path):
 
 def test_nested_writer_may_read_but_reader_cannot_upgrade(tmp_path):
     locks = CorpusLocks(tmp_path)
-    with locks.write("notes"):
-        with locks.read("notes"):
-            pass
-    with locks.read("notes"):
-        with pytest.raises(LockUpgradeError):
-            with locks.write("notes"):
-                pass
+    with locks.write("notes"), locks.read("notes"):
+        pass
+    with locks.read("notes"), pytest.raises(LockUpgradeError), locks.write("notes"):
+        pass
 
 
 def test_reentrant_read_does_not_block_behind_a_queued_writer(tmp_path):
@@ -118,9 +115,8 @@ def test_read_admission_gives_up_while_a_writer_holds_the_lock(tmp_path):
     t.start()
     assert holding.wait(2)
     started = time.monotonic()
-    with pytest.raises(LockTimeout):
-        with locks.read("notes", timeout=0.3):
-            pass
+    with pytest.raises(LockTimeout), locks.read("notes", timeout=0.3):
+        pass
     assert time.monotonic() - started < 2
     release.set()
     t.join(5)
@@ -138,9 +134,8 @@ def test_write_admission_gives_up_while_a_reader_holds_the_lock(tmp_path):
     t = threading.Thread(target=reader, daemon=True)
     t.start()
     assert holding.wait(2)
-    with pytest.raises(LockTimeout):
-        with locks.write("notes", timeout=0.3):
-            pass
+    with pytest.raises(LockTimeout), locks.write("notes", timeout=0.3):
+        pass
     release.set()
     t.join(5)
 
@@ -158,9 +153,8 @@ def test_a_timed_out_reader_leaves_the_lock_usable(tmp_path):
     t = threading.Thread(target=writer, daemon=True)
     t.start()
     assert holding.wait(2)
-    with pytest.raises(LockTimeout):
-        with locks.read("notes", timeout=0.3):
-            pass
+    with pytest.raises(LockTimeout), locks.read("notes", timeout=0.3):
+        pass
     release.set()
     t.join(5)
     started = time.monotonic()
@@ -181,9 +175,8 @@ def test_cross_process_read_admission_is_bounded(tmp_path):
     holder.start()
     assert ready.wait(5)
     started = time.monotonic()
-    with pytest.raises(LockTimeout):
-        with CorpusLocks(tmp_path).read("notes", timeout=0.3):
-            pass
+    with pytest.raises(LockTimeout), CorpusLocks(tmp_path).read("notes", timeout=0.3):
+        pass
     assert time.monotonic() - started < 2
     release.set()
     holder.join(5)

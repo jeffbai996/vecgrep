@@ -223,11 +223,10 @@ class CodeSymbolChunker(Chunker):
                 prev_blank = True
                 continue
             at_col0 = not line[0].isspace()
-            if i and at_col0:
-                if decl is not None and decl.match(line):
-                    starts.append(i)
-                elif decl is None and prev_blank and _GENERIC_START.match(line):
-                    starts.append(i)
+            if i and at_col0 and (
+                decl is not None and decl.match(line) or decl is None and prev_blank and _GENERIC_START.match(line)
+            ):
+                starts.append(i)
             prev_blank = False
         return sorted(set(starts))
 

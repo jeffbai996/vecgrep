@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 
-
 # ── browse ───────────────────────────────────────────────────────────────────
 
 def test_browse_by_channel_and_date(svc) -> None:

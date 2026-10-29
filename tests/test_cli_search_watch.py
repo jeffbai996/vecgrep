@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-import pytest
 from click.testing import CliRunner
 
 from vecgrep.cli.main import cli

@@ -125,7 +125,7 @@ def _reload_runtime() -> None:
     if routes._SERVICE is not None:
         try:
             routes._SERVICE.store.client.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 -- Reset must release stale service references even if a backend cannot close.
             pass
         routes._SERVICE = None
     reset_settings()

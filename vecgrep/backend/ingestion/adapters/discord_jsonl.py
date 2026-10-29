@@ -14,8 +14,8 @@ or skipped if it's some other JSONL data.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 from .base import Adapter, AdapterError, Document
 from .registry import register_adapter

@@ -15,7 +15,7 @@ class _FakeClient:
     def __init__(self) -> None:
         self.batch_sizes: list[int] = []
 
-    def upsert(self, collection_name, points, wait):  # noqa: D401
+    def upsert(self, collection_name, points, wait):
         self.batch_sizes.append(len(points))
 
 

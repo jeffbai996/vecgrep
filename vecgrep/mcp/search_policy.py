@@ -5,17 +5,17 @@ Explicit caller scope and overrides always survive resolution.
 """
 from __future__ import annotations
 
-from copy import deepcopy
 import json
+from copy import deepcopy
 
 import tiktoken
 
 PRESETS = {
-    'lookup': dict(budget=False, top_k=5, rerank=True, response_token_ceiling=4000),
-    'explore': dict(budget=True, full_k=6, token_ceiling=4000,
-                    rerank=True, response_token_ceiling=8000),
-    'deep': dict(budget=True, full_k=10, token_ceiling=6000,
-                 rerank=True, response_token_ceiling=16000),
+    'lookup': {'budget': False, 'top_k': 5, 'rerank': True, 'response_token_ceiling': 4000},
+    'explore': {'budget': True, 'full_k': 6, 'token_ceiling': 4000,
+                    'rerank': True, 'response_token_ceiling': 8000},
+    'deep': {'budget': True, 'full_k': 10, 'token_ceiling': 6000,
+                 'rerank': True, 'response_token_ceiling': 16000},
 }
 DEFAULT_RESPONSE_TOKEN_CEILING = 12000
 FULL_BUDGET_FRACTION = 0.7

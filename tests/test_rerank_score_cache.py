@@ -143,7 +143,7 @@ def test_everything_cached_means_the_model_is_never_called(monkeypatch):
                         lambda q, t, m: [1.0] * len(t))
     rerank.rerank("q", _candidates(3))
 
-    def explode(*a, **kw):  # noqa: ANN002
+    def explode(*a, **kw):
         raise AssertionError("the model was called on a full cache hit")
 
     monkeypatch.setattr(rerank, "_worker_predict", explode)

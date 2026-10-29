@@ -6,8 +6,8 @@ import json
 import logging
 import os
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import httpx
 
@@ -31,7 +31,7 @@ def process_one(queue: VisualQueue, *, processor: Callable[[Path], tuple[str, bo
         else:
             queue.retry(job, error, text=text)
             logger.info('Visual enrichment pending for %s: %s', job['source'], error)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- An individual enrichment failure must be recorded without stopping the consumer.
         # A malformed source cannot terminate the queue consumer.
         queue.retry(job, f'{type(exc).__name__}: {exc}')
         logger.warning('Visual enrichment failed for %s: %s', job['source'], exc)

@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from vecgrep.backend.store.bm25_store import BM25Store
 from vecgrep.backend.store.bm25_sqlite import BM25SqliteStore
+from vecgrep.backend.store.bm25_store import BM25Store
 
 DOCS = [
     ("a1", "the quick brown fox jumps over the lazy dog", "/animals"),
@@ -199,7 +199,7 @@ def test_migration_from_pickle_preserves_search_and_payloads(tmp_path):
     store starts empty, lexical queries return nothing, and hybrid search
     quietly becomes vector-only with no error anywhere, because an empty index
     is a legitimate state. This pins that a migrated corpus answers the same."""
-    from vecgrep.backend.store.bm25_sqlite import migrate_all, migrate_from_pickle
+    from vecgrep.backend.store.bm25_sqlite import migrate_from_pickle
 
     root = tmp_path / "bm25"
     pickled = BM25Store(root)
@@ -258,10 +258,9 @@ def test_sqlite_bulk_is_one_atomic_transaction(tmp_path):
         lite.upsert("c", ["b"], ["beta"], [{"source_id": "/b"}])
     assert lite.count("c") == 2
 
-    with pytest.raises(RuntimeError):
-        with lite.bulk("c"):
-            lite.upsert("c", ["z"], ["zeta"], [{"source_id": "/z"}])
-            raise RuntimeError("abort")
+    with pytest.raises(RuntimeError), lite.bulk("c"):
+        lite.upsert("c", ["z"], ["zeta"], [{"source_id": "/z"}])
+        raise RuntimeError("abort")
     assert lite.get_by_id("c", "z") is None
     assert lite.dirty_corpora() == []
 

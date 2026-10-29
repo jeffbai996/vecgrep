@@ -131,7 +131,7 @@ def migrate_collection(store, collection: str, *, dry_run: bool = False) -> dict
         store.apply_payload_ops(collection, pending_set, pending_del)
         pending_set, pending_del = [], []
 
-    for source_id, chunks in by_source.items():
+    for chunks in by_source.values():
         stats["sources"] += 1
         stats["points"] += len(chunks)
 
