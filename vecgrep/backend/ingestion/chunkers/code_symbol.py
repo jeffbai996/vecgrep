@@ -282,12 +282,14 @@ class CodeSymbolChunker(Chunker):
         acc, acc_off, cursor = "", 0, 0
         for part in pieces:
             if len(acc) + len(part) > MAX_CHARS and acc.strip():
-                yield acc_off, acc
+                for off in range(0, len(acc), MAX_CHARS):
+                    yield acc_off + off, acc[off:off + MAX_CHARS]
                 acc, acc_off = "", cursor
             acc += part
             cursor += len(part)
         if acc.strip():
-            yield acc_off, acc
+            for off in range(0, len(acc), MAX_CHARS):
+                yield acc_off + off, acc[off:off + MAX_CHARS]
 
     def _symbol_of(self, block: str, decl: re.Pattern | None) -> str | None:
         first_real: str | None = None

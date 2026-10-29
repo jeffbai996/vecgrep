@@ -13,6 +13,7 @@ no turn markers, so it is safe on a mixed corpus.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from .base import Chunk, Chunker
 from .sentence_window import SentenceWindowChunker
@@ -45,12 +46,13 @@ class TurnWindowChunker(Chunker):
         starts = [m.start() for m in _TURN_RE.finditer(text)]
         if not starts:
             return []
+        starts[0] = 0  # Keep the preamble with the first turn.
         bounds = starts + [len(text)]
         return [(bounds[i], bounds[i + 1]) for i in range(len(starts))]
 
     def chunk(self, text: str) -> list[Chunk]:
         spans = self._turn_spans(text)
-        if len(spans) < 2:
+        if not spans:
             # Not a transcript (or a single-message one) — the sentence
             # windower is strictly better than emitting one giant chunk.
             return self._fallback.chunk(text)
@@ -63,7 +65,11 @@ class TurnWindowChunker(Chunker):
                 break
             start, end = group[0][0], group[-1][1]
             body = text[start:end].strip()
-            if len(body) < self.min_chars:
+            # Length is not evidence of meaning: short answers and corrections
+            # need their speaker/context. Ignore headers and formatting alone.
+            content = _TURN_RE.sub("", body)
+            if not any(ch.isalnum() or unicodedata.category(ch) == "So"
+                       for ch in content):
                 continue
             # Re-derive offsets after stripping so highlight ranges stay true.
             lead = len(text[start:end]) - len(text[start:end].lstrip())
@@ -99,4 +105,4 @@ class TurnWindowChunker(Chunker):
                 idx += 1
             if i + self.turns >= len(spans):
                 break  # last window already covered the tail
-        return chunks or self._fallback.chunk(text)
+        return chunks

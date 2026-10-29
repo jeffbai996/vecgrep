@@ -26,33 +26,27 @@ class FixedTokenChunker(Chunker):
         if not ids:
             return []
 
+        token_offsets = [0]
+        for token in ids:
+            token_offsets.append(token_offsets[-1] + len(self._enc.decode_single_token_bytes(token)))
+        import bisect
+        char_offsets = [0]
+        for char in text:
+            char_offsets.append(char_offsets[-1] + len(char.encode("utf-8")))
         chunks: list[Chunk] = []
         step = self.tokens - self.overlap
-        ordinal = 0
-        char_cursor = 0
-        for start_tok in range(0, len(ids), step):
-            slice_ids = ids[start_tok : start_tok + self.tokens]
-            if not slice_ids:
-                break
-            piece = self._enc.decode(slice_ids)
-            stripped = piece.strip()
-            if not stripped:
-                continue
-            char_start = text.find(stripped, char_cursor)
-            if char_start == -1:
-                # Decoded slice doesn't match exactly (BPE merge edge); fall
-                # back to approximate offsets so context preview still works.
-                char_start = char_cursor
-            char_end = char_start + len(stripped)
-            chunks.append(Chunk(text=stripped, start=char_start, end=char_end, index=ordinal))
-            ordinal += 1
-            # Resume the next search at THIS chunk's start, not past its end.
-            # Chunks overlap by `overlap` tokens, so the next chunk's text
-            # begins before this one ends; advancing the cursor beyond that
-            # made text.find() miss the true position and fall back to the
-            # approximate offset, so start/end no longer sliced back to the
-            # chunk's own text.
-            char_cursor = char_start
-            if start_tok + self.tokens >= len(ids):
+        previous = None
+        for token_start in range(0, len(ids), step):
+            token_end = min(token_start + self.tokens, len(ids))
+            start = bisect.bisect_right(char_offsets, token_offsets[token_start]) - 1
+            end = bisect.bisect_left(char_offsets, token_offsets[token_end])
+            span = text[start:end]
+            piece = span.strip()
+            start += len(span) - len(span.lstrip())
+            end = start + len(piece)
+            if piece and (start, end) != previous:
+                chunks.append(Chunk(text=piece, start=start, end=end, index=len(chunks)))
+                previous = (start, end)
+            if token_end == len(ids):
                 break
         return chunks

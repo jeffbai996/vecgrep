@@ -491,7 +491,7 @@ def test_get_chunk_window_returns_expanded_context(svc, make_doc):
     p = make_doc("expand.md", body)
     svc.index(str(p), "test")
 
-    hits = svc.search("Target sentence here", "test", top_k=1)
+    hits = svc.search("Target sentence here", "test", top_k=1, mode="bm25")
     assert hits, "search returned nothing"
     cid = hits[0].chunk_id
     assert cid, "search hit should carry a chunk_id"

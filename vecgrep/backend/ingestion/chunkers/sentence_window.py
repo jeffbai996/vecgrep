@@ -12,7 +12,7 @@ from .base import Chunk, Chunker
 
 # Cheap sentence splitter. Handles ., !, ? and Chinese 。！？ — good enough
 # for general docs without spaCy. We deliberately don't pull in nltk.
-_SENT_SPLIT = re.compile(r"(?<=[.!?。！？])\s+|\n{2,}")
+_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+|(?<=[。！？])\s*|\n{2,}")
 
 
 class SentenceWindowChunker(Chunker):
@@ -54,7 +54,11 @@ class SentenceWindowChunker(Chunker):
             window = sents[i : i + self.window]
             if not window:
                 break
-            joined = " ".join(s[0] for s in window)
+            end_idx = min(i + self.window, len(sents))
+            while end_idx < len(sents) and window[-1][2] - window[0][1] < self.min_chars:
+                end_idx += 1
+                window = sents[i:end_idx]
+            joined = text[window[0][1]:window[-1][2]]
             start = window[0][1]
             end = window[-1][2]
             if len(joined) >= self.min_chars or i + self.window >= len(sents):
