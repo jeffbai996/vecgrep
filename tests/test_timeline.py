@@ -125,3 +125,14 @@ def test_timeline_empty_on_no_match(svc) -> None:
 
     eh.build_eval_corpus(svc)
     assert svc.timeline("qqqzzznope", "evalchat", mode="bm25") == []
+
+
+def test_build_timeline_type_hints_resolve_at_runtime() -> None:
+    import typing
+
+    from vecgrep.backend.timeline import build_timeline
+
+    hints = typing.get_type_hints(build_timeline)
+    assert "payload_for" in hints
+    assert "source_text_for" in hints
+

@@ -13,6 +13,7 @@ import statistics
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from vecgrep.backend import service as service_mod
 from vecgrep.backend.service import SearchMode, VecgrepService, _collection_for
@@ -65,7 +66,7 @@ def build_side_by_side(
     chunker: str | None = None,
     include: str | None = None,
     root: str | None = None,
-    decay_half_life_days: float | None | str = "inherit",
+    decay_half_life_days: float | None | Literal["inherit"] = "inherit",
     quantization: str | None = None,
     datatype: str = "float32",
     force: bool = False,
@@ -95,6 +96,15 @@ def build_side_by_side(
         else:
             raise ValueError(f"{dst} already exists (pass --force to rebuild)")
 
+    if isinstance(decay_half_life_days, str):
+        if decay_half_life_days != "inherit":
+            raise ValueError(
+                f"decay_half_life_days must be float, None, or 'inherit', got {decay_half_life_days!r}"
+            )
+        resolved_decay = live.decay_half_life_days
+    else:
+        resolved_decay = decay_half_life_days
+
     # Pre-create with the live corpus's pinned model so _index_locked resolves
     # the same backend identity the cache was filled under.
     now = time.time()
@@ -106,10 +116,7 @@ def build_side_by_side(
         chunker=chunker,
         created_at=now,
         updated_at=now,
-        decay_half_life_days=(
-            live.decay_half_life_days if decay_half_life_days == "inherit"
-            else decay_half_life_days
-        ),
+        decay_half_life_days=resolved_decay,
         rank_weight=getattr(live, "rank_weight", 1.0),
     )
     svc.registry.upsert(c)

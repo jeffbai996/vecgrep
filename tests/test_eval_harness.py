@@ -132,3 +132,19 @@ def test_baseline_file_exists_and_matches_schema() -> None:
     assert "queries" in data
     for qid, m in data["queries"].items():
         assert "n_results" in m and "redundancy" in m, f"{qid}: bad schema"
+
+
+def test_build_side_by_side_rejects_unknown_decay_sentinel(svc, make_doc) -> None:
+    from typing import Any, cast
+
+    import pytest
+
+    from vecgrep.eval.harness import build_side_by_side
+
+    p = make_doc("doc.md", "Alpha beta gamma.")
+    svc.index(str(p), "live")
+    with pytest.raises(ValueError, match="decay_half_life_days"):
+        build_side_by_side(
+            svc, "live", "eval-bad-decay", decay_half_life_days=cast(Any, "none")
+        )
+
