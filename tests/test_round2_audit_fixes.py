@@ -196,3 +196,132 @@ def test_qdrant_payload_index_fields_include_common_meta_keys() -> None:
         "metadata.tags",
     ):
         assert expected in indexed
+
+
+def test_mcp_read_only_tools_use_concurrent_read_gate_while_writes_stay_serialized() -> None:
+    import asyncio
+    import time
+    from mcp.server.fastmcp import FastMCP
+    from vecgrep.mcp import server as mcp_server
+
+    fmcp = FastMCP("test-gates")
+    mcp_server._offload_sync_tools(fmcp)
+    read_live = {"now": 0, "peak": 0}
+    write_live = {"now": 0, "peak": 0}
+
+    @fmcp.tool(description="read tool")
+    def search() -> str:
+        read_live["now"] += 1
+        read_live["peak"] = max(read_live["peak"], read_live["now"])
+        time.sleep(0.08)
+        read_live["now"] -= 1
+        return "ok"
+
+    @fmcp.tool(description="write tool")
+    def write() -> str:
+        write_live["now"] += 1
+        write_live["peak"] = max(write_live["peak"], write_live["now"])
+        time.sleep(0.08)
+        write_live["now"] -= 1
+        return "ok"
+
+    async def drive() -> None:
+        await asyncio.gather(*(fmcp._tool_manager.call_tool("search", {}) for _ in range(4)))
+        await asyncio.gather(*(fmcp._tool_manager.call_tool("write", {}) for _ in range(3)))
+
+    asyncio.run(drive())
+    assert read_live["peak"] >= 2, "read-only MCP tools should share the wider read gate"
+    assert write_live["peak"] == 1, "write MCP tools must stay serialized"
+
+
+def test_incident_includes_primary_slice_for_non_transcript_sources(
+    svc: VecgrepService, make_doc
+) -> None:
+    p = make_doc(
+        "runbook.md",
+        "# Gateway Outage Postmortem\n\n"
+        "The gateway failed when the upstream TLS certificate expired at midnight.\n"
+        "Rotating the certificate restored traffic across all regions.\n",
+    )
+    svc.index(str(p), "docs")
+    inc = svc.incident("gateway TLS certificate outage", "docs")
+    assert inc is not None
+    assert inc["primary_timeline"] == []
+    assert "TLS certificate" in inc["primary_slice"]
+
+
+def test_pin_definitions_orders_reranked_candidates_ahead_of_unscored_tail() -> None:
+    from vecgrep.backend.service import SearchResult
+    from vecgrep.backend.symbol_query import pin_definitions
+
+    def _mk(cid: str, score: float, matched_by: list[str]) -> SearchResult:
+        return SearchResult(
+            score=score,
+            similarity_pct=50.0,
+            chunk=f"def target_fn(): pass #{cid}",
+            chunk_start=0,
+            chunk_end=20,
+            context_before="",
+            context_after="",
+            source_id=f"{cid}.py",
+            corpus="code",
+            metadata={"symbol": "target_fn", "qualname": f"Mod.{cid}.target_fn"},
+            chunk_id=cid,
+            matched_by=matched_by,
+        )
+
+    reranked_def = _mk("reranked", 0.01, ["bm25", "rerank"])
+    unscored_tail_def = _mk("tail", 0.035, ["bm25"])
+    out = pin_definitions(
+        [reranked_def],
+        [unscored_tail_def, reranked_def],
+        "target_fn",
+        top_k=2,
+    )
+    assert [r.chunk_id for r in out] == ["reranked", "tail"]
+
+
+def test_payload_to_filter_stub_matches_passes_filters_without_uuid(monkeypatch) -> None:
+    import vecgrep.backend.service as svc_mod
+    from vecgrep.backend.service import _passes_filters, _payload_to_filter_stub
+
+    def _forbid_chunk_id(*args, **kwargs):
+        raise AssertionError("_chunk_id must not be called for filter stubs")
+
+    monkeypatch.setattr(svc_mod, "_chunk_id", _forbid_chunk_id)
+    payload = {
+        "source_id": "notes/alpha.md",
+        "corpus": "notes",
+        "doc_timestamp": 1767225600.0,
+        "metadata": {"status": "active", "project": "vecgrep"},
+    }
+    stub = _payload_to_filter_stub(payload)
+    assert _passes_filters(
+        stub,
+        ["source:notes/*.md", "corpus:notes", "meta.project=vecgrep"],
+        default_active=True,
+    )
+    assert not _passes_filters(
+        stub,
+        ["meta.project=other"],
+        default_active=True,
+    )
+
+
+def test_eval_run_config_clears_rerank_score_cache(
+    svc: VecgrepService, make_doc
+) -> None:
+    from vecgrep.backend import rerank as rerank_mod
+    from vecgrep.eval import harness
+    from vecgrep.eval.gold import GoldCase
+
+    p = make_doc("doc.md", "Alpha beta gamma delta epsilon.")
+    svc.index(str(p), "evaltest")
+    rerank_mod._score_cache[("model", "q", "chunk")] = 0.99
+    assert len(rerank_mod._score_cache) == 1
+
+    cfg = harness.RunConfig(name="test", top_k=3, rerank=False)
+    cases = [GoldCase(id="c1", corpus="evaltest", query="alpha", want=[str(p)])]
+    harness.run_config(svc, cfg, cases, warmup=False, repeat=1)
+    assert len(rerank_mod._score_cache) == 0
+

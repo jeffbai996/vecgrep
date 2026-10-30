@@ -1923,6 +1923,7 @@ class VecgrepService:
             },
             "primary_source": primary["source_id"],
             "primary_timeline": primary["events"],
+            "primary_slice": primary.get("slice_text", ""),
             "related": related,
         }
 
@@ -2861,7 +2862,7 @@ class VecgrepService:
 
         def eligible_payload(payload: dict) -> bool:
             return (not is_expired(payload.get("metadata") or {})
-                    and _passes_filters(_payload_to_result(payload, 0.0, 0.0, ["bm25"]),
+                    and _passes_filters(_payload_to_filter_stub(payload),
                                         effective_filters or [], default_active=True))
 
         vector_hits: list[StoredHit] = []
@@ -2907,7 +2908,7 @@ class VecgrepService:
                             and "status" not in (h.metadata or {})
                         )
                         or _passes_filters(
-                            _hit_to_result(h, ["vector"], model=corpus.embed_model),
+                            _hit_to_filter_stub(h),
                             effective_filters,
                             default_active=True,
                         )
@@ -2945,7 +2946,7 @@ class VecgrepService:
                         and "status" not in (payload.get("metadata") or {})
                     )
                     or _passes_filters(
-                        _payload_to_result(payload, score, 0.0, ["bm25"]),
+                        _payload_to_filter_stub(payload),
                         effective_filters,
                         default_active=True,
                     )
@@ -3942,19 +3943,33 @@ class VecgrepService:
             quantization=target.quantization,
         )
         offset = None
+        batch_idx = 0
         while True:
             points, offset = self.store.client.scroll(
                 collection_name=source, with_payload=True, with_vectors=True,
-                limit=256, offset=offset,
+                limit=512, offset=offset,
             )
             if points:
-                self.store.client.upsert(collection_name=dest, points=[
-                    qm.PointStruct(id=point.id, vector=point.vector,
-                                   payload={**(point.payload or {}), "corpus": name})
-                    for point in points
-                ], wait=True)
+                batch_idx += 1
+                self.store.client.upsert(
+                    collection_name=dest,
+                    points=[
+                        qm.PointStruct(
+                            id=point.id,
+                            vector=point.vector,
+                            payload={**(point.payload or {}), "corpus": name},
+                        )
+                        for point in points
+                    ],
+                    wait=(batch_idx % 8 == 0 or offset is None),
+                )
             if offset is None:
                 break
+        if self.store.count(dest) != expected:
+            for _ in range(10):
+                if self.store.count(dest) == expected:
+                    break
+                time.sleep(0.05)
         if self.store.count(dest) != expected:
             raise CorpusError("Migration copy is incomplete; staged content retained for recovery.")
         self._rebuild_bm25_from_store(target)
@@ -4982,6 +4997,51 @@ def _chunk_context_fields(
         "line_start": line_start,
         "line_end": line_end,
     }
+
+
+def _payload_to_filter_stub(payload: dict) -> SearchResult:
+    """Minimal SearchResult carrying only the fields `_passes_filters` reads.
+
+    Avoids computing `uuid.uuid5` (`_chunk_id`), context slices, and line
+    anchors on every candidate visited during Stage-2 BM25 or post-retrieval
+    filtering.
+    """
+    doc_ts = payload.get("doc_timestamp")
+    return SearchResult(
+        score=0.0,
+        similarity_pct=0.0,
+        chunk="",
+        chunk_start=0,
+        chunk_end=0,
+        context_before="",
+        context_after="",
+        source_id=payload.get("source_id", "") or "",
+        corpus=payload.get("corpus", "") or "",
+        metadata=payload.get("metadata", {}) or {},
+        chunk_id="",
+        matched_by=[],
+        doc_timestamp=float(doc_ts) if doc_ts is not None else None,
+    )
+
+
+def _hit_to_filter_stub(h: StoredHit) -> SearchResult:
+    """Minimal SearchResult for vector post-filtering without `calibrated_pct` or `uuid5`."""
+    doc_ts = h.doc_timestamp
+    return SearchResult(
+        score=0.0,
+        similarity_pct=0.0,
+        chunk="",
+        chunk_start=0,
+        chunk_end=0,
+        context_before="",
+        context_after="",
+        source_id=h.source_id,
+        corpus=h.corpus,
+        metadata=h.metadata or {},
+        chunk_id="",
+        matched_by=[],
+        doc_timestamp=float(doc_ts) if doc_ts is not None else None,
+    )
 
 
 def _payload_to_result(

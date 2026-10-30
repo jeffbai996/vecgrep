@@ -352,6 +352,7 @@ export type Incident = {
   time_range: { start: string; end: string };
   primary_source: string;
   primary_timeline: TimelineEvent[];
+  primary_slice?: string;
   related: TimelineGroup[];
 };
 

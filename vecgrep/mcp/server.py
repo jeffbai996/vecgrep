@@ -2116,6 +2116,30 @@ class ToolBusyError(RuntimeError):
 # client's tool timeout.
 MCP_GATE_WAIT_S = float(_os.environ.get("VECGREP_MCP_GATE_WAIT_S", "20"))
 MCP_GATE_SLOTS = max(1, int(_os.environ.get("VECGREP_MCP_GATE_SLOTS", "1")))
+MCP_READ_GATE_SLOTS = max(
+    1,
+    int(
+        _os.environ.get(
+            "VECGREP_MCP_READ_GATE_SLOTS",
+            _os.environ.get("VECGREP_MCP_GATE_SLOTS", "6"),
+        )
+    ),
+)
+_READ_ONLY_MCP_TOOLS = frozenset({
+    "search",
+    "timeline",
+    "incident",
+    "browse",
+    "get_source",
+    "list_aliases",
+    "related",
+    "compare",
+    "stats",
+    "summarize_corpus",
+    "get_chunk",
+    "list_corpora",
+    "get_corpus",
+})
 
 
 def _offload_sync_tools(fmcp: Any) -> None:
@@ -2140,10 +2164,10 @@ def _offload_sync_tools(fmcp: Any) -> None:
     by default for cross-corpus fan-out, which pushed a routine search past
     the 5s probe budget.
 
-    Calls stay SERIALIZED. They were already, by virtue of running on the
-    loop; the gate keeps that property so nothing in the search path meets
-    concurrency it was never written for. What changes is only that the loop
-    is free to answer while a tool works.
+    Write/mutating tools stay serialized behind a 1-slot gate, while known
+    read-only MCP tools share a bounded read gate (`MCP_READ_GATE_SLOTS`,
+    default 6) so a slow cross-corpus search does not block `list_corpora`,
+    `get_chunk`, or concurrent squad searches.
     """
     import functools
     import inspect as _inspect
@@ -2151,7 +2175,20 @@ def _offload_sync_tools(fmcp: Any) -> None:
     import anyio
 
     register = fmcp.tool
-    gate = anyio.Semaphore(max(1, int(_os.environ.get("VECGREP_MCP_GATE_SLOTS", str(MCP_GATE_SLOTS)))))
+    write_gate = anyio.Semaphore(
+        max(1, int(_os.environ.get("VECGREP_MCP_GATE_SLOTS", str(MCP_GATE_SLOTS))))
+    )
+    read_gate = anyio.Semaphore(
+        max(
+            1,
+            int(
+                _os.environ.get(
+                    "VECGREP_MCP_READ_GATE_SLOTS",
+                    _os.environ.get("VECGREP_MCP_GATE_SLOTS", str(MCP_READ_GATE_SLOTS)),
+                )
+            ),
+        )
+    )
 
     def tool(*args: Any, **kwargs: Any):
         decorate = register(*args, **kwargs)
@@ -2159,6 +2196,9 @@ def _offload_sync_tools(fmcp: Any) -> None:
         def apply(fn):
             if _inspect.iscoroutinefunction(fn):
                 return decorate(fn)
+
+            tool_name = kwargs.get("name") or getattr(fn, "__name__", "")
+            gate = read_gate if tool_name in _READ_ONLY_MCP_TOOLS else write_gate
 
             @functools.wraps(fn)          # keeps __wrapped__, so the schema
             async def offloaded(**call):  # FastMCP derives from the signature

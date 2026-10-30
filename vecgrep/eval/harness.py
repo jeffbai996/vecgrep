@@ -294,6 +294,9 @@ def run_config(
         saved_bm25w[a] = getattr(svc.registry.get(a), "bm25_weight", None)
         svc.set_bm25_weight(a, w)
     try:
+        from ..backend import rerank as rerank_mod
+
+        rerank_mod.clear_score_cache()
         with _Patched(cfg):
             if warmup and cases:
                 # first query pays model/connection warmup; keep it out of p50/p95
@@ -305,11 +308,14 @@ def run_config(
                                rerank_model=cfg.rerank_model)
                 except Exception:  # noqa: BLE001, S110 -- Failed readiness and warm-up attempts remain isolated from measured evaluation cases.
                     pass
+                rerank_mod.clear_score_cache()
             for case in cases:
                 actual = None if cfg.unscoped else actual_corpora[case.corpus]
                 lats = []
                 hits: list[dict] = []
                 for _ in range(max(1, repeat)):
+                    if repeat > 1:
+                        rerank_mod.clear_score_cache()
                     t0 = time.perf_counter()
                     res = svc.search(case.query, actual, top_k=cfg.top_k, mode=cfg.mode,
                                      rerank=cfg.rerank, rerank_model=cfg.rerank_model)
