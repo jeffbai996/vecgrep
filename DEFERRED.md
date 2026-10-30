@@ -1,12 +1,26 @@
 # Deferred behavior changes
 
-**Unresolved lint diagnostics: none.** No source fixes are deferred from this task branch because the upstream cleanup was already present.
+**Unresolved lint diagnostics: none.**
+**Unresolved Pyright (`standard` mode) diagnostics: none.**
 
-The constructs below were deliberately retained by upstream. They remain possible hardening work, not a claim that blanket lint suppression proves each failure path safe. Narrowing an exception boundary, changing an exception type, replacing a framework default, or changing reentrant resource ownership requires separate contract-specific tests. This verification adds no suppression.
+The constructs below were deliberately retained. Narrowing an exception boundary, changing an exception type, replacing a framework default, or changing reentrant resource ownership requires separate contract-specific tests.
 
-- `tests/fixtures/code_symbols/broken.py:5`: two syntax diagnostics remain in intentional malformed input. The upstream Ruff exclusion keeps parser-failure coverage intact.
+- `tests/fixtures/code_symbols/broken.py:5`: syntax diagnostics remain in intentional malformed input. Both `[tool.ruff]` and `[tool.pyright]` exclude this fixture to keep parser-failure coverage intact.
 
-## Targeted upstream annotations (85 locations)
+## Targeted Pyright annotations (8 locations)
+
+| Location | Rule | Reason |
+| --- | --- | --- |
+| `scripts/rerank_benchmark.py:190` | `reportMissingImports` | Optional `rerank` extra dependency (`torch`). |
+| `scripts/rerank_benchmark.py:191` | `reportMissingImports` | Optional `rerank` extra dependency (`sentence_transformers`). |
+| `vecgrep/backend/auth/provider.py:97` | `reportArgumentType` | RFC 8707 `invalid_target` error code is not listed in the MCP SDK `AuthorizationErrorCode` Literal. |
+| `vecgrep/backend/ingestion/chunkers/code_parse.py:148` | `reportArgumentType` | `tree_sitter.Language` capsule pointer mismatch with `Parser` stubs. |
+| `vecgrep/backend/ingestion/visual_processor.py:45` | `reportArgumentType` | `pypdfium2` stub declares `scale: int = 1`, whereas float scale is accepted at runtime. |
+| `vecgrep/backend/rerank.py:217` | `reportMissingImports` | Optional `rerank` extra dependency (`torch`). |
+| `vecgrep/backend/rerank.py:259` | `reportMissingImports` | Optional `rerank` extra dependency (`sentence_transformers`). |
+| `vecgrep/backend/rerank.py:266` | `reportMissingImports` | Optional `rerank` extra dependency (`torch`). |
+
+## Targeted Ruff annotations (88 locations)
 
 Each entry below preserves the upstream one-line reason. Existing full-suite and retrieval comparisons passed; they do not establish exhaustive coverage of every exceptional condition.
 
