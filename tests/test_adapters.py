@@ -186,3 +186,22 @@ def test_discord_load_preserves_message_order(tmp_path):
     assert len(docs) == 1
     text = docs[0].text
     assert text.index("msg0") < text.index("msg1") < text.index("msg2")
+
+
+def test_json_file_cache_avoids_repeated_loads(tmp_path, monkeypatch):
+    from unittest.mock import patch
+    from vecgrep.backend.ingestion.adapters.base import try_load_json_file, load_json_file
+    p = tmp_path / "sample.json"
+    p.write_text(json.dumps({"key": "val"}))
+
+    # First read parses and caches
+    obj1 = try_load_json_file(p)
+    assert obj1 == {"key": "val"}
+
+    # Subsequent reads with unmodified file should not call json.loads
+    with patch("json.loads") as loads_mock:
+        obj2 = try_load_json_file(p)
+        assert obj2 == {"key": "val"}
+        obj3 = load_json_file(p, str(p))
+        assert obj3 == {"key": "val"}
+        loads_mock.assert_not_called()

@@ -19,7 +19,7 @@ import uuid
 import weakref
 from bisect import bisect_left, bisect_right
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, get_args
@@ -726,40 +726,47 @@ class VecgrepService:
         sources: list[str] = []
         seen_sources: set[str] = set()
         source_hashes: dict[str, str] = {}
-        bm25_records: list[tuple[str, str, dict]] = []
-        for point_id, payload in self.store.iter_payloads(collection):
-            text = payload.get("text")
-            if not isinstance(text, str):
-                raise CorpusError(
-                    f"cannot recover {corpus_name}: {point_id} has no chunk text"
-                )
-            compact_payload = dict(payload)
-            compact_payload.pop("source_text", None)
-            # Same document ingest indexed: search_text when the chunk has one.
-            bm25_records.append((point_id, payload.get("search_text") or text, compact_payload))
-            sid = payload.get("source_id")
-            if isinstance(sid, str):
-                # Dedup the source list on its own. Gating it on the hash
-                # (as this used to) appends a source once per chunk whenever
-                # the hash can't be taken — which is now every non-carrier
-                # chunk, since only chunk 0 holds the document.
-                if sid not in seen_sources:
-                    seen_sources.add(sid)
-                    sources.append(sid)
-                source_text = payload.get("source_text")
-                if isinstance(source_text, str) and source_text and sid not in source_hashes:
-                    source_hashes[sid] = hashlib.sha256(
-                        source_text.encode("utf-8")
-                    ).hexdigest()
+        chunk_count = 0
 
-        self.bm25.replace(corpus_name, bm25_records)
+        def _recovery_records():
+            nonlocal chunk_count
+            for point_id, payload in self.store.iter_payloads(collection):
+                text = payload.get("text")
+                if not isinstance(text, str):
+                    raise CorpusError(
+                        f"cannot recover {corpus_name}: {point_id} has no chunk text"
+                    )
+                sid = payload.get("source_id")
+                if isinstance(sid, str):
+                    # Dedup the source list on its own. Gating it on the hash
+                    # (as this used to) appends a source once per chunk whenever
+                    # the hash can't be taken — which is now every non-carrier
+                    # chunk, since only chunk 0 holds the document.
+                    if sid not in seen_sources:
+                        seen_sources.add(sid)
+                        sources.append(sid)
+                    source_text = payload.get("source_text")
+                    if isinstance(source_text, str) and source_text and sid not in source_hashes:
+                        source_hashes[sid] = hashlib.sha256(
+                            source_text.encode("utf-8")
+                        ).hexdigest()
+                compact_payload = (
+                    {k: v for k, v in payload.items() if k != "source_text"}
+                    if "source_text" in payload
+                    else dict(payload)
+                )
+                chunk_count += 1
+                # Same document ingest indexed: search_text when the chunk has one.
+                yield point_id, payload.get("search_text") or text, compact_payload
+
+        self.bm25.replace(corpus_name, _recovery_records())
         # The catalog is derived. Invalidate it here and let the next Browse
         # request backfill from the freshly recovered BM25 sidecar.
         self._drop_explorer_catalog(corpus_name)
         corpus.sources = sources
         corpus.source_hashes = source_hashes
         corpus.doc_count = len(sources)
-        corpus.chunk_count = len(bm25_records)
+        corpus.chunk_count = chunk_count
         corpus.updated_at = time.time()
         self.registry.upsert(corpus)
         self.mutations.finish(corpus_name)
@@ -855,6 +862,55 @@ class VecgrepService:
         return CHUNKERS[name]()
 
     # ----- indexing -------------------------------------------------------------
+    def _prewarm_index_embeddings(
+        self,
+        source: str,
+        corpus_name: str,
+        chunker_name: str,
+        *,
+        include: str | None = None,
+    ) -> None:
+        """Warm EmbedCache for dirty chunks outside the corpus write lock so slow
+        network/GPU embedding never blocks concurrent search readers."""
+        if self.ephemeral or self._embed_cache is None:
+            return
+        try:
+            corpus = (
+                self.registry.get(corpus_name)
+                if self.registry.has(corpus_name)
+                else None
+            )
+            if corpus is not None and corpus.chunker != chunker_name:
+                return
+            backend = self._backend_for(corpus)
+            if not isinstance(backend, CachedBackend) or getattr(backend, "bypass", False):
+                return
+            is_dir = (
+                not source.startswith(("http://", "https://"))
+                and Path(source).is_dir()
+            )
+            adapter = None if is_dir else detect_adapter(source)()
+            chunker = self.chunker(chunker_name)
+            docs = _expand(source, adapter, include=include)
+            recorded_hashes = corpus.source_hashes if corpus is not None else {}
+            max_rows = getattr(self._embed_cache, "_max_rows", 0)
+            for doc in docs:
+                doc_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
+                if recorded_hashes.get(doc.source_id) == doc_hash:
+                    continue
+                chunks = (
+                    chunker.chunk_doc(doc)
+                    if hasattr(chunker, "chunk_doc")
+                    else chunker.chunk(doc.text)
+                )
+                if not chunks:
+                    continue
+                texts = [c.search_text or c.text for c in chunks if (c.search_text or c.text)]
+                if texts and (max_rows <= 0 or len(texts) <= max_rows):
+                    backend.embed(texts)
+        except Exception:  # noqa: BLE001, S110 -- Prewarm is best-effort; canonical errors surface inside _index_locked.
+            return
+
     def index(
         self,
         source: str,
@@ -865,6 +921,14 @@ class VecgrepService:
         **kwargs,
     ) -> tuple[int, int, int]:
         """Serialize one corpus mutation across every process and surface."""
+        if (
+            not force
+            and not kwargs.get("bypass_embed_cache")
+            and kwargs.get("resume_source_counts") is None
+        ):
+            self._prewarm_index_embeddings(
+                source, corpus_name, chunker_name, include=include
+            )
         with self.locks.write(corpus_name):
             self._recover_corpus_locked(corpus_name)
             visual_key = kwargs.pop("visual_key", None)
@@ -888,7 +952,7 @@ class VecgrepService:
                 # are removed. An unreadable/ignored existing file is retained.
                 root = root.resolve()
                 for sid in list(self.registry.get(corpus_name).sources):
-                    candidate = Path(sid)
+                    candidate = Path(sid.partition("#")[0])
                     if candidate.is_absolute() and candidate.is_relative_to(root) and not candidate.exists():
                         self.delete_source(corpus_name, sid)
             return result
@@ -1124,18 +1188,22 @@ class VecgrepService:
 
                     journaled = update_bm25 and update_registry
                     if journaled:
-                        target = Corpus(**asdict(corpus))
-                        if doc.source_id not in target.sources:
-                            target.sources.append(doc.source_id)
-                        target.source_hashes[doc.source_id] = doc_hash
+                        before_journal = (
+                            _journal_corpus(corpus)
+                            if (total_docs > 0 or self.registry.has(corpus_name))
+                            else None
+                        )
+                        target_journal = _journal_corpus(corpus)
+                        if target_journal is not None and doc.source_id not in corpus.sources:
+                            target_journal["doc_count"] = len(corpus.sources) + 1
                         self.mutations.write({
                             "version": 1,
                             "corpus": corpus_name,
                             "operation": "index_source",
                             "phase": "prepared",
                             "source_id": doc.source_id,
-                            "corpus_before": _journal_corpus(corpus) if self.registry.has(corpus_name) else None,
-                            "corpus_target": _journal_corpus(target),
+                            "corpus_before": before_journal,
+                            "corpus_target": target_journal,
                             "old_points": old_records,
                         })
 
@@ -1217,6 +1285,7 @@ class VecgrepService:
                             vectors[i] = vec
 
                     reused_chunks = len(chunks) - len(dirty_embed_indices)
+                    dirty_embed_set = set(dirty_embed_indices)
                     incremental_update = bool(old_by_id and reused_chunks > 0)
                     new_id_set = set(ids)
                     stale_ids = [oid for oid in old_by_id if oid not in new_id_set]
@@ -1233,7 +1302,7 @@ class VecgrepService:
                             i
                             for i in range(len(chunks))
                             if i == 0
-                            or i in dirty_embed_indices
+                            or i in dirty_embed_set
                             or not _chunk_payload_unchanged(
                                 old_by_id.get(ids[i], {}).get("payload"),
                                 payloads[i],
@@ -1268,7 +1337,7 @@ class VecgrepService:
                             bm25_indices = [
                                 i
                                 for i in range(len(chunks))
-                                if i in dirty_embed_indices
+                                if i in dirty_embed_set
                                 or not _chunk_payload_unchanged(
                                     old_by_id.get(ids[i], {}).get("payload"),
                                     bm25_payloads[i],
@@ -1312,7 +1381,14 @@ class VecgrepService:
 
                     if update_registry:
                         corpus.doc_count = len(corpus.sources)
-                        corpus.chunk_count = self.store.count(collection)
+                        if replace_existing and not (
+                            resume_source_counts is not None and matches_recorded_source
+                        ):
+                            corpus.chunk_count = max(
+                                0, corpus.chunk_count - len(old_records) + len(chunks)
+                            )
+                        else:
+                            corpus.chunk_count = self.store.count(collection)
                         corpus.updated_at = time.time()
                         if self.ephemeral:
                             self.registry._corpora[corpus.name] = corpus
@@ -1320,6 +1396,16 @@ class VecgrepService:
                             self.registry.upsert(corpus)
                         if journaled:
                             self.mutations.finish(corpus_name)
+
+                if update_registry and total_docs > 0:
+                    exact_count = self.store.count(collection)
+                    if corpus.chunk_count != exact_count:
+                        corpus.chunk_count = exact_count
+                        corpus.updated_at = time.time()
+                        if self.ephemeral:
+                            self.registry._corpora[corpus.name] = corpus
+                        else:
+                            self.registry.upsert(corpus)
 
             # During recovery, do not persist an intermediate point count as the
             # corpus's expected total. If interrupted, diagnose() must retain count
@@ -1371,7 +1457,11 @@ class VecgrepService:
         fnmatch patterns. Never applied to an explicitly named corpus -- see
         search().
         """
-        return [c for c in self.registry.list() if self.in_default_search(c.name)]
+        return [
+            c
+            for c in self.registry.list(include_sources=False)
+            if self.in_default_search(c.name)
+        ]
 
     def in_default_search(self, name: str) -> bool:
         """Does a search that names no corpus cover this one?"""
@@ -1411,6 +1501,7 @@ class VecgrepService:
         started = time.monotonic()
         _validate_search_mode(mode)
         top_k = top_k or self.settings.default_top_k
+        raw_query = query
         if expand_aliases:
             # Entity alias expansion (user-supplied map, outside the repo;
             # empty/missing map = exact no-op). A query naming one surface
@@ -1428,11 +1519,11 @@ class VecgrepService:
             names = list(dict.fromkeys(corpus_names))
             # Resolve every requested name before beginning any search. This
             # avoids a typo returning a misleading partial result.
-            corpora = [self.registry.get(name) for name in names]
+            corpora = [self.registry.get(name, include_sources=False) for name in names]
         elif corpus_name:
             # An explicitly named corpus is always searched, exclusions or not
             # -- otherwise the eval harness could not query its own build.
-            corpora = [self.registry.get(corpus_name)]
+            corpora = [self.registry.get(corpus_name, include_sources=False)]
         else:
             corpora = self._searchable_corpora()
         if not corpora:
@@ -1452,7 +1543,9 @@ class VecgrepService:
         per_corpus_k = max(CANDIDATE_POOL, top_k)
 
         user_filters = list(filters or [])
-        has_explicit_status = any(f.startswith("meta.status=") for f in user_filters)
+        has_explicit_status = any(
+            f.removeprefix("-").startswith("meta.status=") for f in user_filters
+        )
         effective_filters = list(user_filters)
         if not include_superseded and not has_explicit_status:
             effective_filters.append("meta.status=active")
@@ -1460,6 +1553,7 @@ class VecgrepService:
         timer = _StageTimer()
         timer.user_filters = user_filters
         timer.effective_filters = effective_filters
+        timer.raw_query = raw_query  # type: ignore[attr-defined]
         if user_filters and _has_invalid_filter(user_filters):
             return SearchOutcome(
                 [],
@@ -1577,7 +1671,7 @@ class VecgrepService:
         # An identifier-shaped query ("Importer.run") asks for a definition:
         # keep the pre-selection pool so the definition is pinned first even
         # when reranking or diversity selection would have left it out.
-        symbol = symbol_query(query)
+        symbol = symbol_query(raw_query)
         definition_pool = list(results) if symbol else []
 
         # A cold cross-encoder takes minutes to load and would hold a sync
@@ -1595,7 +1689,7 @@ class VecgrepService:
             try:
                 with timer.measure("rerank"):
                     results = self._apply_rerank(
-                        query, results, top_k, rerank_model, explain=explain)
+                        raw_query, results, top_k, rerank_model, explain=explain)
                 reranked = True
             except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
                 # Readiness only proves the model LOADED. predict() can still
@@ -1804,8 +1898,14 @@ class VecgrepService:
                 g["doc_timestamp"], tz=timezone.utc
             ).strftime("%Y-%m-%d")
 
-        stamps = [
-            f"{_day(g)} {e['time'].zfill(5)}".strip()
+        dated_stamps = [
+            f"{_day(g)} {e['time'].zfill(5)}"
+            for g in groups
+            if _day(g)
+            for e in g["events"]
+        ]
+        stamps = dated_stamps or [
+            e["time"].zfill(5)
             for g in groups
             for e in g["events"]
         ]
@@ -1861,7 +1961,7 @@ class VecgrepService:
             raise ValueError(f"unparseable until: {until!r} (want YYYY-MM-DD)")
 
         with self.locks.read(corpus_name, timeout=self._search_admission_timeout()):
-            corpus = self.registry.get(corpus_name)
+            corpus = self.registry.get(corpus_name, include_sources=False)
             matched_records: list[dict] = []
             for rec in self._explorer_records_for(corpus.name):
                 source_id = str(rec.get("source_id") or "")
@@ -1961,7 +2061,7 @@ class VecgrepService:
         get_chunk_window — a stub or corpus listing hands you the source_id;
         this hands back the file. None when the source isn't indexed."""
         with self.locks.read(corpus_name, timeout=self._search_admission_timeout()):
-            corpus = self.registry.get(corpus_name)
+            corpus = self.registry.get(corpus_name, include_sources=False)
             first = self.bm25.first_chunk_for_source(corpus.name, source_id)
             if first is None:
                 return None
@@ -1991,7 +2091,7 @@ class VecgrepService:
             }
 
     def _explorer_records_for(self, corpus_name: str) -> list[dict]:
-        corpus = self.registry.get(corpus_name)
+        corpus = self.registry.get(corpus_name, include_sources=False)
         generation = self._explorer_generation(corpus)
         try:
             catalog_is_current = (
@@ -2032,7 +2132,7 @@ class VecgrepService:
         return records
 
     def _explorer_catalog_for(self, corpus_name: str) -> ExplorerCatalog:
-        corpus = self.registry.get(corpus_name)
+        corpus = self.registry.get(corpus_name, include_sources=False)
         generation = self._explorer_generation(corpus)
         cached = self._explorer_cache.get(corpus.name)
         if cached is not None and cached[0] == generation:
@@ -2048,6 +2148,7 @@ class VecgrepService:
         return corpus.updated_at, corpus.doc_count, corpus.chunk_count
 
     def _drop_explorer_catalog(self, corpus_name: str) -> None:
+        self._explorer_cache.pop(corpus_name, None)
         try:
             self.explorer_store.drop(corpus_name)
         except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
@@ -2066,7 +2167,7 @@ class VecgrepService:
         limit: int = 50,
     ) -> dict:
         """Paginated source-level navigation for one corpus."""
-        with self.locks.read(corpus_name):
+        with self.locks.read(corpus_name, timeout=self._search_admission_timeout()):
             return list_catalog(
                 self._explorer_catalog_for(corpus_name),
                 corpus=corpus_name,
@@ -2087,7 +2188,7 @@ class VecgrepService:
         """Resolve a source's explorer home and return a bounded text preview."""
         if max_chars < 1:
             raise ValueError("max_chars must be at least 1")
-        with self.locks.read(corpus_name):
+        with self.locks.read(corpus_name, timeout=self._search_admission_timeout()):
             catalog = self._explorer_catalog_for(corpus_name)
             entry = catalog.find(source_id)
             if entry is None:
@@ -2115,7 +2216,7 @@ class VecgrepService:
         chunk and collapses near-duplicate slices of the same exchange with
         the same dedup the normal search path uses."""
         with self.locks.read(corpus_name, timeout=self._search_admission_timeout()):
-            corpus = self.registry.get(corpus_name)
+            corpus = self.registry.get(corpus_name, include_sources=False)
             collection = _collection_for(corpus.name)
             vector = self.store.get_vector(collection, chunk_id)
             if vector is None:
@@ -2184,7 +2285,7 @@ class VecgrepService:
         zero chunks inside the covered span — a broken archiver shows up as a
         growing gap), and per-source chunk sizes."""
         with self.locks.read(corpus_name, timeout=self._search_admission_timeout()):
-            corpus = self.registry.get(corpus_name)
+            corpus = self.registry.get(corpus_name, include_sources=False)
             records = self._explorer_records_for(corpus.name)
             by_source: dict[str, int] = {}
             total_chunks = 0
@@ -2237,38 +2338,45 @@ class VecgrepService:
         spaced deterministic sample of chunks for an LLM to theme. Sampling
         is explicit in the output — never a silent truncation."""
         with self.locks.read(corpus_name, timeout=self._search_admission_timeout()):
-            corpus = self.registry.get(corpus_name)
-            filters: list[str] = []
-            if after:
-                filters.append(f"after:{after}")
-            if before:
-                filters.append(f"before:{before}")
+            corpus = self.registry.get(corpus_name, include_sources=False)
+            after_cut = _parse_filter_time(after) if after else None
+            before_cut = _parse_filter_time(before) if before else None
+            invalid_window = bool(
+                (after and after_cut is None) or (before and before_cut is None)
+            )
+            has_window = after_cut is not None or before_cut is not None
             speakers: dict[str, int] = {}
             by_source: dict[str, int] = {}
             first_ts: float | None = None
             last_ts: float | None = None
             compact_samples: list[tuple[str, int, str]] = []
-            for p in self.bm25.iter_payloads(corpus.name):
-                if filters and not _passes_filters(
-                    _payload_to_result(p, 0.0, 0.0, []), filters
-                ):
-                    continue
-                md = p.get("metadata", {}) or {}
-                for sp in md.get("speakers") or []:
-                    speakers[str(sp)] = speakers.get(str(sp), 0) + 1
-                sid = p.get("source_id", "") or ""
-                by_source[sid] = by_source.get(sid, 0) + 1
-                if p.get("doc_timestamp"):
-                    t = float(p["doc_timestamp"])
-                    first_ts = t if first_ts is None or t < first_ts else first_ts
-                    last_ts = t if last_ts is None or t > last_ts else last_ts
-                compact_samples.append(
-                    (
-                        sid,
-                        int(p.get("chunk_index", 0)),
-                        (p.get("text", "") or "")[:240],
+            if not invalid_window:
+                for p in self.bm25.iter_payloads(corpus.name):
+                    doc_ts = p.get("doc_timestamp")
+                    if has_window:
+                        if doc_ts is None:
+                            continue
+                        t_val = float(doc_ts)
+                        if after_cut is not None and t_val < after_cut:
+                            continue
+                        if before_cut is not None and t_val >= before_cut:
+                            continue
+                    md = p.get("metadata", {}) or {}
+                    for sp in md.get("speakers") or []:
+                        speakers[str(sp)] = speakers.get(str(sp), 0) + 1
+                    sid = p.get("source_id", "") or ""
+                    by_source[sid] = by_source.get(sid, 0) + 1
+                    if doc_ts:
+                        t = float(doc_ts)
+                        first_ts = t if first_ts is None or t < first_ts else first_ts
+                        last_ts = t if last_ts is None or t > last_ts else last_ts
+                    compact_samples.append(
+                        (
+                            sid,
+                            int(p.get("chunk_index", 0)),
+                            (p.get("text", "") or "")[:240],
+                        )
                     )
-                )
             span: dict = {"first": None, "last": None}
             if first_ts is not None and last_ts is not None:
                 span = {
@@ -2348,7 +2456,7 @@ class VecgrepService:
     def _payload_for_result(self, r: SearchResult) -> dict | None:
         """Stored payload for a result's chunk. Carries the precomputed
         context fields; source_text only when the chunk is its carrier."""
-        corpus = self.registry.get(r.corpus)
+        corpus = self.registry.get(r.corpus, include_sources=False)
         payload = self.store.get_by_id(_collection_for(corpus.name), r.chunk_id)
         if payload is None:
             payload = self.bm25.get_by_id(corpus.name, r.chunk_id)
@@ -2551,6 +2659,7 @@ class VecgrepService:
             # solved by the steep, properly-centered calibration (center 0.57,
             # slope 35) instead of the naive score*100. Raw rerank score is
             # kept in explain for inspection; sort order is the rerank order.
+            r.score = float(score)
             r.similarity_pct = _rerank_to_pct(float(score))
             r.explain = {**(r.explain or {}), "rerank_score": float(score)}
             if "rerank" not in r.matched_by:
@@ -2559,15 +2668,17 @@ class VecgrepService:
         # `scored` is sorted by reranker score desc, and we appended in that
         # order -- so `out` already reflects the reranked ordering. MMR selects
         # top_k from it using the rerank score as relevance, skipping
-        # near-clones; selection order starts from the best hit, so the
-        # reranked ordering survives for everything selected. Do NOT re-sort
-        # by similarity_pct here (that would undo the rerank).
+        # near-clones; re-sorting `selected` by `key` afterward ensures the
+        # displayed order stays monotonic in relevance even when MMR's
+        # diversity penalty picked a lower-relevance candidate ahead of a
+        # higher-relevance one. Do NOT re-sort by similarity_pct here.
         key = lambda r: r.explain.get("rerank_score", 0.0)
         if getattr(self.settings, "rerank_prior", False):
             self._apply_rerank_prior(out)
             out.sort(key=lambda r: r.explain["rerank_ranked"], reverse=True)
             key = lambda r: r.explain["rerank_ranked"]
         selected = mmr_select(out, top_k, key=key)
+        selected.sort(key=key, reverse=True)
         if tail and len(selected) < top_k:
             # Backfill from the unscored tail, in fusion order. These carry no
             # rerank_score and are NOT marked as reranked: the model never saw
@@ -2594,13 +2705,14 @@ class VecgrepService:
         for r in results:
             if r.corpus not in corpora:
                 try:
-                    corpora[r.corpus] = self.registry.get(r.corpus)
+                    corpora[r.corpus] = self.registry.get(r.corpus, include_sources=False)
                 except Exception:  # noqa: BLE001 -- an unknown corpus gets no prior
                     corpora[r.corpus] = None
             corpus = corpora[r.corpus]
             prior = (getattr(corpus, "rank_weight", 1.0) or 1.0) if corpus else 1.0
             r.explain["rerank_prior"] = prior
             r.explain["rerank_ranked"] = r.explain.get("rerank_score", 0.0) * prior
+            r.score = float(r.explain["rerank_ranked"])
 
     def _search_admission_timeout(self) -> float | None:
         """Seconds one corpus gets to admit a search; None waits."""
@@ -2637,6 +2749,10 @@ class VecgrepService:
             user_filters = timer.user_filters
         if effective_filters is None and timer is not None:
             effective_filters = timer.effective_filters
+        needs_sources = any(
+            f.removeprefix("-").startswith(("source:", "source_path:"))
+            for f in (user_filters or [])
+        )
         queued = time.monotonic()
         needs_recovery = False
         with self.locks.read(corpus.name, timeout=timeout):
@@ -2650,7 +2766,7 @@ class VecgrepService:
                     logger.warning(
                         "corpus %s took %.1fs to admit a search", corpus.name, waited
                     )
-                corpus = self.registry.get(corpus.name)
+                corpus = self.registry.get(corpus.name, include_sources=needs_sources)
                 return self._search_one_locked(
                     corpus,
                     query,
@@ -2677,7 +2793,7 @@ class VecgrepService:
                 )
             # A migration/delete may have completed while query assembly was
             # selecting corpora. Re-resolve metadata inside admission.
-            corpus = self.registry.get(corpus.name)
+            corpus = self.registry.get(corpus.name, include_sources=needs_sources)
             return self._search_one_locked(
                 corpus,
                 query,
@@ -2779,6 +2895,9 @@ class VecgrepService:
                 floor = _cosine_floor(corpus.embed_model)
                 if floor > 0.0:
                     vector_hits = [h for h in vector_hits if h.score >= floor]
+                vector_hits = [
+                    h for h in vector_hits if not is_expired(h.metadata or {})
+                ]
                 if effective_filters:
                     vector_hits = [
                         h
@@ -2793,6 +2912,7 @@ class VecgrepService:
                             default_active=True,
                         )
                     ]
+                vector_hits = vector_hits[:fetch_k]
             except (EmbedBackendError, SearchBackendError):
                 if mode != "hybrid":
                     raise
@@ -2830,11 +2950,13 @@ class VecgrepService:
                         default_active=True,
                     )
                 ]
+            bm25_hits = bm25_hits[:fetch_k]
 
         half_life = corpus.decay_half_life_days
         weight = getattr(corpus, "rank_weight", 1.0) or 1.0
         now = time.time()
-        symbol = symbol_query(query)
+        raw_query = getattr(timer, "raw_query", None) or query
+        symbol = symbol_query(raw_query)
 
         if mode == "vector":
             scored_vec: list[tuple[float, int, StoredHit]] = []
@@ -2925,7 +3047,7 @@ class VecgrepService:
         decay_by_id: dict[str, float] = {}
         decayed: dict[str, float] = {}
         # A definition of the queried symbol outranks lines that only mention it.
-        symbol = symbol_query(query)
+        symbol = symbol_query(raw_query)
         for cid, raw in rrf.items():
             ts = payloads_by_id.get(cid, {}).get("doc_timestamp")
             factor = _recency_factor(ts, half_life, now)
@@ -3174,7 +3296,7 @@ class VecgrepService:
         source. Returns None if the chunk can't be found in either store.
         """
         with self.locks.read(corpus_name, timeout=self._search_admission_timeout()):
-            corpus = self.registry.get(corpus_name)
+            corpus = self.registry.get(corpus_name, include_sources=False)
             payload = self.store.get_by_id(_collection_for(corpus.name), chunk_id)
             if payload is None:
                 # Vector store missed — try BM25 in case this chunk only lives
@@ -3223,10 +3345,24 @@ class VecgrepService:
             self._recover_corpus_locked(corpus_name)
             corpus = self.registry.get(corpus_name)
             collection = _collection_for(corpus.name)
-            target = Corpus(**asdict(corpus))
-            if source_id in target.sources:
-                target.sources.remove(source_id)
-            target.source_hashes.pop(source_id, None)
+            target = Corpus(
+                **{
+                    f.name: (
+                        [s for s in corpus.sources if s != source_id]
+                        if f.name == "sources"
+                        else (
+                            {
+                                k: v
+                                for k, v in corpus.source_hashes.items()
+                                if k != source_id
+                            }
+                            if f.name == "source_hashes"
+                            else getattr(corpus, f.name)
+                        )
+                    )
+                    for f in fields(Corpus)
+                }
+            )
             self.mutations.write({
                 "version": 1,
                 "corpus": corpus_name,
@@ -3241,7 +3377,10 @@ class VecgrepService:
             record["phase"] = "qdrant_done"
             self.mutations.write(record)
             self.bm25.delete_by_source(corpus.name, source_id)
-            catalog_sync_ok = True
+            catalog_sync_ok = (
+                self.explorer_store.generation(corpus.name)
+                == self._explorer_generation(corpus)
+            )
             try:
                 self.explorer_store.delete_source(corpus.name, source_id)
             except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
@@ -3251,6 +3390,7 @@ class VecgrepService:
                     corpus_name,
                     exc,
                 )
+            self._explorer_cache.pop(corpus.name, None)
             record["phase"] = "bm25_done"
             self.mutations.write(record)
             target.doc_count = len(target.sources)
@@ -3587,7 +3727,10 @@ class VecgrepService:
         model = None
         if corpus_name:
             try:
-                model = self.registry.get(corpus_name).embed_model
+                try:
+                    model = self.registry.get(corpus_name, include_sources=False).embed_model
+                except TypeError:
+                    model = self.registry.get(corpus_name).embed_model
             except CorpusError:
                 model = None
         center, slope = _calibration_for(model)
@@ -3608,18 +3751,19 @@ class VecgrepService:
         observed sample values each. Lets a caller pre-filter by
         actor/channel/date before semantic ranking instead of guessing keys.
         """
-        corpus = self.registry.get(corpus_name)  # raises CorpusError if absent
-        meta_values: dict[str, set] = {}
-        has_timestamp = False
-        for rec in self._explorer_records_for(corpus.name):
-            if rec.get("doc_timestamp") is not None:
-                has_timestamp = True
-            meta = rec.get("metadata") or {}
-            for k, v in meta.items():
-                if isinstance(v, (str, int, float, bool)):
-                    meta_values.setdefault(k, set())
-                    if len(meta_values[k]) < max_values:
-                        meta_values[k].add(v)
+        with self.locks.read(corpus_name, timeout=self._search_admission_timeout()):
+            corpus = self.registry.get(corpus_name, include_sources=False)  # raises CorpusError if absent
+            meta_values: dict[str, set] = {}
+            has_timestamp = False
+            for rec in self._explorer_records_for(corpus.name):
+                if rec.get("doc_timestamp") is not None:
+                    has_timestamp = True
+                meta = rec.get("metadata") or {}
+                for k, v in meta.items():
+                    if isinstance(v, (str, int, float, bool)):
+                        meta_values.setdefault(k, set())
+                        if len(meta_values[k]) < max_values:
+                            meta_values[k].add(v)
         out: dict = {
             "corpus": corpus.name,
             "filters": {
@@ -3982,25 +4126,7 @@ class VecgrepService:
         # re-upsert them into BM25 under the target name — text + payload only, no
         # pickle, no re-embedding.
         try:
-            self.bm25.drop(target_name)
-            offset = None
-            ids: list[str] = []
-            texts: list[str] = []
-            payloads: list[dict] = []
-            while True:
-                points, offset = self.store.client.scroll(
-                    collection_name=new_collection, limit=256,
-                    offset=offset, with_payload=True, with_vectors=False,
-                )
-                for pt in points:
-                    pl = pt.payload or {}
-                    ids.append(str(pt.id))
-                    texts.append(pl.get("search_text") or pl.get("text", ""))
-                    payloads.append(pl)
-                if offset is None:
-                    break
-            if ids:
-                self.bm25.upsert(target_name, ids, texts, payloads)
+            self._rebuild_bm25_from_store(corpus)
         except Exception:  # noqa: BLE001, S110 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
             # BM25 rebuild is best-effort — a restored corpus still works on the
             # vector half; the next index of any doc rebuilds BM25 anyway.
@@ -4030,9 +4156,15 @@ def _journal_corpus(corpus: Corpus | None) -> dict | None:
     """
     if corpus is None:
         return None
-    data = asdict(corpus)
-    data["sources"] = []
-    data["source_hashes"] = {}
+    data: dict = {}
+    for f in fields(Corpus):
+        if f.name == "sources":
+            data["sources"] = []
+        elif f.name == "source_hashes":
+            data["source_hashes"] = {}
+        else:
+            val = getattr(corpus, f.name)
+            data[f.name] = list(val) if isinstance(val, list) else val
     return data
 
 
@@ -4051,7 +4183,7 @@ def _source_path_aliases(sources: list[str]) -> list[dict]:
     """
     by_path: dict[str, list[str]] = {}
     for source in sorted(set(sources)):
-        if source.startswith(("http://", "https://")):
+        if source.startswith(("http://", "https://")) or "#" in source:
             continue
         try:
             path = Path(source).resolve(strict=True)
@@ -4078,7 +4210,7 @@ def _source_exists(source_id: str) -> bool:
     if source_id.startswith(("http://", "https://")):
         return True
     try:
-        return Path(source_id).exists()
+        return Path(source_id.partition("#")[0]).exists()
     except OSError:
         return False
 
@@ -4293,6 +4425,21 @@ def _passes_filters(
     return True
 
 
+_IGNORED_WALK_DIRS = frozenset({
+    ".git",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "target",
+    "dist",
+    "build",
+})
+
+
 def _expand(source: str, adapter, include: str | None = None) -> list[Document]:
     """Adapters yield one or more docs. For directories, walk and re-detect.
 
@@ -4304,11 +4451,17 @@ def _expand(source: str, adapter, include: str | None = None) -> list[Document]:
     p = Path(source) if not source.startswith(("http://", "https://")) else None
     if p and p.is_dir():
         docs: list[Document] = []
-        for sub in sorted(p.rglob("*")):
-            if not sub.is_file():
-                continue
-            if include and not fnmatch.fnmatch(sub.name, include):
-                continue
+        candidates: list[Path] = []
+        for root, dirs, files in os.walk(p):
+            dirs[:] = sorted(d for d in dirs if d not in _IGNORED_WALK_DIRS)
+            root_path = Path(root)
+            for fname in sorted(files):
+                if include and not fnmatch.fnmatch(fname, include):
+                    continue
+                sub = root_path / fname
+                if sub.is_file():
+                    candidates.append(sub)
+        for sub in sorted(candidates):
             try:
                 sub_adapter_cls = detect_adapter(str(sub))
             except Exception:  # noqa: BLE001, S112 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
@@ -4668,27 +4821,21 @@ def _build_qdrant_filter(
         elif form.startswith("after:"):
             cut = _parse_filter_time(form[len("after:"):], now=now)
             if cut is not None:
-                if negated:
-                    has_unpushed = True
-                else:
-                    must.append(
-                        qm.FieldCondition(
-                            key="doc_timestamp",
-                            range=qm.Range(gte=cut),
-                        )
+                target.append(
+                    qm.FieldCondition(
+                        key="doc_timestamp",
+                        range=qm.Range(gte=cut),
                     )
+                )
         elif form.startswith("before:"):
             cut = _parse_filter_time(form[len("before:"):], now=now)
             if cut is not None:
-                if negated:
-                    has_unpushed = True
-                else:
-                    must.append(
-                        qm.FieldCondition(
-                            key="doc_timestamp",
-                            range=qm.Range(lt=cut),
-                        )
+                target.append(
+                    qm.FieldCondition(
+                        key="doc_timestamp",
+                        range=qm.Range(lt=cut),
                     )
+                )
         elif form.startswith("channel:"):
             want = form[len("channel:"):].strip()
             target.append(
@@ -4719,10 +4866,12 @@ def _build_qdrant_filter(
                         )
                     )
         elif form == "meta.status=active" and not negated:
-            must.append(qm.Filter(should=[
-                qm.FieldCondition(key="metadata.status", match=qm.MatchValue(value="active")),
-                qm.IsEmptyCondition(is_empty=qm.PayloadField(key="metadata.status")),
-            ]))
+            must_not.append(
+                qm.FieldCondition(
+                    key="metadata.status",
+                    match=qm.MatchExcept(**{"except": ["active"]}),
+                )
+            )
         elif form.startswith("meta.") and "=" in form[len("meta."):]:
             key, value = form[len("meta."):].split("=", 1)
             if key:

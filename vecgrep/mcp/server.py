@@ -41,6 +41,8 @@ import json
 from dataclasses import asdict
 from typing import Any, Literal
 
+from ..backend.mutation import LockTimeout
+
 # --- MCP server icon (SEP-973) ------------------------------------------
 # A lens over scattered points: nearest-neighbour search in a vector space.
 # Teal #56d4bc, chosen to stay legible on both light and dark (this SDK
@@ -219,15 +221,37 @@ def _result_payload(r) -> dict:
 RERANK_AUTO_MIN_POINTS = 10_000
 
 
-def _corpus_chunk_counts(svc) -> dict[str, int]:
+def _corpus_chunk_counts(svc, corpus: str | None = None) -> dict[str, int]:
     """name -> chunk_count for every corpus, from whichever shape svc returns.
 
     list_corpora() yields Corpus objects locally and dicts through the API
     mirror. chunk_count is the field that actually exists — `points`/`chunks`
     do not, and guessing them would make every size gate silently read zero.
+    Pass include_sources=False so MCP searches never clone the 4.7 MB sources
+    and source_hashes dictionaries.
     """
     out: dict[str, int] = {}
-    for c in svc.list_corpora():
+    if corpus and hasattr(svc, "registry"):
+        try:
+            c = svc.registry.get(corpus, include_sources=False)
+            cn = getattr(c, "name", None)
+            n = getattr(c, "chunk_count", None)
+            if cn:
+                out[str(cn)] = int(n or 0)
+            return out
+        except Exception:
+            pass
+    if hasattr(svc, "registry"):
+        try:
+            corpora = svc.registry.list(include_sources=False)
+        except TypeError:
+            corpora = svc.registry.list()
+    elif hasattr(svc, "list_corpora"):
+        corpora = svc.list_corpora()
+    else:
+        corpora = []
+
+    for c in corpora:
         if isinstance(c, dict):
             cn, n = c.get("name"), c.get("chunk_count")
         else:
@@ -237,7 +261,7 @@ def _corpus_chunk_counts(svc) -> dict[str, int]:
     return out
 
 
-def _fanout_chunk_count(svc, args: dict) -> int:
+def _fanout_chunk_count(svc, args: dict, counts: list[int] | dict[str, int] | None = None) -> int:
     """Total chunks an unscoped/multi-corpus search will actually fan out over.
 
     Mirrors service.search_with_diagnostics's scope resolution: an explicit
@@ -247,21 +271,28 @@ def _fanout_chunk_count(svc, args: dict) -> int:
     for service objects that predate the helper (and for the API dict mirror).
     """
     names = args.get("corpora")
-    counts = _corpus_chunk_counts(svc)
-    if names:
-        return sum(counts.get(str(n), 0) for n in names)
-    searchable = getattr(svc, "_searchable_corpora", None)
-    if callable(searchable):
-        total = 0
-        for c in searchable():
-            name = c.get("name") if isinstance(c, dict) else getattr(c, "name", None)
-            if name:
-                total += counts.get(str(name), 0)
-        return total
-    return sum(counts.values())
+    if counts is None:
+        counts = _corpus_chunk_counts(svc)
+    if isinstance(counts, dict):
+        if names:
+            return sum(counts.get(str(n), 0) for n in names)
+        searchable = getattr(svc, "_searchable_corpora", None)
+        if callable(searchable):
+            total = 0
+            for c in searchable():
+                name = c.get("name") if isinstance(c, dict) else getattr(c, "name", None)
+                if name:
+                    total += counts.get(str(name), 0)
+            return total
+        return sum(counts.values())
+    elif isinstance(counts, (list, tuple)):
+        return sum(counts)
+    return 0
 
 
-def _should_rerank(svc, args: dict) -> bool:
+def _should_rerank(
+    svc, args: dict, counts: dict[str, int] | None = None
+) -> bool:
     """Explicit `rerank` in the call always wins; otherwise decide on size.
 
     Scoped to one corpus, size that corpus. Unscoped (the default squad-bot
@@ -289,13 +320,16 @@ def _should_rerank(svc, args: dict) -> bool:
             return False
         name = args.get("corpus")
         if not name:
-            return _fanout_chunk_count(svc, args) >= RERANK_AUTO_MIN_POINTS
-        return _corpus_chunk_counts(svc).get(name, 0) >= RERANK_AUTO_MIN_POINTS
+            return _fanout_chunk_count(svc, args, counts=counts) >= RERANK_AUTO_MIN_POINTS
+        resolved = counts if counts is not None else _corpus_chunk_counts(svc, name)
+        return resolved.get(name, 0) >= RERANK_AUTO_MIN_POINTS
     except Exception:  # noqa: BLE001 -- Tool and optional metadata failures are converted to their established protocol results.
         return False
 
 
-def _should_budget(svc, args: dict) -> bool:
+def _should_budget(
+    svc, args: dict, counts: dict[str, int] | None = None
+) -> bool:
     """Breadth mode by default on large corpora; explicit `budget` wins.
 
     Same size rule as rerank, for the same reason: on a small corpus the
@@ -320,7 +354,8 @@ def _should_budget(svc, args: dict) -> bool:
         name = args.get("corpus")
         if not name:
             return False
-        return _corpus_chunk_counts(svc).get(name, 0) >= RERANK_AUTO_MIN_POINTS
+        resolved = counts if counts is not None else _corpus_chunk_counts(svc, name)
+        return resolved.get(name, 0) >= RERANK_AUTO_MIN_POINTS
     except Exception:  # noqa: BLE001 -- Tool and optional metadata failures are converted to their established protocol results.
         return False
 
@@ -336,11 +371,17 @@ def _run_search(args: dict) -> str:
     explicit_top_k = args.get("top_k") is not None
     args = resolve_search(args)
     svc = _svc()
+    counts: dict[str, int] | None = None
+    if args.get("rerank") is None or args.get("budget") is None:
+        try:
+            counts = _corpus_chunk_counts(svc, args.get("corpus"))
+        except Exception:  # noqa: BLE001 -- fallback inside _should_* handles missing counts
+            counts = None
     common = {
         'corpus_name': args.get("corpus"),
         'corpus_names': args.get("corpora"),
         'mode': args.get("mode", "hybrid"),
-        'rerank': _should_rerank(svc, args),
+        'rerank': _should_rerank(svc, args, counts=counts),
         'filters': args.get("filters") or None,
         # Superseded versions are hidden by default (a stale revision is not
         # current truth). Reading history is the one legitimate reason to want
@@ -350,7 +391,7 @@ def _run_search(args: dict) -> str:
         # score. It is assembled from scores already in hand; no extra search.
         'explain': True,
     }
-    if _should_budget(svc, args):
+    if _should_budget(svc, args, counts=counts):
         # Breadth mode: full head + one-line stub tail under a token ceiling.
         # Stubs carry chunk_id — expand any of them with the get_chunk tool.
         full, stubs, warnings = svc.search_budgeted_with_diagnostics(
@@ -2046,7 +2087,7 @@ def build_mcp_server() -> Any:
         except Exception as exc:  # noqa: BLE001 -- Tool and optional metadata failures are converted to their established protocol results.
             from ..backend.embed.base import EmbedBackendError
             from ..backend.store.qdrant_store import SearchBackendError
-            if isinstance(exc, (EmbedBackendError, SearchBackendError)):
+            if isinstance(exc, (EmbedBackendError, SearchBackendError, LockTimeout)):
                 text = json.dumps({"error": "Search dependency unavailable; retry the request.",
                                    "code": "search_unavailable"})
             else:

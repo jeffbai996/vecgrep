@@ -224,3 +224,33 @@ def test_restore_failure_runs_automatic_rollback(vg_home: Path, monkeypatch) -> 
     with pytest.raises(BackupError, match="rolled back"):
         manager.restore(archive, confirm=backup_id)
     assert calls == ["manual", "pre-restore"]
+
+
+def test_restore_cleans_stale_explorer_and_mutations_files(vg_home: Path, monkeypatch) -> None:
+    settings = Settings(home=vg_home)
+    manager = BackupManager(settings)
+    archive = manager.create()
+    backup_id = manager.read_manifest(archive)["backup_id"]
+
+    mut_dir = vg_home / "mutations"
+    mut_dir.mkdir(parents=True, exist_ok=True)
+    stale_json = mut_dir / "stale.json"
+    stale_json.write_text("{}")
+    stale_phase = mut_dir / "stale.phase"
+    stale_phase.write_text("phase")
+
+    unlinked = []
+    orig_unlink = Path.unlink
+
+    def track_unlink(self, *args, **kwargs):
+        unlinked.append(self.name)
+        return orig_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", track_unlink)
+    result = manager.restore(archive, confirm=backup_id)
+    assert result["restored"] == backup_id
+    assert "explorer.db" in unlinked
+    assert "stale.json" in unlinked
+    assert "stale.phase" in unlinked
+    assert not stale_json.exists()
+    assert not stale_phase.exists()

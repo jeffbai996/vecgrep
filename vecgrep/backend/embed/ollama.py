@@ -98,7 +98,8 @@ class OllamaBackend(EmbedBackend):
         # behind a primary->fallback chain stalls every embed up to `timeout`
         # before failover triggers.
         self._client = self._make_client(read=timeout)
-        self.dim = _KNOWN_DIMS.get(model) or self._probe_dim()
+        known_dim = _KNOWN_DIMS.get(model) or _KNOWN_DIMS.get(model.partition(":")[0])
+        self.dim = known_dim or self._probe_dim()
 
     def _request_payload(self, input_: str | list[str]) -> dict:
         payload = {"model": self.model, "input": input_, "truncate": True}

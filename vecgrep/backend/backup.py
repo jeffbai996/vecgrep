@@ -182,6 +182,7 @@ class BackupManager:
         service_factory: Callable[[], VecgrepService] | None = None,
     ) -> None:
         self.settings = settings
+        self.home = settings.home
         self.backup_dir = (
             Path(settings.backup_destination).expanduser()
             if settings.backup_destination
@@ -362,7 +363,13 @@ class BackupManager:
             removed.append(path)
         return removed
 
-    def restore(self, archive: Path, *, confirm: str) -> dict:
+    def restore(
+        self,
+        archive: Path,
+        *,
+        confirm: str,
+        corpora: list[str] | None = None,
+    ) -> dict:
         archive = archive.expanduser().resolve()
         verified = self.verify(archive)
         if confirm != verified["backup_id"]:
@@ -370,11 +377,17 @@ class BackupManager:
         with self.mutation_lock():
             safety = self._create_unlocked(None, origin="pre-restore")
             try:
-                result = self._restore_verified(archive, verified)
+                if corpora is not None:
+                    result = self._restore_verified(archive, verified, corpora=corpora)
+                else:
+                    result = self._restore_verified(archive, verified)
             except Exception as exc:
                 rollback = self.verify(safety)
                 try:
-                    self._restore_verified(safety, rollback)
+                    if corpora is not None:
+                        self._restore_verified(safety, rollback, corpora=corpora)
+                    else:
+                        self._restore_verified(safety, rollback)
                 except Exception as rollback_exc:  # noqa: BLE001 -- Backup rollback and cleanup must contain arbitrary storage-provider failures.
                     raise BackupError(
                         f"restore failed ({exc}); automatic rollback also failed ({rollback_exc})"
@@ -382,7 +395,12 @@ class BackupManager:
                 raise BackupError(f"restore failed and was rolled back: {exc}") from exc
             return {**result, "safety_backup": str(safety)}
 
-    def _restore_verified(self, archive: Path, manifest: dict) -> dict:
+    def _restore_verified(
+        self,
+        archive: Path,
+        manifest: dict,
+        corpora: list[str] | None = None,
+    ) -> dict:
         with tempfile.TemporaryDirectory(dir=self.settings.home, prefix=".restore-") as tmp:
             staging = Path(tmp)
             with zipfile.ZipFile(archive) as bundle:
@@ -390,21 +408,7 @@ class BackupManager:
                     raise BackupError("archive contains an unsafe path or link")
                 bundle.extractall(staging)
 
-            service = self.service_factory()
-            snapshotter = QdrantSnapshots(self.settings, service)
-            for corpus in manifest.get("corpora", []):
-                snapshotter.restore(
-                    corpus["name"],
-                    staging / corpus["snapshot"],
-                    corpus["snapshot_format"],
-                    int(corpus["dim"]),
-                )
-
-            try:
-                self._release_service(service, replace=True)
-            except Exception:  # noqa: BLE001, S110 -- Backup rollback and cleanup must contain arbitrary storage-provider failures.
-                pass
-
+            # Restore config and corpora.json FIRST before snapshotter.restore
             current_config = _load_json(self.settings.config_file)
             restored_config = _load_json(staging / "config.json")
             for secret in SECRET_FIELDS:
@@ -422,32 +426,42 @@ class BackupManager:
                     shutil.rmtree(write_target)
                 os.replace(write_source, write_target)
 
-            # Re-open after replacing the registry so diagnostics and rebuilds
-            # see restored metadata (and embedded Qdrant releases its lock).
+            if corpora is None:
+                for fname in ("explorer.db", "explorer.db-wal", "explorer.db-shm"):
+                    (self.home / fname).unlink(missing_ok=True)
+                mutations_dir = self.home / "mutations"
+                if mutations_dir.is_dir():
+                    for f in mutations_dir.iterdir():
+                        if f.suffix in {".json", ".phase"} or f.name.endswith(".phase"):
+                            f.unlink(missing_ok=True)
+
             service = self.service_factory()
-            for corpus in manifest.get("corpora", []):
+            if hasattr(service, "_explorer_cache"):
+                service._explorer_cache.clear()
+
+            snapshotter = QdrantSnapshots(self.settings, service)
+            all_corpora = manifest.get("corpora", [])
+            target_corpora = (
+                all_corpora
+                if corpora is None
+                else [c for c in all_corpora if c["name"] in corpora]
+            )
+            for corpus in target_corpora:
+                snapshotter.restore(
+                    corpus["name"],
+                    staging / corpus["snapshot"],
+                    corpus["snapshot_format"],
+                    int(corpus["dim"]),
+                )
+
+            for corpus in target_corpora:
                 name = corpus["name"]
-                collection = _collection_for(name)
-                service.bm25.drop(name)
-                offset = None
-                while True:
-                    points, offset = service.store.client.scroll(
-                        collection_name=collection,
-                        limit=256,
-                        offset=offset,
-                        with_payload=True,
-                        with_vectors=False,
-                    )
-                    if points:
-                        service.bm25.upsert(
-                            name,
-                            [str(point.id) for point in points],
-                            [(point.payload or {}).get("search_text") or (point.payload or {}).get("text", "")
-                             for point in points],
-                            [point.payload or {} for point in points],
-                        )
-                    if offset is None:
-                        break
+                try:
+                    c_obj = service.registry.get(name)
+                    service._rebuild_bm25_from_store(c_obj)
+                except Exception:
+                    service.rebuild_bm25(name)
+
             issues = service.diagnose()
             try:
                 self._release_service(service, replace=True)

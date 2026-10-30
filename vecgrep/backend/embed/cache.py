@@ -148,6 +148,7 @@ class EmbedCache:
         # Resolved once per instance so tests can set the env before construction.
         # The service passes its settings value (config.json, env override).
         self._max_rows = _max_rows() if max_rows is None else int(max_rows)
+        self._approx_rows: int | None = None
         self._cap_warned = False
         # Deferred LRU bookkeeping. See _TOUCH_FLUSH_SECONDS: hits accumulate
         # here and reach sqlite on a timer instead of one COMMIT per lookup.
@@ -264,22 +265,43 @@ class EmbedCache:
                 [now, identity, *batch],
             )
 
-    def put_many(self, identity: str, texts: list[str], vectors: list[list[float]]) -> None:
+    def put_many(
+        self,
+        identity: str,
+        texts: list[str],
+        vectors: list[list[float]],
+        dim: int | None = None,
+        *,
+        hashes: list[str] | None = None,
+    ) -> None:
         if not texts:
             return
         if self._read_only:
             return
-        valid = [
-            (t, v) for t, v in zip(texts, vectors)
-            if v and not all(x == 0.0 for x in v)
-        ]
-        if not valid:
-            return
-        now = self._now()
-        rows = [
-            (identity, self._sha(t), _encode(v), now)
-            for t, v in valid
-        ]
+        if hashes is not None and len(hashes) == len(texts):
+            valid = [
+                (t, h, v) for t, h, v in zip(texts, hashes, vectors)
+                if v and not all(x == 0.0 for x in v)
+            ]
+            if not valid:
+                return
+            now = self._now()
+            rows = [
+                (identity, h, _encode(v), now)
+                for _, h, v in valid
+            ]
+        else:
+            valid = [
+                (t, v) for t, v in zip(texts, vectors)
+                if v and not all(x == 0.0 for x in v)
+            ]
+            if not valid:
+                return
+            now = self._now()
+            rows = [
+                (identity, self._sha(t), _encode(v), now)
+                for t, v in valid
+            ]
         with self._lock:
             try:
                 self._conn.executemany(
@@ -287,6 +309,8 @@ class EmbedCache:
                     "(identity, text_sha, vector, last_used) VALUES (?, ?, ?, ?)",
                     rows,
                 )
+                if self._approx_rows is not None:
+                    self._approx_rows += len(rows)
                 self._evict_over_cap_locked()
                 self._conn.commit()
             except sqlite3.OperationalError as exc:
@@ -300,7 +324,7 @@ class EmbedCache:
                     pass
                 logger.warning("embed cache write skipped: %s", exc)
 
-    def _evict_over_cap_locked(self) -> None:
+    def _evict_over_cap_locked(self) -> int:
         """Drop the coldest rows if over the cap. Caller must hold self._lock.
 
         Coldest = lowest last_used (LRU), ties broken by insertion order. This
@@ -315,14 +339,12 @@ class EmbedCache:
         stabilizes near the cap instead of growing forever. No VACUUM needed.
         """
         if self._max_rows <= 0:
-            return
-        # Buffered reads are what protect a hot row. Land them before choosing
-        # a victim, or eviction ranks by a stale last_used and drops exactly
-        # the entries the deferral was meant to keep.
-        self._flush_touches_locked()
-        (count,) = self._conn.execute("SELECT COUNT(*) FROM embed_cache").fetchone()
+            return 0
+        if self._approx_rows is None:
+            self._approx_rows = int(self._conn.execute("SELECT COUNT(*) FROM embed_cache").fetchone()[0])
+
         threshold = self._max_rows * _CAP_WARN_FRACTION
-        if count >= threshold:
+        if self._approx_rows >= threshold:
             if not self._cap_warned:
                 self._cap_warned = True
                 logger.warning(
@@ -330,28 +352,42 @@ class EmbedCache:
                     "corpus size turns a repair into a full re-embed -- raise "
                     "embed_cache_max_rows in config.json (or VECGREP_EMBED_CACHE_MAX_ROWS "
                     "in every vecgrep process) before it binds",
-                    count,
-                    100.0 * count / self._max_rows,
+                    self._approx_rows,
+                    100.0 * self._approx_rows / self._max_rows,
                     self._max_rows,
                 )
         else:
             self._cap_warned = False
-        overage = count - self._max_rows
-        if overage <= 0:
-            return
+
+        if self._approx_rows <= self._max_rows:
+            return 0
+
+        # Buffered reads are what protect a hot row. Land them before choosing
+        # a victim, or eviction ranks by a stale last_used and drops exactly
+        # the entries the deferral was meant to keep.
+        self._flush_touches_locked()
+        total = int(self._conn.execute("SELECT COUNT(*) FROM embed_cache").fetchone()[0])
+        self._approx_rows = total
+        if total <= self._max_rows:
+            return 0
+
+        overage = total - self._max_rows
         to_evict = overage if self._max_rows < 100 else max(overage, self._max_rows // 20)
         logger.warning(
             "embed cache over cap: evicting %d coldest of %d rows "
             "(embed_cache_max_rows / VECGREP_EMBED_CACHE_MAX_ROWS=%d)",
             to_evict,
-            count,
+            total,
             self._max_rows,
         )
-        self._conn.execute(
+        cur = self._conn.execute(
             "DELETE FROM embed_cache WHERE rowid IN "
             "(SELECT rowid FROM embed_cache ORDER BY last_used ASC, rowid ASC LIMIT ?)",
             (to_evict,),
         )
+        deleted = cur.rowcount if cur.rowcount != -1 else to_evict
+        self._approx_rows = total - deleted
+        return deleted
 
     def stats(self) -> dict:
         with self._lock:
@@ -486,8 +522,10 @@ class EmbedCache:
                 cur = self._conn.execute(
                     "DELETE FROM embed_cache WHERE identity = ?", (identity,)
                 )
+                self._approx_rows = None
             else:
                 cur = self._conn.execute("DELETE FROM embed_cache")
+                self._approx_rows = 0
             self._conn.commit()
             return cur.rowcount
 
@@ -508,36 +546,49 @@ class CachedBackend(EmbedBackend):
         self.name = inner.name
         self.model = inner.model
         self.dim = inner.dim
+        self._identity = getattr(inner, "identity", f"{inner.name}:{inner.model}")
         self.bypass = False
+
+    @property
+    def identity(self) -> str:
+        return self._identity
 
     def embed_one(self, text: str) -> list[float]:
         # An ingestion fallback may have cached a zero vector. It is never a
         # valid query embedding, and must not suppress dependency failover.
-        cached = self._cache.get_many(self.identity, [text]) if not self.bypass else {}
+        cached = self._cache.get_many(self._identity, [text]) if not self.bypass else {}
         vector = cached.get(EmbedCache._sha(text))
         if vector is None or not any(vector):
             vector = self._inner.embed_one(text)
             if not vector or not any(vector):
                 raise EmbedBackendError("Embedding backend could not produce a valid query vector.")
-            self._cache.put_many(self.identity, [text], [vector])
+            self._cache.put_many(self._identity, [text], [vector], self.dim)
         return vector
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        identity = self._inner.identity
+        identity = self._identity
+        shas = [EmbedCache._sha(t) for t in texts]
         if self.bypass:
             # Refresh: re-embed everything, overwrite cache entries.
             vectors = self._inner.embed(texts)
-            self._cache.put_many(identity, texts, vectors)
+            self._cache.put_many(identity, texts, vectors, self.dim, hashes=shas)
             return vectors
         cached = self._cache.get_many(identity, texts)
-        shas = [EmbedCache._sha(t) for t in texts]
         missing_idx = [i for i, s in enumerate(shas) if s not in cached]
         if missing_idx:
             missing_texts = [texts[i] for i in missing_idx]
-            new_vectors = self._inner.embed(missing_texts)
-            self._cache.put_many(identity, missing_texts, new_vectors)
-            for i, vec in zip(missing_idx, new_vectors):
-                cached[shas[i]] = vec
+            missing_shas = [shas[i] for i in missing_idx]
+            chunk_step = max(int(getattr(self._inner, "batch_size", 64) or 64) * 4, 256)
+            for start in range(0, len(missing_texts), chunk_step):
+                end = start + chunk_step
+                sub_texts = missing_texts[start:end]
+                sub_hashes = missing_shas[start:end]
+                sub_vectors = self._inner.embed(sub_texts)
+                self._cache.put_many(
+                    identity, sub_texts, sub_vectors, self.dim, hashes=sub_hashes
+                )
+                for sha, vec in zip(sub_hashes, sub_vectors):
+                    cached[sha] = vec
         return [cached[s] for s in shas]

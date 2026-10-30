@@ -45,6 +45,26 @@ def test_f_chunk_01_sentence_window_fails_to_split_chinese_prose():
     assert len(chunks) >= 2
 
 
+def test_sentence_window_splits_oversized_unpunctuated_text():
+    chunker = SentenceWindowChunker(max_chars=500)
+    text = "word " * 1000  # 5000 chars, no sentence-ending punctuation
+    chunks = chunker.chunk(text)
+    assert len(chunks) > 1
+    assert all(len(c.text) <= 500 for c in chunks)
+    for c in chunks:
+        assert text[c.start:c.end] == c.text
+
+
+def test_sentence_window_splits_oversized_unbroken_character_stream():
+    chunker = SentenceWindowChunker(max_chars=200)
+    text = "x" * 2000  # completely unbroken characters
+    chunks = chunker.chunk(text)
+    assert len(chunks) == 10
+    assert all(len(c.text) <= 200 for c in chunks)
+    for c in chunks:
+        assert text[c.start:c.end] == c.text
+
+
 def test_f_chunk_02_turn_window_drops_preamble_and_short_tail_turn():
     """F-CHUNK-02: TurnWindowChunker drops preamble before first turn and short tail turns."""
     chunker = TurnWindowChunker(turns=2, stride=2, min_chars=30)

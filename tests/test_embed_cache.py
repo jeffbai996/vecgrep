@@ -748,3 +748,46 @@ def test_corpus_registry_stat_cache_and_include_sources(tmp_path, monkeypatch):
     reloaded = reg.get("test_c")
     assert reloaded.doc_count == 42
     assert loads_count == 1
+
+
+def test_approx_rows_avoids_count_query(tmp_path):
+    cache = EmbedCache(tmp_path / "embed.db", max_rows=100)
+    cache.put_many("id", ["a", "b", "c"], [[1.0], [2.0], [3.0]])
+    assert cache._approx_rows == 3
+
+    # Add more rows, below cap
+    cache.put_many("id", ["d", "e"], [[4.0], [5.0]])
+    assert cache._approx_rows == 5
+
+    real_conn = cache._conn
+    class ConnProxy:
+        def __getattr__(self, name):
+            return getattr(real_conn, name)
+        def execute(self, sql, *args, **kwargs):
+            if "COUNT(*)" in sql.upper():
+                raise AssertionError("Unexpected COUNT(*) query executed!")
+            return real_conn.execute(sql, *args, **kwargs)
+
+    cache._conn = ConnProxy()
+    try:
+        # Eviction check should use fast-path because _approx_rows (5) <= max_rows (100)
+        cache.put_many("id", ["f"], [[6.0]])
+        assert cache._approx_rows == 6
+    finally:
+        cache._conn = real_conn
+
+
+def test_cached_backend_embed_chunks_missing_texts(tmp_path):
+    cache = EmbedCache(tmp_path / "embed.db")
+    inner = _Counting()
+    inner.batch_size = 32
+    backend = CachedBackend(inner, cache)
+
+    # 300 missing texts with batch_size=32 -> chunk_step = max(32*4, 256) = 256
+    # So 300 texts should be split into 256 + 44 = 2 calls
+    texts = [f"missing-{i}" for i in range(300)]
+    vecs = backend.embed(texts)
+    assert len(vecs) == 300
+    assert inner.calls == 2
+    # Verify everything is now in cache
+    assert len(cache.get_many(backend.identity, texts)) == 300

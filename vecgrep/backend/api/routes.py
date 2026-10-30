@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from ..config import get_settings
 from ..embed import EmbedBackendError
 from ..ingestion.adapters import AdapterError
+from ..mutation import LockTimeout
 from ..rerank import RerankerError
 from ..service import VecgrepService
 from ..store import CorpusError
@@ -39,6 +40,7 @@ from .schemas import (
 # from being abused to dump entire huge sources via repeated calls.
 _DEFAULT_CHUNK_WINDOW = 2000
 _MAX_CHUNK_WINDOW = 20000
+_SEARCH_UNAVAILABLE_ERRORS = (EmbedBackendError, SearchBackendError, LockTimeout)
 logger = logging.getLogger(__name__)
 
 def require_token(authorization: str | None = Header(default=None)) -> None:
@@ -141,6 +143,8 @@ def delete_corpus(name: str) -> dict:
         svc.delete_corpus(name)
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except _SEARCH_UNAVAILABLE_ERRORS as exc:
+        raise HTTPException(status_code=503, detail={"error": "search_unavailable", "reason": str(exc)})
     return {"deleted": name}
 
 
@@ -152,6 +156,8 @@ def corpus_filters(name: str) -> dict:
         return svc.filterable_fields(name)
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except _SEARCH_UNAVAILABLE_ERRORS as exc:
+        raise HTTPException(status_code=503, detail={"error": "search_unavailable", "reason": str(exc)})
 
 
 @router.post("/corpora/{name}/decay", response_model=CorpusOut)
@@ -203,6 +209,8 @@ def delete_source(name: str, id: str) -> dict:
         svc.delete_source(name, id)
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except _SEARCH_UNAVAILABLE_ERRORS as exc:
+        raise HTTPException(status_code=503, detail={"error": "search_unavailable", "reason": str(exc)})
     return {"deleted": id}
 
 
@@ -217,8 +225,8 @@ def index(req: IndexRequest) -> IndexResponse:
         )
     except AdapterError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except (EmbedBackendError, SearchBackendError):
-        raise HTTPException(status_code=503, detail="Search dependency unavailable; retry the request.")
+    except _SEARCH_UNAVAILABLE_ERRORS as exc:
+        raise HTTPException(status_code=503, detail={"error": "search_unavailable", "reason": str(exc)})
     except CorpusError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return IndexResponse(docs=docs, chunks=chunks, skipped=skipped, failed=failed)
@@ -322,8 +330,8 @@ def search(req: SearchRequest) -> SearchResponse:
         )
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except (EmbedBackendError, SearchBackendError):
-        raise HTTPException(status_code=503, detail="Search dependency unavailable; retry the request.")
+    except _SEARCH_UNAVAILABLE_ERRORS as exc:
+        raise HTTPException(status_code=503, detail={"error": "search_unavailable", "reason": str(exc)})
     except RerankerError as e:
         raise HTTPException(status_code=503, detail=str(e))
     return SearchResponse(
@@ -354,8 +362,8 @@ def timeline(req: TimelineRequest) -> list[TimelineGroup]:
         )
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except (EmbedBackendError, SearchBackendError):
-        raise HTTPException(status_code=503, detail="Search dependency unavailable; retry the request.")
+    except _SEARCH_UNAVAILABLE_ERRORS as exc:
+        raise HTTPException(status_code=503, detail={"error": "search_unavailable", "reason": str(exc)})
     return [TimelineGroup(**g) for g in groups]
 
 
@@ -373,8 +381,8 @@ def incident(req: IncidentRequest) -> dict | None:
         )
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except (EmbedBackendError, SearchBackendError):
-        raise HTTPException(status_code=503, detail="Search dependency unavailable; retry the request.")
+    except _SEARCH_UNAVAILABLE_ERRORS as exc:
+        raise HTTPException(status_code=503, detail={"error": "search_unavailable", "reason": str(exc)})
 
 
 @router.post("/browse")
@@ -394,6 +402,8 @@ def browse(req: BrowseRequest) -> list[dict]:
         raise HTTPException(status_code=400, detail=str(e))
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except _SEARCH_UNAVAILABLE_ERRORS as exc:
+        raise HTTPException(status_code=503, detail={"error": "search_unavailable", "reason": str(exc)})
 
 
 @router.get("/explorer/{corpus}")
@@ -419,6 +429,8 @@ def explore_corpus(
         raise HTTPException(status_code=400, detail=str(e))
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except _SEARCH_UNAVAILABLE_ERRORS as exc:
+        raise HTTPException(status_code=503, detail={"error": "search_unavailable", "reason": str(exc)})
 
 
 @router.get("/explorer/{corpus}/source")
@@ -436,6 +448,8 @@ def explorer_source(
         raise HTTPException(status_code=400, detail=str(e))
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except _SEARCH_UNAVAILABLE_ERRORS as exc:
+        raise HTTPException(status_code=503, detail={"error": "search_unavailable", "reason": str(exc)})
     if source is None:
         raise HTTPException(status_code=404, detail="source not found")
     return source
@@ -487,6 +501,8 @@ def related(corpus: str, chunk_id: str, top_k: int = 8) -> dict:
         results = svc.related(chunk_id, corpus, top_k=top_k)
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except _SEARCH_UNAVAILABLE_ERRORS as exc:
+        raise HTTPException(status_code=503, detail={"error": "search_unavailable", "reason": str(exc)})
     return {"hits": [_hit_out(r).model_dump() for r in results]}
 
 
@@ -505,8 +521,8 @@ def compare(req: dict) -> dict:
             b_after=req.get("b_after"), b_before=req.get("b_before"),
             top_k=int(req.get("top_k") or 8), mode=req.get("mode", "hybrid"),
         )
-    except (EmbedBackendError, SearchBackendError):
-        raise HTTPException(status_code=503, detail="Search dependency unavailable; retry the query.")
+    except _SEARCH_UNAVAILABLE_ERRORS as exc:
+        raise HTTPException(status_code=503, detail={"error": "search_unavailable", "reason": str(exc)})
     except (ValueError, TypeError):
         raise HTTPException(status_code=422, detail="Invalid comparison parameters.")
     except KeyError as e:
@@ -657,6 +673,8 @@ def corpus_stats(corpus: str) -> dict:
         return _service().corpus_stats(corpus)
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except _SEARCH_UNAVAILABLE_ERRORS as exc:
+        raise HTTPException(status_code=503, detail={"error": "search_unavailable", "reason": str(exc)})
 
 
 @router.get("/summarize/{corpus}")
@@ -668,6 +686,8 @@ def summarize_corpus(corpus: str, after: str = "", before: str = "",
             corpus, after=after or None, before=before or None, sample=sample)
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except _SEARCH_UNAVAILABLE_ERRORS as exc:
+        raise HTTPException(status_code=503, detail={"error": "search_unavailable", "reason": str(exc)})
 
 
 @router.get("/chunk/{corpus}/{chunk_id}", response_model=ChunkWindow)
@@ -692,6 +712,8 @@ def get_chunk(corpus: str, chunk_id: str, window: str = str(_DEFAULT_CHUNK_WINDO
         data = svc.get_chunk_window(corpus, chunk_id, win)
     except CorpusError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except _SEARCH_UNAVAILABLE_ERRORS as exc:
+        raise HTTPException(status_code=503, detail={"error": "search_unavailable", "reason": str(exc)})
     if data is None:
         raise HTTPException(status_code=404, detail=f"chunk {chunk_id} not found in {corpus}")
     return ChunkWindow(**data)

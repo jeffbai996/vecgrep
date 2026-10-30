@@ -64,3 +64,19 @@ def test_a_new_corpus_is_written_even_on_a_fresh_registry(tmp_path):
     reg.upsert(_corpus())
     assert path.exists()
     assert CorpusRegistry(path, in_memory=False).has("c")
+
+
+def test_reload_if_needed_skips_lock_when_stat_matches(tmp_path):
+    from unittest.mock import patch
+    path = tmp_path / "corpora.json"
+    reg = CorpusRegistry(path, in_memory=False)
+    reg.upsert(_corpus("test_corp"))
+
+    # When querying get / list / has without disk modification, registry_read lock is NOT acquired
+    with patch.object(reg.locks, "registry_read") as lock_mock:
+        assert reg.has("test_corp")
+        c = reg.get("test_corp")
+        assert c.name == "test_corp"
+        all_c = reg.list()
+        assert len(all_c) == 1
+        lock_mock.assert_not_called()

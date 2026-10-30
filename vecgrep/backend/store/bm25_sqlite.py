@@ -26,6 +26,7 @@ import threading
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from vecgrep.backend.store.bm25_store import (
     _coverage_factor,
@@ -95,6 +96,61 @@ def _without_source_text(payload: dict) -> dict:
     if "source_text" not in payload:
         return payload
     return {k: v for k, v in payload.items() if k != "source_text"}
+
+
+def _sql_filter_clauses(
+    source_ids: set[str] | list[str] | None = None,
+    filter_clauses: list[Any] | None = None,
+    clauses_list: list[Any] | None = None,
+    **kwargs: Any,
+) -> tuple[list[str], list[Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if source_ids is not None and not isinstance(source_ids, (set, frozenset)):
+        if isinstance(source_ids, list) and source_ids:
+            first = source_ids[0]
+            if hasattr(first, "negated") or (isinstance(first, str) and (":" in first or first.startswith("-"))):
+                filter_clauses = source_ids
+                source_ids = None
+
+    if source_ids is not None and len(source_ids) <= 200:
+        sorted_ids = sorted(source_ids)
+        if sorted_ids:
+            placeholders = ",".join("?" for _ in sorted_ids)
+            clauses.append(f"c.source_id IN ({placeholders})")
+            params.extend(sorted_ids)
+        else:
+            clauses.append("0 = 1")
+    elif source_ids:
+        clauses.append("c.source_id IN (SELECT value FROM json_each(?))")
+        params.append(json.dumps(sorted(source_ids)))
+
+    actual_filter_clauses = filter_clauses or clauses_list or kwargs.get("clauses")
+    if actual_filter_clauses:
+        for clause in actual_filter_clauses:
+            negated = getattr(clause, "negated", False)
+            kind = getattr(clause, "kind", getattr(clause, "name", getattr(clause, "field", getattr(clause, "key", ""))))
+            val = getattr(clause, "value", None)
+            if isinstance(clause, str):
+                negated = clause.startswith("-")
+                raw = clause[1:] if negated else clause
+                kind, _, val = raw.partition(":")
+            if negated:
+                if kind in ("after", "doc_timestamp_after"):
+                    clauses.append("(c.doc_timestamp IS NULL OR c.doc_timestamp < ?)")
+                    params.append(float(val))
+                elif kind in ("before", "doc_timestamp_before"):
+                    clauses.append("(c.doc_timestamp IS NULL OR c.doc_timestamp > ?)")
+                    params.append(float(val))
+            else:
+                if kind in ("after", "doc_timestamp_after"):
+                    clauses.append("(c.doc_timestamp >= ?)")
+                    params.append(float(val))
+                elif kind in ("before", "doc_timestamp_before"):
+                    clauses.append("(c.doc_timestamp < ?)")
+                    params.append(float(val))
+
+    return clauses, params
 
 
 class BM25SqliteStore:
@@ -233,11 +289,12 @@ class BM25SqliteStore:
             logger.info("BM25 WAL truncated for %s", corpus)
 
     def close(self, corpus: str) -> None:
-        with self._lock:
-            c = self._conns.pop(corpus, None)
-            self._counts.pop(corpus, None)
-        if c is not None:
-            c.close()
+        with self._corpus_lock(corpus):
+            with self._lock:
+                c = self._conns.pop(corpus, None)
+                self._counts.pop(corpus, None)
+            if c is not None:
+                c.close()
 
     def close_all(self) -> None:
         with self._lock:
@@ -305,25 +362,42 @@ class BM25SqliteStore:
         """Every payload, streamed. The replacement for reaching into
         `_load(corpus).payloads`: rows arrive one at a time and are not
         retained, so a full scan costs one row of memory rather than a corpus."""
-        conn = self._conn(corpus)
-        cur = conn.execute("SELECT payload FROM chunks ORDER BY pos")
-        for (raw,) in cur:
-            yield json.loads(raw)
+        last_pos: int | None = None
+        batch_size = 512
+        while True:
+            with self._corpus_lock(corpus):
+                conn = self._conn(corpus)
+                if last_pos is None:
+                    rows = conn.execute(
+                        "SELECT pos, payload FROM chunks ORDER BY pos LIMIT ?",
+                        (batch_size,),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT pos, payload FROM chunks WHERE pos > ? ORDER BY pos LIMIT ?",
+                        (last_pos, batch_size),
+                    ).fetchall()
+            if not rows:
+                break
+            for pos, raw in rows:
+                last_pos = int(pos)
+                yield json.loads(raw)
 
     def iter_sources(self, corpus: str) -> Iterator[tuple[str, dict, int]]:
         """(source_id, payload of its first chunk, chunk count) per source.
 
         Ordered by first appearance, which is what iterating the pickle
         store's `by_source` gave, so callers see the same sequence."""
-        conn = self._conn(corpus)
-        cur = conn.execute(
-            "SELECT c.source_id, c.payload, g.n FROM chunks c "
-            "JOIN (SELECT source_id, MIN(pos) AS first_pos, COUNT(*) AS n "
-            "      FROM chunks GROUP BY source_id) g "
-            "  ON g.first_pos = c.pos "
-            "ORDER BY c.pos"
-        )
-        for sid, raw, n in cur:
+        with self._corpus_lock(corpus):
+            conn = self._conn(corpus)
+            rows = conn.execute(
+                "SELECT c.source_id, c.payload, g.n FROM chunks c "
+                "JOIN (SELECT source_id, MIN(pos) AS first_pos, COUNT(*) AS n "
+                "      FROM chunks GROUP BY source_id) g "
+                "  ON g.first_pos = c.pos "
+                "ORDER BY c.pos"
+            ).fetchall()
+        for sid, raw, n in rows:
             yield sid, json.loads(raw), int(n)
 
     def first_chunk_for_source(self, corpus: str, source_id: str) -> tuple[str, dict] | None:
@@ -399,6 +473,7 @@ class BM25SqliteStore:
                     pos += 1
             if corpus not in self._bulk:
                 conn.commit()
+                self._checkpoint(corpus, conn)
             self._counts.pop(corpus, None)
 
     def replace(self, corpus: str, records: Iterable[tuple[str, str, dict]]) -> int:
@@ -409,7 +484,7 @@ class BM25SqliteStore:
             n = 0
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                conn.execute("DELETE FROM chunks_fts")
+                conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('delete-all')")
                 conn.execute("DELETE FROM chunks")
                 for cid, text, payload in records:
                     self._insert(conn, n, cid, payload.get("source_id", "") or "",
@@ -441,24 +516,30 @@ class BM25SqliteStore:
     def delete_ids(self, corpus: str, cids: list[str]) -> None:
         if not cids:
             return
+        cid_list = list(cids)
+        batch_size = 500
         with self._corpus_lock(corpus):
             conn = self._conn(corpus)
-            placeholders = ",".join("?" for _ in cids)
-            rows = [
-                r[0]
-                for r in conn.execute(
-                    f"SELECT pos FROM chunks WHERE cid IN ({placeholders})",
-                    list(cids),
+            deleted_any = False
+            for i in range(0, len(cid_list), batch_size):
+                batch = cid_list[i : i + batch_size]
+                placeholders = ",".join("?" for _ in batch)
+                rows = [
+                    r[0]
+                    for r in conn.execute(
+                        f"SELECT pos FROM chunks WHERE cid IN ({placeholders})",
+                        batch,
+                    )
+                ]
+                if not rows:
+                    continue
+                deleted_any = True
+                conn.executemany("DELETE FROM chunks_fts WHERE rowid = ?", [(r,) for r in rows])
+                conn.execute(
+                    f"DELETE FROM chunks WHERE cid IN ({placeholders})",
+                    batch,
                 )
-            ]
-            if not rows:
-                return
-            conn.executemany("DELETE FROM chunks_fts WHERE rowid = ?", [(r,) for r in rows])
-            conn.execute(
-                f"DELETE FROM chunks WHERE cid IN ({placeholders})",
-                list(cids),
-            )
-            if corpus not in self._bulk:
+            if deleted_any and corpus not in self._bulk:
                 conn.commit()
                 self._checkpoint(corpus, conn)
             self._counts.pop(corpus, None)
@@ -491,6 +572,8 @@ class BM25SqliteStore:
         *,
         source_ids: set[str] | None = None,
         payload_filter: Callable[[dict], bool] | None = None,
+        filter_clauses: list[Any] | None = None,
+        **kwargs: Any,
     ) -> list[tuple[str, float, dict]]:
         if source_ids is not None and not source_ids:
             return []
@@ -500,18 +583,20 @@ class BM25SqliteStore:
         with self._corpus_lock(corpus):
             conn = self._conn(corpus)
             limit = max(_MIN_CANDIDATES, top_k * _OVERFETCH)
-            base_clause = ""
-            source_params: list[str] = []
-            if source_ids is not None and len(source_ids) <= 200:
-                source_params = sorted(source_ids)
-                placeholders = ",".join("?" for _ in source_params)
-                base_clause = f" AND c.source_id IN ({placeholders})"
+            clauses, source_params = _sql_filter_clauses(
+                source_ids=source_ids, filter_clauses=filter_clauses
+            )
+            base_clause = (" AND " + " AND ".join(clauses)) if clauses else ""
 
             unique_tokens = list(dict.fromkeys(q_tokens))
 
-            def _fetch_fts_candidates(sql_clause: str) -> tuple[dict[int, tuple[str, str, float]], bool]:
+            def _fetch_fts_candidates(
+                sql_clause: str,
+                params: list[Any] | None = None,
+            ) -> tuple[dict[int, tuple[str, str, float]], bool]:
                 by_pos: dict[int, tuple[str, str, float]] = {}
                 saturated = False
+                p = source_params if params is None else params
                 if not sql_clause:
                     # Rank and cap inside the FTS5 virtual table before joining
                     # `chunks`: otherwise SQLite performs a B-tree lookup on
@@ -551,7 +636,7 @@ class BM25SqliteStore:
                         "FROM chunks_fts JOIN chunks c ON c.pos = chunks_fts.rowid "
                         f"WHERE chunks_fts MATCH ?{sql_clause} "
                         "ORDER BY bm25(chunks_fts) LIMIT ?",
-                        (_fts_and_query(unique_tokens), *source_params, top_k),
+                        (_fts_and_query(unique_tokens), *p, top_k),
                     ).fetchall()
                     if len(and_rows) >= top_k:
                         saturated = True
@@ -563,7 +648,7 @@ class BM25SqliteStore:
                     "FROM chunks_fts JOIN chunks c ON c.pos = chunks_fts.rowid "
                     f"WHERE chunks_fts MATCH ?{sql_clause} "
                     "ORDER BY bm25(chunks_fts) LIMIT ?",
-                    (_fts_query(q_tokens), *source_params, limit),
+                    (_fts_query(q_tokens), *p, limit),
                 ).fetchall()
                 if len(or_rows) >= limit:
                     saturated = True
@@ -672,19 +757,80 @@ class BM25SqliteStore:
             if not any_rejected:
                 return results
 
-            conn.create_function(
-                "eligible_payload",
-                1,
-                lambda raw: int(payload_filter(json.loads(raw))),
-            )
-            filtered_by_pos, _ = _fetch_fts_candidates(
-                base_clause + " AND eligible_payload(c.payload)"
-            )
-            if not filtered_by_pos:
-                return []
-            filtered_ranked = _rank_candidates(filtered_by_pos)
-            filtered_results, _ = _hydrate_winners(filtered_ranked, apply_filter=False)
-            return filtered_results
+            stage2_scan_limit = max(limit * 10, 4000)
+            try:
+                conn.create_function(
+                    "eligible_payload",
+                    1,
+                    lambda raw: int(payload_filter(json.loads(raw))),
+                )
+                filtered_by_pos: dict[int, tuple[str, str, float]] = {}
+                if not base_clause:
+                    if len(unique_tokens) >= 2:
+                        and_rows = conn.execute(
+                            "SELECT c.pos, c.cid, c.tokens, m.raw_score "
+                            "FROM ("
+                            "    SELECT rowid, bm25(chunks_fts) AS raw_score "
+                            "    FROM chunks_fts "
+                            "    WHERE chunks_fts MATCH ? "
+                            "    ORDER BY raw_score "
+                            "    LIMIT ?"
+                            ") m "
+                            "JOIN chunks c ON c.pos = m.rowid "
+                            "WHERE eligible_payload(c.payload) "
+                            "ORDER BY m.raw_score "
+                            "LIMIT ?",
+                            (_fts_and_query(unique_tokens), stage2_scan_limit, top_k),
+                        ).fetchall()
+                        for pos, cid, tokens, score in and_rows:
+                            filtered_by_pos[int(pos)] = (str(cid), str(tokens), float(score))
+
+                    or_rows = conn.execute(
+                        "SELECT c.pos, c.cid, c.tokens, m.raw_score "
+                        "FROM ("
+                        "    SELECT rowid, bm25(chunks_fts) AS raw_score "
+                        "    FROM chunks_fts "
+                        "    WHERE chunks_fts MATCH ? "
+                        "    ORDER BY raw_score "
+                        "    LIMIT ?"
+                        ") m "
+                        "JOIN chunks c ON c.pos = m.rowid "
+                        "WHERE eligible_payload(c.payload) "
+                        "ORDER BY m.raw_score "
+                        "LIMIT ?",
+                        (_fts_query(q_tokens), stage2_scan_limit, limit),
+                    ).fetchall()
+                    for pos, cid, tokens, score in or_rows:
+                        filtered_by_pos[int(pos)] = (str(cid), str(tokens), float(score))
+                else:
+                    if len(unique_tokens) >= 2:
+                        and_rows = conn.execute(
+                            "SELECT c.pos, c.cid, c.tokens, bm25(chunks_fts) "
+                            "FROM chunks_fts JOIN chunks c ON c.pos = chunks_fts.rowid "
+                            f"WHERE chunks_fts MATCH ?{base_clause} AND eligible_payload(c.payload) "
+                            "ORDER BY bm25(chunks_fts) LIMIT ?",
+                            (_fts_and_query(unique_tokens), *source_params, top_k),
+                        ).fetchall()
+                        for pos, cid, tokens, score in and_rows:
+                            filtered_by_pos[int(pos)] = (str(cid), str(tokens), float(score))
+
+                    or_rows = conn.execute(
+                        "SELECT c.pos, c.cid, c.tokens, bm25(chunks_fts) "
+                        "FROM chunks_fts JOIN chunks c ON c.pos = chunks_fts.rowid "
+                        f"WHERE chunks_fts MATCH ?{base_clause} AND eligible_payload(c.payload) "
+                        "ORDER BY bm25(chunks_fts) LIMIT ?",
+                        (_fts_query(q_tokens), *source_params, limit),
+                    ).fetchall()
+                    for pos, cid, tokens, score in or_rows:
+                        filtered_by_pos[int(pos)] = (str(cid), str(tokens), float(score))
+
+                if not filtered_by_pos:
+                    return []
+                filtered_ranked = _rank_candidates(filtered_by_pos)
+                filtered_results, _ = _hydrate_winners(filtered_ranked, apply_filter=False)
+                return filtered_results
+            finally:
+                conn.create_function("eligible_payload", 1, None)
 
 
 def migrate_from_pickle(root: Path, corpus: str, *, force: bool = False) -> int:

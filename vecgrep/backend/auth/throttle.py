@@ -10,22 +10,27 @@ from collections.abc import Callable
 
 from starlette.types import Scope
 
+_TRUSTED_PROXY_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
+
 
 def client_key(scope: Scope) -> str:
     """Key attempts by the address tailscaled reports, not the socket peer.
 
     Funnel and Serve requests all arrive from loopback. tailscaled discards any
     X-Forwarded-For the client sent and sets its own, so the first address is
-    the real client. A direct connection has no such header and falls back to
-    the socket peer.
+    the real client when the socket peer is a trusted local proxy. A direct
+    non-loopback connection ignores X-Forwarded-For so a remote caller cannot
+    spoof the header to bypass rate limits.
     """
-    forwarded = ""
-    for name, value in scope.get("headers") or ():
-        if name == b"x-forwarded-for":
-            forwarded = value.decode("latin-1").split(",", 1)[0].strip()
-            break
     client = scope.get("client") or ("", 0)
-    address = forwarded or str(client[0] or "unknown")
+    peer = str(client[0] or "")
+    forwarded = ""
+    if not peer or peer in _TRUSTED_PROXY_HOSTS:
+        for name, value in scope.get("headers") or ():
+            if name == b"x-forwarded-for":
+                forwarded = value.decode("latin-1").split(",", 1)[0].strip()
+                break
+    address = forwarded or peer or "unknown"
     return hashlib.sha256(address.encode()).hexdigest()[:32]
 
 

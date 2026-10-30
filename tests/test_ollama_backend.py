@@ -359,3 +359,11 @@ def test_clipping_is_bounded_then_raises_like_any_other_4xx() -> None:
         assert "context length" in str(e)
     else:
         raise AssertionError("expected EmbedBackendError once clipping is exhausted")
+
+
+def test_tagged_model_uses_known_dim_without_probe() -> None:
+    from unittest.mock import patch
+    with patch.object(OllamaBackend, "_probe_dim") as probe_mock:
+        b = OllamaBackend("http://test", model="bge-m3:batch4k")
+        assert b.dim == 1024
+        probe_mock.assert_not_called()

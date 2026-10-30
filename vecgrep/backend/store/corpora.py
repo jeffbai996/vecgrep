@@ -118,9 +118,12 @@ class CorpusRegistry:
         self._corpora: dict[str, Corpus] = {}
         self._cache_lock = threading.RLock()
         self._loaded_stat: tuple[int, int, int] | None = None
+        self._loaded: bool = False
         if not in_memory:
             with self.locks.registry_read():
                 self._load()
+                self._loaded = True
+                self._loaded_stat = self._file_stat()
 
     def _file_stat(self) -> tuple[int, int, int] | None:
         try:
@@ -150,8 +153,23 @@ class CorpusRegistry:
             self._corpora[name] = Corpus(
                 **{k: v for k, v in payload.items() if k in known}
             )
+        self._loaded_stat = self._file_stat()
+
+    def _reload_if_needed(self) -> None:
         with self._cache_lock:
-            self._loaded_stat = self._file_stat()
+            if self.in_memory:
+                return
+            stat = self._file_stat()
+            if self._loaded and stat == self._loaded_stat:
+                return
+        with self.locks.registry_read():
+            with self._cache_lock:
+                stat = self._file_stat()
+                if not self._loaded or stat != self._loaded_stat:
+                    self._corpora = {}
+                    self._load()
+                    self._loaded = True
+                    self._loaded_stat = self._file_stat()
 
     def _reload(self, *, force: bool = False) -> None:
         """Replace in-memory state with the current on-disk state.
@@ -161,29 +179,15 @@ class CorpusRegistry:
         a stale in-memory copy. This was a real bug: migrate/index writes done
         by the CLI were silently reverted when the running server next saved.
         """
-        with self._cache_lock:
-            cur_stat = self._file_stat()
-            if not force and cur_stat is not None and cur_stat == self._loaded_stat:
-                return
-            if cur_stat is None:
-                self._corpora = {}
-                self._loaded_stat = None
-                return
-            try:
-                data = json.loads(self.path.read_text())
-            except json.JSONDecodeError as exc:
-                raise CorpusError(
-                    f"corpus registry at {self.path} is unreadable ({exc}); "
-                    "refusing to load an empty registry over it"
-                ) from exc
-            known = {f.name for f in fields(Corpus)}
-            loaded: dict[str, Corpus] = {}
-            for name, payload in data.items():
-                loaded[name] = Corpus(
-                    **{k: v for k, v in payload.items() if k in known}
-                )
-            self._corpora = loaded
-            self._loaded_stat = cur_stat
+        if force:
+            with self.locks.registry_read():
+                with self._cache_lock:
+                    self._corpora = {}
+                    self._load()
+                    self._loaded = True
+                    self._loaded_stat = self._file_stat()
+        else:
+            self._reload_if_needed()
 
     def _on_disk_text(self) -> str | None:
         """Current file contents, or None if unreadable for any reason.
@@ -263,13 +267,12 @@ class CorpusRegistry:
                     (_copy_corpus(c, include_sources=include_sources) for c in self._corpora.values()),
                     key=lambda c: c.name,
                 )
-        with self.locks.registry_read():
-            self._reload()
-            with self._cache_lock:
-                return sorted(
-                    (_copy_corpus(c, include_sources=include_sources) for c in self._corpora.values()),
-                    key=lambda c: c.name,
-                )
+        self._reload_if_needed()
+        with self._cache_lock:
+            return sorted(
+                (_copy_corpus(c, include_sources=include_sources) for c in self._corpora.values()),
+                key=lambda c: c.name,
+            )
 
     def get(self, name: str, *, include_sources: bool = True) -> Corpus:
         if self.in_memory:
@@ -284,15 +287,14 @@ class CorpusRegistry:
             pending = self._deferred.get(name)
             if pending is not None:
                 return _copy_corpus(pending, include_sources=include_sources)
-        with self.locks.registry_read():
-            self._reload()
-            with self._cache_lock:
-                pending = self._deferred.get(name)
-                if pending is not None:
-                    return _copy_corpus(pending, include_sources=include_sources)
-                if name not in self._corpora:
-                    raise CorpusError(f"No such corpus: {name}")
-                return _copy_corpus(self._corpora[name], include_sources=include_sources)
+        self._reload_if_needed()
+        with self._cache_lock:
+            pending = self._deferred.get(name)
+            if pending is not None:
+                return _copy_corpus(pending, include_sources=include_sources)
+            if name not in self._corpora:
+                raise CorpusError(f"No such corpus: {name}")
+            return _copy_corpus(self._corpora[name], include_sources=include_sources)
 
     def has(self, name: str) -> bool:
         if self.in_memory:
@@ -301,10 +303,9 @@ class CorpusRegistry:
         with self._cache_lock:
             if self._deferred.get(name) is not None:
                 return True
-        with self.locks.registry_read():
-            self._reload()
-            with self._cache_lock:
-                return self._deferred.get(name) is not None or name in self._corpora
+        self._reload_if_needed()
+        with self._cache_lock:
+            return self._deferred.get(name) is not None or name in self._corpora
 
     @contextlib.contextmanager
     def deferred_saves(self, name: str):
@@ -331,10 +332,12 @@ class CorpusRegistry:
                 pending = self._deferred.pop(name, None)
             if pending is not None:
                 with self.locks.registry_write():
-                    self._reload()
+                    self._reload(force=True)
                     with self._cache_lock:
                         self._corpora[name] = pending
                     self._save()
+                    with self._cache_lock:
+                        self._loaded_stat = self._file_stat()
 
     def upsert(self, c: Corpus) -> None:
         self.validate_name(c.name)
@@ -351,10 +354,12 @@ class CorpusRegistry:
         # readers from seeing torn JSON but still allowed two writers to reload
         # the same generation and silently clobber one another.
         with self.locks.registry_write():
-            self._reload()
+            self._reload(force=True)
             with self._cache_lock:
                 self._corpora[c.name] = _copy_corpus(c)
             self._save()
+            with self._cache_lock:
+                self._loaded_stat = self._file_stat()
 
     def delete(self, name: str) -> None:
         if self.in_memory:
@@ -364,9 +369,15 @@ class CorpusRegistry:
                 del self._corpora[name]
             return
         with self.locks.registry_write():
-            self._reload()
+            self._reload(force=True)
             with self._cache_lock:
                 if name not in self._corpora:
                     raise CorpusError(f"No such corpus: {name}")
                 del self._corpora[name]
             self._save()
+            with self._cache_lock:
+                self._loaded_stat = self._file_stat()
+
+    # Aliases
+    _write = _save
+    save = upsert

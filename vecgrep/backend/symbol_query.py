@@ -56,6 +56,12 @@ def pin_definitions(selected: list, pool: list, symbol: str | None, top_k: int) 
     defs = [r for r in pool if definition_boost(symbol, {"metadata": r.metadata}) > 1.0]
     if not defs:
         return selected
-    defs.sort(key=lambda r: -definition_boost(symbol, {"metadata": r.metadata}))
+    defs.sort(
+        key=lambda r: (
+            -definition_boost(symbol, {"metadata": r.metadata}),
+            -float(getattr(r, "score", 0.0) or 0.0),
+            -float(getattr(r, "similarity_pct", 0.0) or 0.0),
+        )
+    )
     ids = {r.chunk_id for r in defs}
     return (defs + [r for r in selected if r.chunk_id not in ids])[:top_k]

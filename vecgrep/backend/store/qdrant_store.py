@@ -62,6 +62,10 @@ _PAYLOAD_INDEX_FIELDS: tuple[tuple[str, qm.PayloadSchemaType], ...] = (
     ("metadata.has_code", qm.PayloadSchemaType.BOOL),
     ("metadata.has_table", qm.PayloadSchemaType.BOOL),
     ("metadata.has_link", qm.PayloadSchemaType.BOOL),
+    ("metadata.source_kind", qm.PayloadSchemaType.KEYWORD),
+    ("metadata.tier", qm.PayloadSchemaType.KEYWORD),
+    ("metadata.adapter", qm.PayloadSchemaType.KEYWORD),
+    ("metadata.tags", qm.PayloadSchemaType.KEYWORD),
 )
 
 
