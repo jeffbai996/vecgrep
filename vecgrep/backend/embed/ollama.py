@@ -192,7 +192,8 @@ class OllamaBackend(EmbedBackend):
         except (ValueError, AttributeError):
             reason = "bad_response"
         if (
-            isinstance(rows, list)
+            isinstance(data, dict)
+            and isinstance(rows, list)
             and len(rows) == len(texts)
             and all(_is_finite_vector(v) for v in rows)
         ):

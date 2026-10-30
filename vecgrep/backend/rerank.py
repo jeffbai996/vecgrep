@@ -214,7 +214,7 @@ def _release_cuda_cache() -> None:
     absent entirely, and on a CPU-only box there is nothing to release.
     """
     try:
-        import torch
+        import torch  # pyright: ignore[reportMissingImports]  # Optional rerank extra dependency.
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -256,14 +256,14 @@ def _process_committed_bytes(
 
 def _construct_model(model_name: str):
     try:
-        from sentence_transformers import CrossEncoder
+        from sentence_transformers import CrossEncoder  # pyright: ignore[reportMissingImports]  # Optional rerank extra dependency.
     except ImportError as e:
         raise RerankerError(
             "Reranking requires the 'rerank' extra. "
             "Install with `pip install vecgrep[rerank]`."
         ) from e
     try:
-        import torch
+        import torch  # pyright: ignore[reportMissingImports]  # Optional rerank extra dependency.
 
         kwargs = {}
         if RERANK_MAX_LENGTH:
@@ -862,6 +862,7 @@ def rerank(
     scored = [
         (1 / (1 + math.exp(-float(s))), payload)
         for s, (_, payload) in zip(raw, candidates)
+        if s is not None
     ]
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored

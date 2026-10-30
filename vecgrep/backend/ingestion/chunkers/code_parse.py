@@ -145,7 +145,7 @@ def _ts_parser(tsx: bool):
     if tsx not in _TS_LANGUAGES:
         raw = tree_sitter_typescript.language_tsx() if tsx else tree_sitter_typescript.language_typescript()
         _TS_LANGUAGES[tsx] = tree_sitter.Language(raw)
-    return tree_sitter.Parser(_TS_LANGUAGES[tsx])
+    return tree_sitter.Parser(_TS_LANGUAGES[tsx])  # pyright: ignore[reportArgumentType]  # tree_sitter.Language capsule pointer mismatch with Parser stubs.
 
 
 _TS_CLASS = {"class_declaration", "abstract_class_declaration", "class"}

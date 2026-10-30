@@ -42,7 +42,7 @@ def page_images(path: Path, *, max_pages: int = 40) -> Iterator[tuple[int, bytes
                 try:
                     width, height = page.get_size()
                     scale = min(2.0, 1800 / max(width, height))
-                    bitmap = page.render(scale=scale)
+                    bitmap = page.render(scale=scale)  # pyright: ignore[reportArgumentType]  # pypdfium2 stub expects int scale, but float is accepted at runtime.
                     try:
                         image = bitmap.to_pil().convert('RGB')
                         buffer = io.BytesIO()

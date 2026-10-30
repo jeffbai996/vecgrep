@@ -106,12 +106,16 @@ def _sql_filter_clauses(
 ) -> tuple[list[str], list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
-    if source_ids is not None and not isinstance(source_ids, (set, frozenset)):
-        if isinstance(source_ids, list) and source_ids:
-            first = source_ids[0]
-            if hasattr(first, "negated") or (isinstance(first, str) and (":" in first or first.startswith("-"))):
-                filter_clauses = source_ids
-                source_ids = None
+    if (
+        source_ids is not None
+        and not isinstance(source_ids, (set, frozenset))
+        and isinstance(source_ids, list)
+        and source_ids
+    ):
+        first = source_ids[0]
+        if hasattr(first, "negated") or (isinstance(first, str) and (":" in first or first.startswith("-"))):
+            filter_clauses = source_ids
+            source_ids = None
 
     if source_ids is not None and len(source_ids) <= 200:
         sorted_ids = sorted(source_ids)
@@ -162,7 +166,7 @@ class BM25SqliteStore:
         self.root = root
         self._conns: dict[str, sqlite3.Connection] = {}
         self._corpus_locks: dict[str, threading.RLock] = {}
-        self._counts: dict[str, tuple[tuple[int, int] | None, int]] = {}
+        self._counts: dict[str, tuple[tuple[int, int, int, int, int] | None, int]] = {}
         self._lock = threading.RLock()
         self._bulk: set[str] = set()
 

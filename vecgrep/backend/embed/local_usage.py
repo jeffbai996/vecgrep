@@ -87,8 +87,9 @@ def _write_route(db: sqlite3.Connection, route: str, outcome: str, reason: str,
 
 
 def _tokens(data: dict, model: str) -> tuple[str, int, int] | None:
-    tin, tout = data.get("prompt_eval_count"), 0
-    if any(type(v) is not int or not 0 <= v <= 2**63 - 1 for v in (tin, tout)):
+    tin = data.get("prompt_eval_count")
+    tout = 0
+    if not isinstance(tin, int) or isinstance(tin, bool) or not 0 <= tin <= 2**63 - 1:
         return None
     actual_model = data.get("model") or model
     if not isinstance(actual_model, str) or not actual_model:
