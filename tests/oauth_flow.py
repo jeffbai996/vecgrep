@@ -14,7 +14,10 @@ class FormFields(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = dict(attrs)
         if tag == "input" and values.get("type") == "hidden":
-            self.values[values["name"]] = values.get("value", "")
+            name = values.get("name")
+            if name is not None:
+                val = values.get("value")
+                self.values[name] = val if val is not None else ""
 
 
 def submit(client, *, data: dict, headers: dict | None = None, **kwargs):

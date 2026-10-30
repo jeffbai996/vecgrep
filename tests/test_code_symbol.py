@@ -31,15 +31,15 @@ def _doc(text, path):
 
 def test_python_symbols_and_metadata():
     chunks = CodeSymbolChunker().chunk_doc(_doc(PY, "/repo/app.py"))
-    symbols = [c.meta.get("symbol") for c in chunks]
+    symbols = [(c.meta or {}).get("symbol") for c in chunks]
     assert "alpha" in symbols
     assert "Beta" in symbols
-    assert all(c.meta.get("language") == "python" for c in chunks)
+    assert all((c.meta or {}).get("language") == "python" for c in chunks)
 
 
 def test_function_bodies_never_split():
     chunks = CodeSymbolChunker().chunk_doc(_doc(PY, "/repo/app.py"))
-    alpha = next(c for c in chunks if c.meta.get("symbol") == "alpha")
+    alpha = next(c for c in chunks if (c.meta or {}).get("symbol") == "alpha")
     assert "def alpha" in alpha.text
     assert 'return sys.argv' in alpha.text          # whole body in one chunk
     assert "@decorator" in alpha.text               # decorator travels with it
@@ -54,7 +54,7 @@ def test_offsets_reconstruct_source():
 def test_javascript_decls():
     js = 'export function widget(a) {\n  return a + 1\n}\n\nconst helper = () => {\n  return 2\n}\n'
     chunks = CodeSymbolChunker().chunk_doc(_doc(js, "/repo/ui.js"))
-    symbols = {c.meta.get("symbol") for c in chunks}
+    symbols = {(c.meta or {}).get("symbol") for c in chunks}
     assert "widget" in symbols
 
 
@@ -63,7 +63,7 @@ def test_oversized_symbol_splits_but_keeps_name():
         f"    x{i} = {i}\n\n" for i in range(3000))
     chunks = CodeSymbolChunker().chunk_doc(_doc(body, "/repo/big.py"))
     assert len(chunks) > 1
-    assert all(c.meta.get("symbol") == "giant" for c in chunks)
+    assert all((c.meta or {}).get("symbol") == "giant" for c in chunks)
 
 
 def test_language_map():

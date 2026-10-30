@@ -10,6 +10,8 @@ Qdrant, so it stays hermetic like the rest of the suite.
 """
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from qdrant_client import QdrantClient
 
@@ -30,7 +32,8 @@ def no_compatibility_probe(monkeypatch):
 
 def test_server_mode_enables_connection_keepalive() -> None:
     store = QdrantStore(path=None, url="http://127.0.0.1:6333")
-    limits = store.client._client._rest_args["limits"]
+    raw_client: Any = store.client._client
+    limits = raw_client._rest_args["limits"]
     assert limits.max_keepalive_connections >= 8, (
         "pooling disabled — every request would burn an ephemeral port"
     )
@@ -42,7 +45,8 @@ def test_server_mode_client_is_shared_across_api_groups() -> None:
     """One httpx client behind every api group, so the pool is actually
     shared rather than one pool per endpoint family."""
     store = QdrantStore(path=None, url="http://127.0.0.1:6333")
-    oc = store.client._client.openapi_client
+    raw_client: Any = store.client._client
+    oc = raw_client.openapi_client
     clients = {
         id(getattr(oc, name).api_client._client)
         for name in dir(oc)

@@ -6,6 +6,8 @@ then 400s and aborts indexing. upsert() batches to keep each request small.
 """
 from __future__ import annotations
 
+from typing import Any, cast
+
 from vecgrep.backend.store.qdrant_store import QdrantStore
 
 
@@ -23,7 +25,7 @@ def _store_with_fake() -> tuple[QdrantStore, _FakeClient]:
     # Bypass __init__ (which would spin up a real Qdrant); inject the fake.
     s = QdrantStore.__new__(QdrantStore)
     fake = _FakeClient()
-    s.client = fake
+    s.client = cast(Any, fake)
     return s, fake
 
 

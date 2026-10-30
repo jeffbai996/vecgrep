@@ -21,7 +21,9 @@ def test_a_recorded_bearer_is_live_until_its_expiry(tmp_path):
     now = time.time()
     reg.record({digest("bearer-1"): now + DAY}, issuer="one", now=now)
 
-    assert reg.lookup(digest("bearer-1"), now=now)["issuer"] == "one"
+    entry = reg.lookup(digest("bearer-1"), now=now)
+    assert entry is not None
+    assert entry["issuer"] == "one"
     assert reg.lookup(digest("bearer-1"), now=now + 2 * DAY) is None
 
 

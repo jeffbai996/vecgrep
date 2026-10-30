@@ -13,8 +13,12 @@ from __future__ import annotations
 from vecgrep.backend.service import SearchResult, _passes_filters
 
 
+class _TestSearchResult(SearchResult):
+    text: str
+
+
 def _result(text="t", metadata=None, corpus="c", source_id="s"):
-    r = SearchResult.__new__(SearchResult)
+    r = _TestSearchResult.__new__(_TestSearchResult)
     r.corpus = corpus
     r.source_id = source_id
     r.text = text

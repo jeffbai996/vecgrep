@@ -14,8 +14,10 @@ def sqlite_svc(vg_home, stub_backend):
 
     settings = Settings(home=vg_home, bm25_backend="sqlite")
     service = VecgrepService(settings=settings)
+    assert service._embed_cache is not None
     service._backend_cache["auto"] = CachedBackend(stub_backend, service._embed_cache)
     yield service
+    assert isinstance(service.bm25, BM25SqliteStore)
     service.bm25.close_all()
     service.store.client.close()
 

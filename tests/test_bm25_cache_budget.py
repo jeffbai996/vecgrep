@@ -22,6 +22,7 @@ from vecgrep.backend.store.bm25_store import DEFAULT_CACHE_BYTES, BM25Store
 def _corpus(store: BM25Store, name: str, filler_bytes: int) -> None:
     """Write a sidecar of roughly `filler_bytes` so the budget can see it."""
     p = store._path(name)
+    assert p is not None
     p.parent.mkdir(parents=True, exist_ok=True)
     idx = store._load(name)
     idx.ids.append("x" * filler_bytes)

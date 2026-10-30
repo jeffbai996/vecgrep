@@ -157,7 +157,9 @@ def test_the_corpus_queries_agree_across_backends(tmp_path):
 
     for sid in ("/animals", "/ops", "/code", "/missing"):
         assert pickled.first_chunk_for_source("c", sid) == lite.first_chunk_for_source("c", sid)
-    assert lite.first_chunk_for_source("c", "/ops")[1]["chunk_index"] == 3
+    ops_chunk = lite.first_chunk_for_source("c", "/ops")
+    assert ops_chunk is not None
+    assert ops_chunk[1]["chunk_index"] == 3
     assert dict(lite.source_counts("c")) == {"/animals": 3, "/ops": 3, "/code": 2}
 
 

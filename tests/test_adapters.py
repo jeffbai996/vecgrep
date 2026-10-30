@@ -190,7 +190,11 @@ def test_discord_load_preserves_message_order(tmp_path):
 
 def test_json_file_cache_avoids_repeated_loads(tmp_path, monkeypatch):
     from unittest.mock import patch
-    from vecgrep.backend.ingestion.adapters.base import try_load_json_file, load_json_file
+
+    from vecgrep.backend.ingestion.adapters.base import (
+        load_json_file,
+        try_load_json_file,
+    )
     p = tmp_path / "sample.json"
     p.write_text(json.dumps({"key": "val"}))
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Any, cast
 
 from vecgrep.backend import rerank as rr
 
@@ -48,7 +49,7 @@ class _Connection:
 
 def _ready_worker(conn):
     worker = rr._WorkerClient("model")
-    worker._process = _Process()
+    worker._process = cast(Any, _Process())
     worker._connection = conn
     worker.ready.set()
     worker.attempt_done.set()
@@ -60,6 +61,7 @@ def test_worker_retires_after_idle_timeout(monkeypatch):
     conn = _Connection()
     worker = _ready_worker(conn)
     process = worker._process
+    assert isinstance(process, _Process)
 
     worker._mark_ready()          # what _start does once the child says ready
     time.sleep(0.3)
@@ -144,6 +146,7 @@ def test_pressure_retires_ready_worker_without_waiting_full_idle(monkeypatch):
     conn = _Connection()
     worker = _ready_worker(conn)
     process = worker._process
+    assert isinstance(process, _Process)
 
     worker._mark_ready()
     time.sleep(0.2)

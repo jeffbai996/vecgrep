@@ -21,8 +21,9 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def mod():
     spec = importlib.util.spec_from_file_location("vecgrep_weekly_eval", SCRIPT)
+    assert spec is not None and spec.loader is not None
     m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)      # type: ignore[union-attr]
+    spec.loader.exec_module(m)
     return m
 
 

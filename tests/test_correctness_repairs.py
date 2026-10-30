@@ -113,7 +113,17 @@ def test_http_dependency_error_does_not_expose_exception_detail(svc, make_doc, m
         raise EmbedBackendError('https://private.invalid/?token=sensitive')
     monkeypatch.setattr(svc, '_backend_for', unavailable)
     with pytest.raises(HTTPException) as caught:
-        routes.search(SearchRequest(query='orchid', corpus='c', mode='vector'))
+        routes.search(
+            SearchRequest(
+                query="orchid",
+                corpus="c",
+                mode="vector",
+                top_k=None,
+                full_k=8,
+                max_total=100,
+                token_ceiling=4000,
+            )
+        )
     assert caught.value.status_code == 503
     assert 'sensitive' not in caught.value.detail
 

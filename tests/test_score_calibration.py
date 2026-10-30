@@ -8,6 +8,8 @@ loading torch (the cross-encoder is monkeypatched).
 """
 from __future__ import annotations
 
+from typing import Any, cast
+
 from vecgrep.backend import service as svc_mod
 from vecgrep.backend.service import _calibration_for, _cosine_to_pct, _rerank_to_pct
 
@@ -108,7 +110,7 @@ def test_service_calibration_emits_model_values_and_bm25_bounds() -> None:
     fake = SimpleNamespace(
         registry=SimpleNamespace(get=lambda _n: SimpleNamespace(embed_model="bge-m3"))
     )
-    cal = VecgrepService.calibration(fake, "some-corpus")
+    cal = VecgrepService.calibration(cast(Any, fake), "some-corpus")
     center, slope = _calibration_for("bge-m3")
     assert cal == {
         "cosine_center": center,
@@ -129,7 +131,7 @@ def test_service_calibration_falls_back_when_corpus_missing() -> None:
         raise CorpusError("absent")
 
     fake = SimpleNamespace(registry=SimpleNamespace(get=_raise))
-    cal = VecgrepService.calibration(fake, "missing")
+    cal = VecgrepService.calibration(cast(Any, fake), "missing")
     center, slope = _calibration_for(None)  # module fallback
     assert cal["cosine_center"] == center and cal["cosine_slope"] == slope
 
@@ -140,7 +142,7 @@ def test_service_calibration_handles_none_corpus() -> None:
     from vecgrep.backend.service import VecgrepService, _calibration_for
 
     fake = SimpleNamespace(registry=SimpleNamespace(get=lambda _n: None))
-    cal = VecgrepService.calibration(fake, None)
+    cal = VecgrepService.calibration(cast(Any, fake), None)
     center, slope = _calibration_for(None)
     assert cal["cosine_center"] == center and cal["cosine_slope"] == slope
 

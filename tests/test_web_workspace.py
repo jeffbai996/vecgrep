@@ -13,15 +13,34 @@ FRONTEND = Path(__file__).parent.parent / "vecgrep" / "frontend" / "src"
 
 
 def test_search_request_supports_bounded_budget_breadth() -> None:
-    req = SearchRequest(query="needle", budget=True, full_k=8, max_total=40)
+    req = SearchRequest(
+        query="needle",
+        budget=True,
+        full_k=8,
+        max_total=40,
+        top_k=None,
+        token_ceiling=4000,
+    )
     assert req.budget is True
     assert req.full_k == 8
     assert req.max_total == 40
 
     with pytest.raises(ValidationError):
-        SearchRequest(query="needle", max_total=101)
+        SearchRequest(
+            query="needle",
+            max_total=101,
+            top_k=None,
+            full_k=8,
+            token_ceiling=4000,
+        )
     with pytest.raises(ValidationError):
-        SearchRequest(query="needle", full_k=41, max_total=40)
+        SearchRequest(
+            query="needle",
+            full_k=41,
+            max_total=40,
+            top_k=None,
+            token_ceiling=4000,
+        )
 
 
 def test_search_route_passes_budget_limit_to_service(monkeypatch) -> None:
@@ -49,6 +68,8 @@ def test_search_route_passes_budget_limit_to_service(monkeypatch) -> None:
             full_k=6,
             max_total=40,
             explain=True,
+            top_k=None,
+            token_ceiling=4000,
         )
     )
     assert seen["full_k"] == 6
@@ -76,6 +97,7 @@ def test_browse_and_incident_routes_expose_service_tools(monkeypatch) -> None:
     incident = routes.incident(
         IncidentRequest(query="what broke", corpus="cli", filters=["after:7d"])
     )
+    assert incident is not None
     assert incident["confidence"] == "strong"
     assert seen[0][1]["tail"] == 50
     assert seen[1][1]["filters"] == ["after:7d"]

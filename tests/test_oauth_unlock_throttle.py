@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import AnyUrl
 
 pytest.importorskip("mcp")
 
@@ -48,7 +49,7 @@ def public(vg_home, monkeypatch):
                     client=("127.0.0.1", 40000)) as client:
         from mcp.shared.auth import OAuthClientInformationFull
         server._shared_provider().store.save_client(OAuthClientInformationFull(
-            client_id="x", redirect_uris=["https://client.example/callback"]))
+            client_id="x", redirect_uris=[AnyUrl("https://client.example/callback")]))
         yield client, clock
 
 

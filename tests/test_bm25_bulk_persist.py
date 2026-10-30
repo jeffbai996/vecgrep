@@ -85,6 +85,7 @@ def test_interrupted_bulk_leaves_marker_and_next_service_rebuilds_from_qdrant(sv
     from vecgrep.backend.embed.cache import CachedBackend
     from vecgrep.backend.service import VecgrepService
     svc2 = VecgrepService(ephemeral=False)
+    assert svc2._embed_cache is not None
     svc2._backend_cache["auto"] = CachedBackend(inner, svc2._embed_cache)
     try:
         assert not (bm25_dir / "docs.pkl.dirty").exists(), "startup must clear the marker"

@@ -72,6 +72,7 @@ def any_bm25_svc(request, vg_home, stub_backend, monkeypatch):
     monkeypatch.setenv("VECGREP_BM25_BACKEND", request.param)
     monkeypatch.setattr(cfg_mod, "_settings", None)
     svc = VecgrepService(ephemeral=False)
+    assert svc._embed_cache is not None
     svc._backend_cache["auto"] = CachedBackend(stub_backend, svc._embed_cache)
     yield svc
     try:

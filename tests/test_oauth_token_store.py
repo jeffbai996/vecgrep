@@ -12,6 +12,7 @@ import time
 
 import pytest
 from mcp.shared.auth import OAuthClientInformationFull
+from pydantic import AnyUrl
 
 from vecgrep.backend.auth.store import TokenStore
 
@@ -25,7 +26,7 @@ def _client(client_id: str, issued_at: int) -> OAuthClientInformationFull:
     return OAuthClientInformationFull(
         client_id=client_id,
         client_id_issued_at=issued_at,
-        redirect_uris=["https://example.test/callback"],
+        redirect_uris=[AnyUrl("https://example.test/callback")],
     )
 
 
@@ -81,9 +82,11 @@ def test_loading_clamps_legacy_access_tokens_to_the_current_lifetime(tmp_path):
     before = time.time()
     second = TokenStore(path=str(path))
     loaded = second.load_access_token(at.token)
-    assert loaded is not None and loaded.expires_at <= before + 3600 + 5
-    assert second.load_refresh_token("c1", rt.token).expires_at <= before + 365 * 86400 + 5
-    assert second.load_access_token(short.token).expires_at <= before + 60 + 5, "never extended"
+    assert loaded is not None and loaded.expires_at is not None and loaded.expires_at <= before + 3600 + 5
+    loaded_rt = second.load_refresh_token("c1", rt.token)
+    assert loaded_rt is not None and loaded_rt.expires_at is not None and loaded_rt.expires_at <= before + 365 * 86400 + 5
+    loaded_short = second.load_access_token(short.token)
+    assert loaded_short is not None and loaded_short.expires_at is not None and loaded_short.expires_at <= before + 60 + 5, "never extended"
     on_disk = json.loads(path.read_text())
     assert on_disk["access"][at.token]["expires_at"] <= before + 3600 + 5
 
@@ -287,7 +290,9 @@ def test_replay_is_detected_after_a_restart(tmp_path):
     path = str(tmp_path / "oauth_state.json")
     first = TokenStore(path=path)
     _at, rt = first.issue_token_pair("c1", ["read"])
-    new_at, new_rt = first.rotate_refresh_token("c1", rt.token, ["read"])
+    rotated = first.rotate_refresh_token("c1", rt.token, ["read"])
+    assert rotated is not None
+    new_at, new_rt = rotated
     second = TokenStore(path=path)
     assert second.load_refresh_token("c1", new_rt.token) is not None
     assert second.rotate_refresh_token("c1", rt.token, ["read"]) is None
@@ -326,7 +331,7 @@ def test_legacy_state_without_families_loads_rotates_and_is_rewritten(tmp_path):
     assert store.load_access_token("vgat_legacy-a") is not None
     legacy = store.load_refresh_token("c1", "vgrt_legacy-1")
     assert legacy is not None
-    assert legacy.expires_at <= before + 365 * 86400 + 5, "the lifetime clamp still applies"
+    assert legacy.expires_at is not None and legacy.expires_at <= before + 365 * 86400 + 5, "the lifetime clamp still applies"
     assert store.load_refresh_token("c2", "vgrt_legacy-2") is not None
 
     on_disk = json.loads(path.read_text())
@@ -335,7 +340,9 @@ def test_legacy_state_without_families_loads_rotates_and_is_rewritten(tmp_path):
     assert {r["family"] for r in on_disk["refresh"].values()} == set(families)
     assert on_disk["access"]["vgat_legacy-a"]["family"] == on_disk["refresh"]["vgrt_legacy-1"]["family"]
 
-    new_at, new_rt = store.rotate_refresh_token("c1", "vgrt_legacy-1", ["read"])
+    rotated = store.rotate_refresh_token("c1", "vgrt_legacy-1", ["read"])
+    assert rotated is not None
+    new_at, new_rt = rotated
     assert store.load_refresh_token("c1", new_rt.token) is not None
 
     restarted = TokenStore(path=str(path))
@@ -371,16 +378,19 @@ def test_google_connector_access_tokens_match_refresh_lifetime(tmp_path):
     google = OAuthClientInformationFull(
         client_id="google-1",
         client_name="Google",
-        redirect_uris=["https://oauth-redirect.googleusercontent.com/r/custom-mcp"],
+        redirect_uris=[AnyUrl("https://oauth-redirect.googleusercontent.com/r/custom-mcp")],
     )
     store.save_client(google)
     before = time.time()
     at, rt = store.issue_token_pair("google-1", ["read"])
-    assert at.expires_at >= before + 365 * 86400 - 5
-    rotated_at, _ = store.rotate_refresh_token("google-1", rt.token, ["read"])
-    assert rotated_at.expires_at >= before + 365 * 86400 - 5
+    assert at.expires_at is not None and at.expires_at >= before + 365 * 86400 - 5
+    rotated = store.rotate_refresh_token("google-1", rt.token, ["read"])
+    assert rotated is not None
+    rotated_at, _ = rotated
+    assert rotated_at.expires_at is not None and rotated_at.expires_at >= before + 365 * 86400 - 5
     reloaded = TokenStore(path=str(path))
-    assert reloaded.load_access_token(rotated_at.token).expires_at >= before + 365 * 86400 - 5
+    loaded_at = reloaded.load_access_token(rotated_at.token)
+    assert loaded_at is not None and loaded_at.expires_at is not None and loaded_at.expires_at >= before + 365 * 86400 - 5
 
 
 def test_load_access_token_reloads_when_state_file_changes_on_disk(tmp_path):

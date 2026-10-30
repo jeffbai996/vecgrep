@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
+from pydantic import AnyUrl
 
 pytest.importorskip("mcp")
 
@@ -61,7 +62,7 @@ def oauth_client(vg_home, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClien
         from mcp.shared.auth import OAuthClientInformationFull
         for cid in ("x", "client"):
             mcp_server._shared_provider().store.save_client(OAuthClientInformationFull(
-                client_id=cid, redirect_uris=["https://claude.ai/api/mcp/auth_callback"], scope="read propose"))
+                client_id=cid, redirect_uris=[AnyUrl("https://claude.ai/api/mcp/auth_callback")], scope="read propose"))
         yield client
 
 
@@ -241,9 +242,11 @@ def test_tailnet_one_click_rejects_missing_or_cross_site_intent(oauth_client):
         page = client.get(
             "/oauth/unlock", params={"next": target}, headers=TAILNET_HEADERS
         )
-        intent = re.search(
+        match = re.search(
             r'name="tailnet_intent" value="([a-f0-9]+)"', page.text
-        ).group(1)
+        )
+        assert match is not None
+        intent = match.group(1)
         client.cookies.delete(TAILNET_INTENT_COOKIE)
         rejected = client.post(
             "/oauth/unlock",
@@ -490,7 +493,7 @@ def test_token_store_survives_a_restart(tmp_path):
     from vecgrep.backend.auth.store import TokenStore
     path = str(tmp_path / "oauth_state.json")
     a = TokenStore(path=path)
-    a.save_client(OAuthClientInformationFull(client_id="c1", redirect_uris=["https://claude.ai/cb"]))
+    a.save_client(OAuthClientInformationFull(client_id="c1", redirect_uris=[AnyUrl("https://claude.ai/cb")]))
     at = a.issue_access_token("c1", ["read"])
     rt = a.issue_refresh_token("c1", ["read"])
     b = TokenStore(path=path)  # "restart"
@@ -658,7 +661,9 @@ def test_private_approval_posts_proof_to_public_origin(oauth_client):
         # no-referrer turns cross-origin form POST Origin into null in browsers.
         assert page.headers["referrer-policy"] == "strict-origin"
         assert 'name="tailnet_login" value="owner@example.test"' in page.text
-        intent = re.search(r'name="tailnet_intent" value="([a-f0-9]+)"', page.text).group(1)
+        match = re.search(r'name="tailnet_intent" value="([a-f0-9]+)"', page.text)
+        assert match is not None
+        intent = match.group(1)
         with TestClient(create_app(), base_url="https://127.0.0.1:8766") as public:
             public.cookies.update(private.cookies)
             approved = public.post("/oauth/unlock", data={
@@ -679,7 +684,9 @@ def test_repeated_tailnet_handoff_requires_existing_approval_and_bound_proof(oau
     with TestClient(create_app(), base_url="https://127.0.0.1:8765",
                     client=("127.0.0.1", 50000)) as private:
         page = private.get("/oauth/unlock", params={"next": target}, headers=TAILNET_HEADERS)
-        intent = re.search(r'name="tailnet_intent" value="([a-f0-9]+)"', page.text).group(1)
+        match = re.search(r'name="tailnet_intent" value="([a-f0-9]+)"', page.text)
+        assert match is not None
+        intent = match.group(1)
         with TestClient(create_app(), base_url="https://127.0.0.1:8766") as public:
             public.cookies.update(private.cookies)
             data = {"consent": FormFields(page.text).values["consent"], "next": target, "tailnet_intent": intent, "tailnet_login": "owner@example.test"}
@@ -712,7 +719,9 @@ def test_public_handoff_rejects_unbound_or_forged_proof(oauth_client, change):
     with TestClient(create_app(), base_url="https://127.0.0.1:8765",
                     client=("127.0.0.1", 50000)) as private:
         page = private.get("/oauth/unlock", params={"next": target}, headers=TAILNET_HEADERS)
-        intent = re.search(r'name="tailnet_intent" value="([a-f0-9]+)"', page.text).group(1)
+        match = re.search(r'name="tailnet_intent" value="([a-f0-9]+)"', page.text)
+        assert match is not None
+        intent = match.group(1)
         with TestClient(create_app(), base_url="https://127.0.0.1:8766") as public:
             public.cookies.update(private.cookies)
             data = {"consent": FormFields(page.text).values["consent"], "next": target, "tailnet_intent": intent, "tailnet_login": "owner@example.test"}

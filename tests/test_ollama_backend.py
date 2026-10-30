@@ -8,6 +8,7 @@ stays stored (and keyword-searchable via BM25) without ever winning on cosine.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import httpx
 
@@ -342,7 +343,7 @@ def _length_limited(limit: int):
 
 
 def test_input_longer_than_the_batch_is_clipped_until_it_embeds() -> None:
-    handler = _length_limited(1000)
+    handler: Any = _length_limited(1000)
     b = _backend_with_handler(handler)
     out = b.embed(["short", "x" * 5000, "short too"])
     assert len(out) == 3

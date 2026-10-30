@@ -21,7 +21,7 @@ def _transcript(bodies):
 def test_groups_whole_turns_with_overlap():
     text = _transcript([f"message number {i} says something." for i in range(7)])
     chunks = TurnWindowChunker(turns=4, stride=3).chunk(text)
-    assert [c.meta["turns"] for c in chunks] == [4, 4]
+    assert [(c.meta or {})["turns"] for c in chunks] == [4, 4]
     for c in chunks:
         assert c.text.startswith("**"), "every chunk begins on a speaker line"
         assert text[c.start:c.end] == c.text, "offsets must address the original text"

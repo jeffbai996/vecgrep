@@ -3,12 +3,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from qdrant_client.http import models as qm
 
-from vecgrep.backend.ingestion.adapters import detect_adapter
 from vecgrep.backend.service import (
     SearchResult,
+    VecgrepService,
     _build_qdrant_filter,
     _expand,
     _journal_corpus,
@@ -81,7 +80,7 @@ def test_build_qdrant_filter_uses_match_except_for_active_status() -> None:
     assert has_unpushed is False
     assert isinstance(flt, qm.Filter)
     assert flt.must is None
-    assert flt.must_not is not None and len(flt.must_not) == 1
+    assert isinstance(flt.must_not, list) and len(flt.must_not) == 1
     cond = flt.must_not[0]
     assert isinstance(cond, qm.FieldCondition)
     assert cond.key == "metadata.status"
@@ -95,7 +94,7 @@ def test_build_qdrant_filter_pushes_negated_after_and_before() -> None:
     )
     assert has_unpushed is False
     assert isinstance(flt, qm.Filter)
-    assert flt.must_not is not None and len(flt.must_not) == 2
+    assert isinstance(flt.must_not, list) and len(flt.must_not) == 2
 
 
 def test_expand_prunes_ignored_walk_dirs(tmp_path: Path) -> None:
@@ -137,11 +136,13 @@ def test_journal_corpus_omits_sources_without_mutating_lists() -> None:
         use_for=["hint1"],
     )
     journaled = _journal_corpus(c)
-    assert journaled is not None
+    assert isinstance(journaled, dict)
     assert journaled["sources"] == []
     assert journaled["source_hashes"] == {}
     assert journaled["use_for"] == ["hint1"]
-    journaled["use_for"].append("mutated")
+    use_for = journaled["use_for"]
+    assert isinstance(use_for, list)
+    use_for.append("mutated")
     assert c.use_for == ["hint1"]
 
 
@@ -201,7 +202,9 @@ def test_qdrant_payload_index_fields_include_common_meta_keys() -> None:
 def test_mcp_read_only_tools_use_concurrent_read_gate_while_writes_stay_serialized() -> None:
     import asyncio
     import time
+
     from mcp.server.fastmcp import FastMCP
+
     from vecgrep.mcp import server as mcp_server
 
     fmcp = FastMCP("test-gates")
@@ -245,9 +248,10 @@ def test_incident_includes_primary_slice_for_non_transcript_sources(
     )
     svc.index(str(p), "docs")
     inc = svc.incident("gateway TLS certificate outage", "docs")
-    assert inc is not None
+    assert isinstance(inc, dict)
     assert inc["primary_timeline"] == []
-    assert "TLS certificate" in inc["primary_slice"]
+    primary_slice = inc.get("primary_slice")
+    assert isinstance(primary_slice, str) and "TLS certificate" in primary_slice
 
 
 def test_pin_definitions_orders_reranked_candidates_ahead_of_unscored_tail() -> None:
@@ -317,11 +321,11 @@ def test_eval_run_config_clears_rerank_score_cache(
 
     p = make_doc("doc.md", "Alpha beta gamma delta epsilon.")
     svc.index(str(p), "evaltest")
-    rerank_mod._score_cache[("model", "q", "chunk")] = 0.99
+    rerank_mod._score_cache[rerank_mod._score_key("model", "q", "chunk")] = 0.99
     assert len(rerank_mod._score_cache) == 1
 
     cfg = harness.RunConfig(name="test", top_k=3, rerank=False)
-    cases = [GoldCase(id="c1", corpus="evaltest", query="alpha", want=[str(p)])]
+    cases = [GoldCase(id="c1", corpus="evaltest", query="alpha", want=(str(p),))]
     harness.run_config(svc, cfg, cases, warmup=False, repeat=1)
     assert len(rerank_mod._score_cache) == 0
 

@@ -27,6 +27,7 @@ def test_each_embedding_lane_records_reported_input_tokens(receipt_db, lane):
         return httpx.Response(200, json={"model": "bge-test", "embeddings": [[0.1] * 1024],
                                         "prompt_eval_count": 17})
     backend._client.close()
+    assert backend._overflow_client is not None
     backend._overflow_client.close()
     backend._client = httpx.Client(transport=httpx.MockTransport(answer))
     backend._overflow_client = httpx.Client(transport=httpx.MockTransport(answer))

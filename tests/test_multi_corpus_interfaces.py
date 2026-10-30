@@ -16,9 +16,24 @@ from vecgrep.mcp import server as mcp_server
 
 def test_rest_search_scope_validation() -> None:
     with pytest.raises(ValidationError, match="mutually exclusive"):
-        SearchRequest(query="x", corpus="a", corpora=["b"])
+        SearchRequest(
+            query="x",
+            corpus="a",
+            corpora=["b"],
+            top_k=None,
+            full_k=8,
+            max_total=100,
+            token_ceiling=4000,
+        )
     with pytest.raises(ValidationError, match="cannot be empty"):
-        SearchRequest(query="x", corpora=[])
+        SearchRequest(
+            query="x",
+            corpora=[],
+            top_k=None,
+            full_k=8,
+            max_total=100,
+            token_ceiling=4000,
+        )
 
 
 def test_rest_context_hint_validation() -> None:
@@ -49,7 +64,14 @@ def test_rest_route_passes_plural_scope_and_returns_warnings(monkeypatch) -> Non
 
     monkeypatch.setattr(routes, "_SERVICE", Service())
     response = routes.search(
-        SearchRequest(query="needle", corpora=["chats", "cli"])
+        SearchRequest(
+            query="needle",
+            corpora=["chats", "cli"],
+            top_k=None,
+            full_k=8,
+            max_total=100,
+            token_ceiling=4000,
+        )
     )
     assert seen["corpus"] is None
     assert seen["corpus_names"] == ["chats", "cli"]
