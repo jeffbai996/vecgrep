@@ -113,7 +113,7 @@ the parser-failure tests.
 Broad exception handlers are retained only at documented backend, worker,
 cleanup and protocol boundaries. Their local annotations preserve established
 failure isolation and error responses; new ordinary application code should
-catch the errors it can handle. Per-line `# pyright: ignore[rule]` comments are
-restricted to optional `rerank` extra imports (`torch`,
-`sentence_transformers`) and third-party stub mismatches, always accompanied by
-a one-line reason.
+catch the errors it can handle. The code carries no `# pyright: ignore` or
+`# type: ignore` comments. `typings/` holds partial stubs for the optional
+`rerank` extra (`torch`, `sentence_transformers`) so the gate runs without it;
+extend them when the code uses more of either library.
