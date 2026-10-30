@@ -411,3 +411,23 @@ async def test_google_connector_accepts_same_origin_sibling_resource_and_normali
     assert error.value.error == "invalid_target"
 
 
+@pytest.mark.anyio
+async def test_exchange_consumed_authorization_code_raises_invalid_grant_token_error(provider):
+    from mcp.server.auth.provider import TokenError
+
+    c = _client()
+    await provider.register_client(c)
+    await provider.authorize(c, AuthorizationParams(
+        state="s", scopes=["read"], code_challenge="chal",
+        redirect_uri=CLAUDE_REDIRECT,
+        redirect_uri_provided_explicitly=True, resource=None,
+    ))
+    code_obj = next(iter(provider.store._codes.values()))
+    await provider.exchange_authorization_code(c, code_obj)
+
+    with pytest.raises(TokenError) as exc:
+        await provider.exchange_authorization_code(c, code_obj)
+    assert exc.value.error == "invalid_grant"
+
+
+

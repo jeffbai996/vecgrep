@@ -140,7 +140,7 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
         # (The SDK already verified PKCE before we got here.)
         ac = self.store.consume_authorization_code(client.client_id, authorization_code.code)
         if ac is None:
-            from mcp.server.auth.errors import TokenError
+            from mcp.server.auth.provider import TokenError
             raise TokenError("invalid_grant", "authorization code invalid or already used")
         # The approval starts a token family; every rotation stays in it.
         at, rt = self.store.issue_token_pair(client.client_id, ac.scopes, resource=ac.resource)
