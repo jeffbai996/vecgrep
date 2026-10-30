@@ -542,13 +542,6 @@ def _run_summarize(args: dict) -> str:
         return json.dumps({"error": str(e)})
 
 
-def _run_list_aliases() -> str:
-    """Read-only view of the active alias-expansion map."""
-    from ..backend.aliases import describe_aliases
-
-    return json.dumps(describe_aliases(), indent=2, ensure_ascii=False)
-
-
 def _run_list_corpora(include_hidden: bool = False) -> str:
     svc = _svc()
     corpora = [
@@ -1693,15 +1686,6 @@ def build_mcp_server() -> Any:
                 },
             ),
             Tool(
-                name="list_aliases",
-                description=(
-                    "Read-only view of the active alias-expansion map (which "
-                    "entity surface forms expand into which). Explains why a "
-                    "search matched terms you didn't type."
-                ),
-                inputSchema={"type": "object", "properties": {}},
-            ),
-            Tool(
                 name="related",
                 description=(
                     "Nearest neighbours of an EXISTING chunk by its stored "
@@ -1980,8 +1964,6 @@ def build_mcp_server() -> Any:
                 text = _run_stats(args)
             elif name == "summarize_corpus":
                 text = _run_summarize(args)
-            elif name == "list_aliases":
-                text = _run_list_aliases()
             elif name == "write":
                 text = _run_direct_write(
                     args.get("content", ""),
@@ -2874,6 +2856,8 @@ def build_http_app(
     fmcp_kwargs["icons"] = _server_icons()
     fmcp = FastMCP("vecgrep", **fmcp_kwargs)
     _offload_sync_tools(fmcp)
+    from . import call_log
+    call_log.install(fmcp)
     fmcp.settings.json_response = True
     fmcp.settings.stateless_http = True
     # Register at '/' so the parent app's prefix-stripping (_BearerGatedASGI
@@ -3053,16 +3037,6 @@ def build_http_app(
     def get_source(corpus: str, source_id: str) -> str:
         """source_id exactly as returned by search/stubs/get_corpus."""
         return _run_get_source(corpus, source_id)
-
-    @fmcp.tool(
-        description=(
-            "Read-only view of the active alias-expansion map. Explains why "
-            "a search matched terms you didn't type."
-        )
-    )
-    def list_aliases() -> str:
-        """No arguments."""
-        return _run_list_aliases()
 
     @fmcp.tool(
         description=(

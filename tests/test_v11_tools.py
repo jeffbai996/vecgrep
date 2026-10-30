@@ -6,8 +6,7 @@ browse       — the query-less primitive: "show me channel X on date Y".
                event sequence.
 get_source   — whole source by source_id (a stub / corpus listing gives you
                the source_id; get_chunk needed a chunk_id you may not have).
-list_aliases — read-only view of the active alias map, so an assistant can
-               see why a query expanded (or didn't).
+alias map    — the backend's alias-expansion view (no longer an MCP tool).
 Plus hygiene pinned here: MCP handlers reuse ONE service per settings
 generation (was: fresh VecgrepService per tool call), and the stdio
 transport exposes the same propose_* write tools as HTTP.
@@ -115,7 +114,7 @@ def test_get_source_non_transcript_has_no_events(svc, make_doc) -> None:
     assert "ordinary prose" in doc["text"]
 
 
-# ── list_aliases ─────────────────────────────────────────────────────────────
+# ── alias map ────────────────────────────────────────────────────────────────
 
 def test_list_aliases_reflects_active_map(tmp_path, monkeypatch) -> None:
     from vecgrep.backend.aliases import describe_aliases
@@ -186,4 +185,5 @@ def test_stdio_exposes_propose_tools_like_http() -> None:
     result = asyncio.run(handler(ListToolsRequest(method="tools/list")))
     tools = {t.name for t in result.root.tools}
     assert {"propose_write", "propose_edit", "propose_delete"} <= tools
-    assert {"browse", "get_source", "list_aliases"} <= tools
+    assert {"browse", "get_source"} <= tools
+    assert "list_aliases" not in tools
