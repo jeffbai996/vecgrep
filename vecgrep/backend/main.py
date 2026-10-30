@@ -334,6 +334,7 @@ def create_app() -> FastAPI:
 <span>""" + html.escape(error_copy) + """</span></div>"""
                 if error or throttled else ""
             )
+            intent: str | None = None
             if tailnet_login:
                 intent = tailnet_approval_intent(
                     _gs().oauth_approval_token or "",
@@ -482,7 +483,7 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
             )
             if throttled:
                 response.headers["Retry-After"] = str(throttled)
-            if tailnet_login:
+            if tailnet_login and intent is not None:
                 response.set_cookie(
                     TAILNET_INTENT_COOKIE,
                     intent,

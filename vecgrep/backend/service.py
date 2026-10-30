@@ -19,10 +19,13 @@ import uuid
 import weakref
 from bisect import bisect_left, bisect_right
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
+
+if TYPE_CHECKING:
+    from qdrant_client.http import models as qm
 
 from .aliases import aliases_path, expand_query, load_alias_map_cached
 from .assembly import (
@@ -45,6 +48,7 @@ from .ingestion.adapters import (
     detect_adapter,
 )
 from .ingestion.chunkers import (
+    Chunk,
     Chunker,
     CodeSymbolChunker,
     FixedTokenChunker,
@@ -898,9 +902,10 @@ class VecgrepService:
                 doc_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
                 if recorded_hashes.get(doc.source_id) == doc_hash:
                     continue
-                chunks = (
-                    chunker.chunk_doc(doc)
-                    if hasattr(chunker, "chunk_doc")
+                chunk_doc = getattr(chunker, "chunk_doc", None)
+                chunks: list[Chunk] = (
+                    cast(list[Chunk], chunk_doc(doc))
+                    if callable(chunk_doc)
                     else chunker.chunk(doc.text)
                 )
                 if not chunks:
@@ -908,7 +913,7 @@ class VecgrepService:
                 texts = [c.search_text or c.text for c in chunks if (c.search_text or c.text)]
                 if texts and (max_rows <= 0 or len(texts) <= max_rows):
                     backend.embed(texts)
-        except Exception:  # noqa: BLE001, S110 -- Prewarm is best-effort; canonical errors surface inside _index_locked.
+        except Exception:  # noqa: BLE001 -- Prewarm is best-effort; canonical errors surface inside _index_locked.
             return
 
     def index(
@@ -1110,9 +1115,9 @@ class VecgrepService:
         # --force should also bust the embedding cache for these texts;
         # otherwise we just re-write identical vectors. The wrapped backend
         # has a `bypass` flag we toggle for the duration of this call.
-        prev_bypass = getattr(backend, "bypass", None)
+        prev_bypass = backend.bypass if isinstance(backend, CachedBackend) else None
         use_bypass = force if bypass_embed_cache is None else bypass_embed_cache
-        if use_bypass and hasattr(backend, "bypass"):
+        if use_bypass and isinstance(backend, CachedBackend):
             backend.bypass = True
 
         try:
@@ -1151,8 +1156,12 @@ class VecgrepService:
                     # doc-aware chunkers (code_symbol) see the source path for
                     # language detection; text-only chunkers keep the old contract
                     try:
-                        chunks = (chunker.chunk_doc(doc)
-                                  if hasattr(chunker, "chunk_doc") else chunker.chunk(doc.text))
+                        chunk_doc = getattr(chunker, "chunk_doc", None)
+                        chunks: list[Chunk] = (
+                            cast(list[Chunk], chunk_doc(doc))
+                            if callable(chunk_doc)
+                            else chunker.chunk(doc.text)
+                        )
                     except Exception as exc:  # noqa: BLE001 -- Provider failures are propagated or reported here without stranding concurrent corpus work.
                         # One file the chunker cannot handle must not cost every
                         # file after it. Its previous chunks and recorded hash stay,
@@ -1429,7 +1438,7 @@ class VecgrepService:
                         "explorer catalog update failed for %s: %s", corpus_name, exc,
                     )
             if not update_registry:
-                if prev_bypass is not None and hasattr(backend, "bypass"):
+                if prev_bypass is not None and isinstance(backend, CachedBackend):
                     backend.bypass = prev_bypass
                 return total_docs, total_chunks, skipped
 
@@ -1440,12 +1449,12 @@ class VecgrepService:
                 corpus = self.registry.get(corpus_name)
 
             # Restore the bypass flag for subsequent calls (other corpora etc.)
-            if prev_bypass is not None and hasattr(backend, "bypass"):
+            if prev_bypass is not None and isinstance(backend, CachedBackend):
                 backend.bypass = prev_bypass
 
             return total_docs, total_chunks, skipped
         finally:
-            if prev_bypass is not None and hasattr(backend, "bypass"):
+            if prev_bypass is not None and isinstance(backend, CachedBackend):
                 backend.bypass = prev_bypass
 
     # ----- search ---------------------------------------------------------------
@@ -2243,7 +2252,7 @@ class VecgrepService:
         b_after: str | None = None,
         b_before: str | None = None,
         top_k: int = 8,
-        mode: str = "hybrid",
+        mode: SearchMode = "hybrid",
     ) -> dict:
         """Temporal diff: the same query run in two time windows, side by
         side, plus the source-level delta. Answers "how did we talk about X
@@ -2490,7 +2499,7 @@ class VecgrepService:
                 self.store.client.upsert(
                     collection_name=dst,
                     points=[
-                        qm.PointStruct(id=p.id, vector=p.vector, payload=p.payload or {})
+                        qm.PointStruct(id=p.id, vector=cast(Any, p.vector), payload=p.payload or {})
                         for p in points
                     ],
                     wait=(batch_idx % 8 == 0 or offset is None),
@@ -2647,7 +2656,7 @@ class VecgrepService:
         # rerank() takes (text, payload-ish) pairs. We pass each candidate's
         # chunk text + a dict that lets us reconstruct the SearchResult.
         pairs = [(c.chunk, c) for c in candidates]
-        scored = _rerank(query, pairs, model_name or DEFAULT_RERANKER)
+        scored = _rerank(query, cast(Any, pairs), model_name or DEFAULT_RERANKER)
         out: list[SearchResult] = []
         for score, original in scored:
             r: SearchResult = original  # type: ignore[assignment]
@@ -3346,23 +3355,14 @@ class VecgrepService:
             self._recover_corpus_locked(corpus_name)
             corpus = self.registry.get(corpus_name)
             collection = _collection_for(corpus.name)
-            target = Corpus(
-                **{
-                    f.name: (
-                        [s for s in corpus.sources if s != source_id]
-                        if f.name == "sources"
-                        else (
-                            {
-                                k: v
-                                for k, v in corpus.source_hashes.items()
-                                if k != source_id
-                            }
-                            if f.name == "source_hashes"
-                            else getattr(corpus, f.name)
-                        )
-                    )
-                    for f in fields(Corpus)
-                }
+            target = replace(
+                corpus,
+                sources=[s for s in corpus.sources if s != source_id],
+                source_hashes={
+                    k: v
+                    for k, v in corpus.source_hashes.items()
+                    if k != source_id
+                },
             )
             self.mutations.write({
                 "version": 1,
@@ -3956,7 +3956,7 @@ class VecgrepService:
                     points=[
                         qm.PointStruct(
                             id=point.id,
-                            vector=point.vector,
+                            vector=cast(Any, point.vector),
                             payload={**(point.payload or {}), "corpus": name},
                         )
                         for point in points
@@ -4060,11 +4060,15 @@ class VecgrepService:
             meta = json.loads(meta_path.read_text())
             archive_name = meta.get("name") if isinstance(meta, dict) else None
             self.registry.validate_user_name(archive_name)
+            if not isinstance(archive_name, str):
+                raise CorpusError("Archive missing a valid corpus name")
 
             target_name = archive_name if rename is None else rename
             # Names become filesystem components below. Validate both archive
             # metadata and an explicit rename before closing or writing storage.
             self.registry.validate_user_name(target_name)
+            if not isinstance(target_name, str):
+                raise CorpusError("Target corpus name must be a string")
 
             if self.registry.has(target_name):
                 raise CorpusError(
@@ -4796,7 +4800,7 @@ def _build_qdrant_filter(
     *,
     allowed_sources: set[str] | None = None,
     now: float | None = None,
-) -> tuple[object | None, bool]:
+) -> tuple[qm.Filter | None, bool]:
     """Translate user filter clauses into a Qdrant Filter plus a flag indicating
     whether any clause still requires post-retrieval Python evaluation."""
     from qdrant_client.http import models as qm

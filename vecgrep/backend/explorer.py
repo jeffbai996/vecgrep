@@ -409,10 +409,12 @@ def _metadata(record: dict) -> dict:
 def _timestamp(value: object) -> float | None:
     if value is None:
         return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    if isinstance(value, (int, float, str, bytes)):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def _label(value: object, fallback: str) -> str:

@@ -33,7 +33,7 @@ from .. import __version__
 from ..backend.config import ConfigError, get_settings, update_config
 from ..backend.embed import EmbedBackendError
 from ..backend.ingestion.adapters import AdapterError
-from ..backend.service import VecgrepService
+from ..backend.service import SearchMode, VecgrepService
 from ..backend.store import CorpusError
 from ..backend.write.proposal import SOURCE_KINDS
 
@@ -693,7 +693,7 @@ def search(
     query: str,
     corpora: tuple[str, ...],
     top_k: int | None,
-    mode: str,
+    mode: SearchMode,
     rerank: bool,
     rerank_model: str | None,
     filters: tuple[str, ...],
@@ -1777,7 +1777,7 @@ def _do_write(corpus: str, content: str, edit_id: str | None,
 
     corpus_dir = _write_dir(corpus)
     corpus_dir.mkdir(parents=True, exist_ok=True)
-    meta = {"origin": "human"}
+    meta: dict[str, Any] = {"origin": "human"}
     if source_kind:
         meta["source_kind"] = source_kind
     if tags:

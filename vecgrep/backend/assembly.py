@@ -283,17 +283,21 @@ def mmr_select(
     max_sim: dict[int, float] = {id(r): 0.0 for r in results}
 
     while remaining and len(selected) < k:
-        best = best_mmr = None
-        best_clone = best_clone_mmr = None
+        best: SearchResult | None = None
+        best_mmr: float | None = None
+        best_clone: SearchResult | None = None
+        best_clone_mmr: float | None = None
         for r in remaining:
             s = max_sim[id(r)]
             mmr = lambda_ * rel[id(r)] - (1.0 - lambda_) * s
             if s >= exclude_sim:
-                if best_clone is None or mmr > best_clone_mmr:
+                if best_clone_mmr is None or mmr > best_clone_mmr:
                     best_clone, best_clone_mmr = r, mmr
-            elif best is None or mmr > best_mmr:
+            elif best_mmr is None or mmr > best_mmr:
                 best, best_mmr = r, mmr
         pick = best if best is not None else best_clone
+        if pick is None:
+            break
         selected.append(pick)
         remaining.remove(pick)
         for r in remaining:

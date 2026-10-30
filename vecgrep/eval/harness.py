@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from vecgrep.backend import service as service_mod
-from vecgrep.backend.service import VecgrepService, _collection_for
+from vecgrep.backend.service import SearchMode, VecgrepService, _collection_for
 from vecgrep.backend.store.corpora import Corpus
 
 from .gold import GoldCase
@@ -212,7 +212,7 @@ class RunConfig:
     the duration of the run."""
     name: str
     corpora: dict[str, str] = field(default_factory=dict)
-    mode: str = "hybrid"
+    mode: SearchMode = "hybrid"
     rerank: bool = False
     rerank_model: str | None = None
     top_k: int = 10
