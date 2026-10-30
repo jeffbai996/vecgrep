@@ -17,9 +17,11 @@ Neither table stores a prompt, an answer, a URL or a host address.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -29,11 +31,19 @@ log = logging.getLogger(__name__)
 # Route rows are an operational trace, not an account; a fortnight covers any
 # question about when bulk embedding last switched endpoints.
 ROUTE_RETENTION_S = 14 * 86400
+_WRITE_LOCK = threading.Lock()
+_INITIALIZED: set[tuple[Path, int, int]] = set()
 
 
 def _database() -> Path:
     target = Path(os.environ.get("LOCAL_LLM_USAGE_DB") or
                   "~/.local/state/local-inference/usage.sqlite3").expanduser()
+    try:
+        st = target.stat()
+        if (target, st.st_dev, st.st_ino) in _INITIALIZED and (st.st_mode & 0o777) == 0o600:
+            return target
+    except OSError:
+        pass
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(target, os.O_CREAT | os.O_RDWR, 0o600)
     os.close(fd)
@@ -41,10 +51,25 @@ def _database() -> Path:
     return target
 
 
-def _write_usage(db: sqlite3.Connection, model: str, tin: int, tout: int) -> str:
+def _ensure_initialized(db: sqlite3.Connection, target: Path) -> None:
+    st = target.stat()
+    key = (target, st.st_dev, st.st_ino)
+    if key in _INITIALIZED:
+        return
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=NORMAL")
+    db.execute("PRAGMA busy_timeout=5000")
     db.execute("CREATE TABLE IF NOT EXISTS usage ("
                "request_id TEXT PRIMARY KEY, at REAL NOT NULL, host TEXT NOT NULL,"
                " model TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL)")
+    db.execute("CREATE TABLE IF NOT EXISTS embed_route ("
+               "at REAL NOT NULL, route TEXT NOT NULL, outcome TEXT NOT NULL,"
+               " reason TEXT NOT NULL DEFAULT '', request_id TEXT)")
+    db.execute("CREATE INDEX IF NOT EXISTS embed_route_at ON embed_route(at)")
+    _INITIALIZED.add(key)
+
+
+def _write_usage(db: sqlite3.Connection, model: str, tin: int, tout: int) -> str:
     request_id = "vecgrep:" + uuid.uuid4().hex
     # Each HTTP attempt owns one receipt, and streamed deltas never become
     # estimated tokens.
@@ -55,10 +80,6 @@ def _write_usage(db: sqlite3.Connection, model: str, tin: int, tout: int) -> str
 
 def _write_route(db: sqlite3.Connection, route: str, outcome: str, reason: str,
                  request_id: str | None) -> None:
-    db.execute("CREATE TABLE IF NOT EXISTS embed_route ("
-               "at REAL NOT NULL, route TEXT NOT NULL, outcome TEXT NOT NULL,"
-               " reason TEXT NOT NULL DEFAULT '', request_id TEXT)")
-    db.execute("CREATE INDEX IF NOT EXISTS embed_route_at ON embed_route(at)")
     now = time.time()
     db.execute("INSERT INTO embed_route VALUES (?,?,?,?,?)",
                (now, route, outcome, reason, request_id))
@@ -83,11 +104,13 @@ def record(data: dict, *, model: str, route: str | None = None,
     if counted is None and route is None:
         return
     try:
-        target = _database()
-        with sqlite3.connect(target, timeout=1) as db:
-            request_id = _write_usage(db, *counted) if counted else None
-            if route is not None:
-                _write_route(db, route, outcome, reason, request_id)
+        with _WRITE_LOCK:
+            target = _database()
+            with contextlib.closing(sqlite3.connect(target, timeout=5.0)) as db, db:
+                _ensure_initialized(db, target)
+                request_id = _write_usage(db, *counted) if counted else None
+                if route is not None:
+                    _write_route(db, route, outcome, reason, request_id)
     except (OSError, sqlite3.Error):
         log.warning("Local token usage could not be recorded")
 

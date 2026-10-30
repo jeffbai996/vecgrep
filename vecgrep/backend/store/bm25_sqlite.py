@@ -512,6 +512,39 @@ class BM25SqliteStore:
             def _fetch_fts_candidates(sql_clause: str) -> tuple[dict[int, tuple[str, str, float]], bool]:
                 by_pos: dict[int, tuple[str, str, float]] = {}
                 saturated = False
+                if not sql_clause:
+                    # Rank and cap inside the FTS5 virtual table before joining
+                    # `chunks`: otherwise SQLite performs a B-tree lookup on
+                    # `chunks` for every matching posting (100k+ rows on common
+                    # query words) before applying ORDER BY ... LIMIT.
+                    if len(unique_tokens) >= 2:
+                        and_rows = conn.execute(
+                            "SELECT c.pos, c.cid, c.tokens, f.score "
+                            "FROM (SELECT rowid, bm25(chunks_fts) AS score "
+                            "      FROM chunks_fts WHERE chunks_fts MATCH ? "
+                            "      ORDER BY bm25(chunks_fts) LIMIT ?) f "
+                            "JOIN chunks c ON c.pos = f.rowid",
+                            (_fts_and_query(unique_tokens), top_k),
+                        ).fetchall()
+                        if len(and_rows) >= top_k:
+                            saturated = True
+                        for pos, cid, tokens, score in and_rows:
+                            by_pos[int(pos)] = (str(cid), str(tokens), float(score))
+
+                    or_rows = conn.execute(
+                        "SELECT c.pos, c.cid, c.tokens, f.score "
+                        "FROM (SELECT rowid, bm25(chunks_fts) AS score "
+                        "      FROM chunks_fts WHERE chunks_fts MATCH ? "
+                        "      ORDER BY bm25(chunks_fts) LIMIT ?) f "
+                        "JOIN chunks c ON c.pos = f.rowid",
+                        (_fts_query(q_tokens), limit),
+                    ).fetchall()
+                    if len(or_rows) >= limit:
+                        saturated = True
+                    for pos, cid, tokens, score in or_rows:
+                        by_pos[int(pos)] = (str(cid), str(tokens), float(score))
+                    return by_pos, saturated
+
                 if len(unique_tokens) >= 2:
                     and_rows = conn.execute(
                         "SELECT c.pos, c.cid, c.tokens, bm25(chunks_fts) "

@@ -54,3 +54,20 @@ def test_unknown_or_invalid_counts_are_not_estimated(receipt_db, data):
 def test_unavailable_receipt_storage_does_not_fail_embedding(receipt_db):
     receipt_db.mkdir()
     record({"prompt_eval_count": 12}, model="bge-test")
+
+
+def test_concurrent_token_receipt_writes_do_not_drop_rows_or_lock(receipt_db):
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(
+            pool.map(
+                lambda i: record({"prompt_eval_count": i + 1}, model="bge-test", route="primary"),
+                range(32),
+            )
+        )
+    with sqlite3.connect(receipt_db) as db:
+        mode = db.execute("PRAGMA journal_mode").fetchone()[0]
+    assert mode.lower() == "wal"
+    assert len(rows(receipt_db)) == 32
+
