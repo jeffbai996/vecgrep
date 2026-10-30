@@ -159,6 +159,7 @@ class _StageTimer:
         self.warnings: list[SearchWarning] = []
         self.user_filters: list[str] | None = None
         self.effective_filters: list[str] | None = None
+        self.raw_query: str | None = None
 
     def add(self, stage: str, seconds: float) -> None:
         with self._lock:
@@ -478,15 +479,17 @@ class SearchResult:
     # Per-retriever score breakdown — populated when --explain is on.
     # Empty dict otherwise. Keys: vector_cosine, vector_rank, bm25_score,
     # bm25_rank, rrf, rerank_score (when reranked).
-    explain: dict = None  # type: ignore[assignment]
+    explain: dict = field(default_factory=dict)
     # Deployment-defined origin stamp (source_labels.json glob map) — e.g.
     # which agent/host owns the channel a chat transcript came from. The
     # inline display names frozen into archived text drift; this doesn't.
     source_label: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.explain is None:
-            self.explain = {}
+    # Lazily computed text features for near-duplicate detection; see
+    # assembly.py. Excluded from __init__, repr and equality.
+    _asm_norm: str | None = field(default=None, init=False, repr=False, compare=False)
+    _asm_words: list[str] | None = field(default=None, init=False, repr=False, compare=False)
+    _asm_shingles: frozenset[str] | None = field(
+        default=None, init=False, repr=False, compare=False)
 
     @property
     def anchor(self) -> str:
@@ -1562,7 +1565,7 @@ class VecgrepService:
         timer = _StageTimer()
         timer.user_filters = user_filters
         timer.effective_filters = effective_filters
-        timer.raw_query = raw_query  # type: ignore[attr-defined]
+        timer.raw_query = raw_query
         if user_filters and _has_invalid_filter(user_filters):
             return SearchOutcome(
                 [],
@@ -2656,10 +2659,9 @@ class VecgrepService:
         # rerank() takes (text, payload-ish) pairs. We pass each candidate's
         # chunk text + a dict that lets us reconstruct the SearchResult.
         pairs = [(c.chunk, c) for c in candidates]
-        scored = _rerank(query, cast(Any, pairs), model_name or DEFAULT_RERANKER)
+        scored = _rerank(query, pairs, model_name or DEFAULT_RERANKER)
         out: list[SearchResult] = []
-        for score, original in scored:
-            r: SearchResult = original  # type: ignore[assignment]
+        for score, r in scored:
             # The cross-encoder score IS the canonical relevance signal when
             # reranking is on: it's the single number that best approximates
             # P(relevant), computed identically for every hit regardless of

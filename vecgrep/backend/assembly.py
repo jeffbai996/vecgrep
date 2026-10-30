@@ -134,26 +134,26 @@ def split_full_and_stubs(
 
 def _normalized(r: SearchResult) -> str:
     """Whitespace-collapsed lowercase chunk text, cached on the result."""
-    cached = getattr(r, "_asm_norm", None)
+    cached = r._asm_norm
     if cached is None:
         cached = " ".join(r.chunk.lower().split())
-        r._asm_norm = cached  # type: ignore[attr-defined]
+        r._asm_norm = cached
     return cached
 
 
 def _words(r: SearchResult) -> list[str]:
     """Whitespace-split lowercase words, cached on the result."""
-    cached = getattr(r, "_asm_words", None)
+    cached = r._asm_words
     if cached is None:
         cached = _normalized(r).split()
-        r._asm_words = cached  # type: ignore[attr-defined]
+        r._asm_words = cached
     return cached
 
 
-def _shingles(r: SearchResult) -> frozenset:
+def _shingles(r: SearchResult) -> frozenset[str]:
     """Token 8-gram shingles of the normalized text (cached). Only shingles
     long enough to be distinctive (>= MIN_CLONE_CHARS chars) are kept."""
-    cached = getattr(r, "_asm_shingles", None)
+    cached = r._asm_shingles
     if cached is None:
         toks = _words(r)
         grams = set()
@@ -162,7 +162,7 @@ def _shingles(r: SearchResult) -> frozenset:
             if len(g) >= MIN_CLONE_CHARS:
                 grams.add(g)
         cached = frozenset(grams)
-        r._asm_shingles = cached  # type: ignore[attr-defined]
+        r._asm_shingles = cached
     return cached
 
 

@@ -8,7 +8,6 @@ stays stored (and keyword-searchable via BM25) without ever winning on cosine.
 from __future__ import annotations
 
 import math
-from typing import Any
 
 import httpx
 
@@ -324,26 +323,26 @@ def test_keep_alive_env_override_and_disable(monkeypatch) -> None:
 _TOO_LONG = "the input length exceeds the context length"
 
 
-def _length_limited(limit: int):
+class _LengthLimited:
     """Handler that 400s any single input longer than `limit` chars."""
-    seen: list[int] = []
 
-    def handler(req: httpx.Request) -> httpx.Response:
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.seen: list[int] = []
+
+    def __call__(self, req: httpx.Request) -> httpx.Response:
         import json as _json
         inputs = _json.loads(req.content)["input"]
         if isinstance(inputs, str):
             inputs = [inputs]
-        seen.append(max(len(t) for t in inputs))
-        if any(len(t) > limit for t in inputs):
+        self.seen.append(max(len(t) for t in inputs))
+        if any(len(t) > self.limit for t in inputs):
             return httpx.Response(400, json={"error": _TOO_LONG})
         return _rows([[0.5] * 1024 for _ in inputs])
 
-    handler.seen = seen  # type: ignore[attr-defined]
-    return handler
-
 
 def test_input_longer_than_the_batch_is_clipped_until_it_embeds() -> None:
-    handler: Any = _length_limited(1000)
+    handler = _LengthLimited(1000)
     b = _backend_with_handler(handler)
     out = b.embed(["short", "x" * 5000, "short too"])
     assert len(out) == 3

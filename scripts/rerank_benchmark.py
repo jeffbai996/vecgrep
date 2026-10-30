@@ -187,8 +187,8 @@ def measure(module, model, case, cache_hit=False):
 def worker(config):
     if harness_identity() != config["measurement_harness"]:
         raise ValueError("measurement harness changed before worker execution")
-    import torch  # pyright: ignore[reportMissingImports]  # Optional rerank extra dependency.
-    from sentence_transformers import CrossEncoder  # pyright: ignore[reportMissingImports]  # Optional rerank extra dependency.
+    import torch
+    from sentence_transformers import CrossEncoder
     torch.set_num_threads(config["threads"])
     roots = config["roots"]
     # Recheck identities after dispatch before any candidate code is imported.

@@ -145,7 +145,7 @@ def test_mcp_service_is_reused_across_calls(vg_home, monkeypatch) -> None:
     built = []
     real = mcp_srv.VecgrepService
 
-    class Spy(real):  # type: ignore[misc]
+    class Spy(real):
         def __init__(self, *a, **k):
             built.append(1)
             super().__init__(*a, **k)

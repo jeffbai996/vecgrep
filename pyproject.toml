@@ -96,4 +96,7 @@ exclude = [
     "tests/fixtures/code_symbols/broken.py",
 ]
 typeCheckingMode = "standard"
+# typings/ holds partial stubs for the optional rerank extra (torch,
+# sentence-transformers), which the dev environment does not install.
+reportMissingModuleSource = "none"
 

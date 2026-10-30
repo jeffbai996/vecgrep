@@ -227,7 +227,7 @@ class RunConfig:
     rrf_k: int | None = None
     cosine_floor_margin: float | None = None
     decay_floor: float | None = None
-    decay_half_life_days: float | None | str = "keep"    # per actual corpus, restored after
+    decay_half_life_days: float | None | Literal["keep"] = "keep"    # per actual corpus, restored after
     bm25_weight_by_corpus: dict[str, float] = field(default_factory=dict)  # logical -> weight, restored after
     unscoped: bool = False   # search with NO corpus argument (see run_config)
     notes: str = ""
@@ -292,7 +292,7 @@ def run_config(
     if cfg.decay_half_life_days != "keep":
         for a in set(searched):
             saved_decay[a] = svc.registry.get(a).decay_half_life_days
-            svc.set_decay(a, cfg.decay_half_life_days)  # type: ignore[arg-type]
+            svc.set_decay(a, cfg.decay_half_life_days)
     saved_bm25w: dict[str, float | None] = {}
     for logical, w in cfg.bm25_weight_by_corpus.items():
         a = cfg.corpora.get(logical, logical)

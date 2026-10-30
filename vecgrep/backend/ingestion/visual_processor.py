@@ -8,8 +8,12 @@ import subprocess
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
+
+if TYPE_CHECKING:
+    import pypdfium2 as pdfium
 
 logger = logging.getLogger(__name__)
 PROMPT = '''Describe this document page for search. Transcribe visible headings and labels.
@@ -29,6 +33,12 @@ def parse_vision(response: dict) -> str:
     return text.strip()
 
 
+class _RenderablePage(Protocol):
+    # pypdfium2 ships no annotations, so its render(scale=1) default is
+    # inferred as int. The library takes any float zoom factor.
+    def render(self, *, scale: float) -> pdfium.PdfBitmap: ...
+
+
 def page_images(path: Path, *, max_pages: int = 40) -> Iterator[tuple[int, bytes]]:
     # Optional imports keep native text ingestion dependency-free.
     from PIL import Image, ImageOps
@@ -42,7 +52,7 @@ def page_images(path: Path, *, max_pages: int = 40) -> Iterator[tuple[int, bytes
                 try:
                     width, height = page.get_size()
                     scale = min(2.0, 1800 / max(width, height))
-                    bitmap = page.render(scale=scale)  # pyright: ignore[reportArgumentType]  # pypdfium2 stub expects int scale, but float is accepted at runtime.
+                    bitmap = cast(_RenderablePage, page).render(scale=scale)
                     try:
                         image = bitmap.to_pil().convert('RGB')
                         buffer = io.BytesIO()

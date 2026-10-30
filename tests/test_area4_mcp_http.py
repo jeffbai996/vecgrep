@@ -140,7 +140,9 @@ def test_f_api_03_negative_full_k_and_negative_timeline_padding_invert_slices(
     )
 
 
-def test_f_api_04_ollama_read_timeout_retries_on_fallback_path_multiplying_timeout():
+def test_f_api_04_ollama_read_timeout_retries_on_fallback_path_multiplying_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """F-API-04: When _embed_batch hits httpx.ReadTimeout, it returns None instead of raising
     EmbedBackendError, causing OllamaBackend.embed() to fall back to _embed_one_resilient()
     and make a second full-timeout request (or up to 64 requests on a batch)."""
@@ -156,7 +158,7 @@ def test_f_api_04_ollama_read_timeout_retries_on_fallback_path_multiplying_timeo
         calls += 1
         raise httpx.ReadTimeout("simulated read timeout")
 
-    backend._client.post = _timeout_post  # type: ignore[method-assign]
+    monkeypatch.setattr(backend._client, "post", _timeout_post)
 
     with pytest.raises(EmbedBackendError):
         backend.embed(["chunk one", "chunk two"])
@@ -289,7 +291,7 @@ def test_f_api_04_openai_backend_configures_bounded_timeout(monkeypatch: pytest.
             captured.update(kwargs)
 
     fake_mod = types.ModuleType("openai")
-    fake_mod.OpenAI = _FakeOpenAI  # type: ignore[attr-defined]
+    monkeypatch.setattr(fake_mod, "OpenAI", _FakeOpenAI, raising=False)
     monkeypatch.setitem(sys.modules, "openai", fake_mod)
 
     OpenAIBackend(api_key="sk-test", model="text-embedding-3-small")

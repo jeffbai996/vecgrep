@@ -206,12 +206,12 @@ def test_unscoped_run_searches_every_corpus_not_the_mapped_one(svc, tmp_path: Pa
         seen.append({"corpus_name": corpus_name, "kw": kw})
         return real_search(query, corpus_name, **kw)
 
-    svc.search = spy  # type: ignore[method-assign]
+    svc.search = spy
     try:
         cfg = harness.RunConfig(name="u", mode="hybrid", top_k=5, unscoped=True)
         r = harness.run_config(svc, cfg, cases, warmup=False)
     finally:
-        svc.search = real_search  # type: ignore[method-assign]
+        svc.search = real_search
 
     assert seen, "harness never called search"
     assert all(s["corpus_name"] is None for s in seen), \
@@ -233,9 +233,9 @@ def test_scoped_run_still_passes_the_mapped_corpus(svc, tmp_path: Path) -> None:
         seen.append(corpus_name)
         return real_search(query, corpus_name, **kw)
 
-    svc.search = spy  # type: ignore[method-assign]
+    svc.search = spy
     try:
         harness.run_config(svc, harness.RunConfig(name="s", top_k=5), cases, warmup=False)
     finally:
-        svc.search = real_search  # type: ignore[method-assign]
+        svc.search = real_search
     assert seen == ["chats"]

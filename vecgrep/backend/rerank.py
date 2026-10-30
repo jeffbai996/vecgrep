@@ -22,7 +22,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -214,12 +214,15 @@ def _release_cuda_cache() -> None:
     absent entirely, and on a CPU-only box there is nothing to release.
     """
     try:
-        import torch  # pyright: ignore[reportMissingImports]  # Optional rerank extra dependency.
+        import torch
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     except Exception:  # noqa: BLE001, S110 -- External model and process failures cross this worker boundary as explicit error results.
         pass
+
+
+PayloadT = TypeVar("PayloadT")
 
 
 class RerankerError(RuntimeError):
@@ -256,14 +259,14 @@ def _process_committed_bytes(
 
 def _construct_model(model_name: str):
     try:
-        from sentence_transformers import CrossEncoder  # pyright: ignore[reportMissingImports]  # Optional rerank extra dependency.
+        from sentence_transformers import CrossEncoder
     except ImportError as e:
         raise RerankerError(
             "Reranking requires the 'rerank' extra. "
             "Install with `pip install vecgrep[rerank]`."
         ) from e
     try:
-        import torch  # pyright: ignore[reportMissingImports]  # Optional rerank extra dependency.
+        import torch
 
         kwargs = {}
         if RERANK_MAX_LENGTH:
@@ -822,9 +825,9 @@ def _load(model_name: str):
 
 def rerank(
     query: str,
-    candidates: list[tuple[str, dict]],
+    candidates: list[tuple[str, PayloadT]],
     model_name: str = DEFAULT_RERANKER,
-) -> list[tuple[float, dict]]:
+) -> list[tuple[float, PayloadT]]:
     """Score (query, chunk_text) for each candidate. Returns (score, payload)
     pairs sorted descending. Scores are sigmoid-mapped 0..1 for downstream
     display.

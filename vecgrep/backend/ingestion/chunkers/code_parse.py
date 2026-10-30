@@ -14,6 +14,10 @@ from __future__ import annotations
 import ast
 import re
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import tree_sitter
 
 
 @dataclass
@@ -133,7 +137,7 @@ def _leading_comments(lines: list[str], start: int, marker: str) -> int:
 
 
 # ── TypeScript (tree-sitter) ──────────────────────────────────────────────
-_TS_LANGUAGES: dict[bool, object] = {}
+_TS_LANGUAGES: dict[bool, tree_sitter.Language] = {}
 
 
 def _ts_parser(tsx: bool):
@@ -145,7 +149,7 @@ def _ts_parser(tsx: bool):
     if tsx not in _TS_LANGUAGES:
         raw = tree_sitter_typescript.language_tsx() if tsx else tree_sitter_typescript.language_typescript()
         _TS_LANGUAGES[tsx] = tree_sitter.Language(raw)
-    return tree_sitter.Parser(_TS_LANGUAGES[tsx])  # pyright: ignore[reportArgumentType]  # tree_sitter.Language capsule pointer mismatch with Parser stubs.
+    return tree_sitter.Parser(_TS_LANGUAGES[tsx])
 
 
 _TS_CLASS = {"class_declaration", "abstract_class_declaration", "class"}
