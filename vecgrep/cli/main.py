@@ -65,7 +65,8 @@ def _raise_for_status(r: httpx.Response) -> None:
     if r.status_code >= 400:
         try:
             detail = r.json().get("detail", r.text)
-        except Exception:  # noqa: BLE001 -- Adapter failures become CLI errors while independent watched sources remain active.
+        # ValueError: the body is not JSON. AttributeError: it is JSON but not an object.
+        except (ValueError, AttributeError):
             detail = r.text
         raise click.ClickException(detail)
 
@@ -1842,7 +1843,8 @@ def pending() -> None:
     for f in files:
         try:
             d = json.loads(Path(f).read_text())
-        except Exception:  # noqa: BLE001, S112 -- Adapter failures become CLI errors while independent watched sources remain active.
+        # An unreadable or malformed proposal is skipped so the others still list.
+        except (OSError, ValueError):
             continue
         kind = ("delete" if d.get("is_delete")
                 else "edit" if d.get("is_edit") else "new")
