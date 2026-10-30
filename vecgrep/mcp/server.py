@@ -2587,37 +2587,51 @@ class _PublicClientMetadata:
 
 
 class _RegistrationRateLimiter:
-    """One process-wide DCR budget shared by both advertised route copies."""
+    """A DCR budget per caller, shared by both advertised route copies.
+
+    Callers are keyed like the unlock throttle: by the address tailscaled
+    reports. One process-wide budget let a single caller spend it and lock
+    every connector out of registering (security review 2026-10-29)."""
 
     def __init__(
         self,
         limit: int = _REGISTRATION_RATE_LIMIT,
         window_s: int = _REGISTRATION_RATE_WINDOW_S,
+        max_keys: int = 10_000,
     ) -> None:
-        from collections import deque
-
         self._limit = limit
         self._window_s = window_s
-        self._attempts = deque()
+        self._max_keys = max_keys
+        self._attempts: dict = {}
 
     def reset(self) -> None:
         self._attempts.clear()
 
-    def allow(self) -> tuple[bool, int]:
+    def allow(self, key: str = "") -> tuple[bool, int]:
         import math
         import time
+        from collections import deque
 
         now = time.monotonic()
         cutoff = now - self._window_s
-        while self._attempts and self._attempts[0] <= cutoff:
-            self._attempts.popleft()
-        if len(self._attempts) >= self._limit:
+        attempts = self._attempts.get(key) or deque()
+        while attempts and attempts[0] <= cutoff:
+            attempts.popleft()
+        if len(attempts) >= self._limit:
+            self._attempts[key] = attempts
             retry_after = max(
                 1,
-                math.ceil(self._window_s - (now - self._attempts[0])),
+                math.ceil(self._window_s - (now - attempts[0])),
             )
             return False, retry_after
-        self._attempts.append(now)
+        attempts.append(now)
+        self._attempts[key] = attempts
+        if len(self._attempts) > self._max_keys:
+            # Evict the oldest-inserted caller so cycling addresses cannot
+            # grow this table without bound.
+            oldest = next(iter(self._attempts))
+            if oldest != key:
+                self._attempts.pop(oldest, None)
         return True, 0
 
 
@@ -2649,7 +2663,9 @@ class _RegistrationIngress:
             await self._inner(scope, receive, send)
             return
 
-        allowed, retry_after = _REGISTRATION_LIMITER.allow()
+        from vecgrep.backend.auth.throttle import client_key
+
+        allowed, retry_after = _REGISTRATION_LIMITER.allow(client_key(scope))
         if not allowed:
             await _registration_error(send, 429, "registration_rate_limited", retry_after)
             return

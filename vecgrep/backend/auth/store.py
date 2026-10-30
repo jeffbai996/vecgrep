@@ -33,6 +33,8 @@ import hmac
 import json
 import os
 import secrets
+import tempfile
+import threading
 import time
 from urllib.parse import urlsplit
 
@@ -54,6 +56,10 @@ _ACCESS_TTL_S = 60 * 60
 _REFRESH_TTL_S = 365 * 86400
 _CODE_TTL_S = 300           # 5 minutes
 _MAX_UNAPPROVED_CLIENTS = 32
+# An approved client can rotate as fast as it likes, and rotation leaves the
+# earlier access tokens to expire on their own; the cap keeps that from growing
+# the state without bound. Matches ibkr-mcp.
+_MAX_ACCESS_PER_CLIENT = 16
 _UNAPPROVED_CLIENT_TTL_S = 24 * 3600
 
 
@@ -147,6 +153,9 @@ class TokenStore:
                                 if google_registry_path else None)
         self._max_unapproved_clients = max_unapproved_clients
         self._unapproved_client_ttl_s = unapproved_client_ttl_s
+        # Serialises saves: two concurrent requests used to write the same
+        # .tmp path, and the second os.replace found it gone.
+        self._save_lock = threading.RLock()
         self._load()
 
     # ----- persistence -----
@@ -245,6 +254,10 @@ class TokenStore:
     def _save(self) -> None:
         if not self._path:
             return
+        with self._save_lock:
+            self._save_unlocked()
+
+    def _save_unlocked(self) -> None:
         now = _now()
         self._prune_families()
         access = {k: v for k, v in self._access.items()
@@ -261,12 +274,19 @@ class TokenStore:
                                if v.get("family") in live},
             "refresh_signing_key": self._signing_key,
         }
-        os.makedirs(os.path.dirname(self._path) or ".", mode=0o700, exist_ok=True)
-        tmp = self._path + ".tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh)
-        os.replace(tmp, self._path)
+        directory = os.path.dirname(self._path) or "."
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=os.path.basename(self._path) + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(data, fh)
+            os.replace(tmp, self._path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         try:
             self._loaded_mtime = os.path.getmtime(self._path)
         except OSError:
@@ -416,8 +436,19 @@ class TokenStore:
         return True
 
     # ----- access tokens -----
+    def _trim_access(self, client_id: str) -> None:
+        """Drop the client's oldest access tokens so a new one fits the cap."""
+        mine = sorted(((at.expires_at or 0, token) for token, at in self._access.items()
+                       if at.client_id == client_id))
+        drop = [token for _exp, token in mine[:max(0, len(mine) + 1 - _MAX_ACCESS_PER_CLIENT)]]
+        if drop:
+            self._withdraw_google_bearers([self._access[t] for t in drop])
+            for token in drop:
+                self._access.pop(token, None)
+
     def _new_access(self, client_id: str, scopes: list[str], ttl_s: int,
                     resource: str | None, family: str | None) -> FamilyAccessToken:
+        self._trim_access(client_id)
         at = FamilyAccessToken(
             token=_new_secret("vgat"),
             client_id=client_id,

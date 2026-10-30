@@ -390,3 +390,41 @@ def test_load_access_token_reloads_when_state_file_changes_on_disk(tmp_path):
     at = writer.issue_access_token("c1", ["read"])
     assert reader.load_access_token(at.token) is not None
 
+
+
+def test_a_clients_access_tokens_are_capped_at_sixteen(store):
+    """Rotation leaves earlier access tokens to expire on their own, so an
+    approved client rotating in a loop would otherwise grow the state."""
+    first = [store.issue_access_token("c1", ["read"], ttl_s=3600 + i) for i in range(20)]
+    other = store.issue_access_token("c2", ["read"], ttl_s=3600)
+    live = [at for at in first if store.load_access_token(at.token) is not None]
+    assert len(live) == 16
+    assert live == first[4:], "the soonest-expiring go first"
+    assert store.load_access_token(other.token) is not None, "another client's tokens are untouched"
+
+
+def test_two_writers_on_one_state_file_do_not_collide(tmp_path):
+    """Two processes holding the same state file used to write one fixed
+    .tmp path, and the second os.replace found it gone."""
+    import json
+    import threading
+
+    path = tmp_path / "oauth_state.json"
+    stores = [TokenStore(path=str(path)), TokenStore(path=str(path))]
+    errors: list[BaseException] = []
+
+    def mint(store: TokenStore, name: str) -> None:
+        try:
+            for _ in range(40):
+                store.issue_access_token(name, ["read"], ttl_s=3600)
+        except BaseException as exc:  # noqa: BLE001 -- the test reports any failure below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=mint, args=(st, f"c{i}")) for i, st in enumerate(stores)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert [p.name for p in tmp_path.iterdir()] == ["oauth_state.json"], "no temporary file is left behind"
+    json.loads(path.read_text())
