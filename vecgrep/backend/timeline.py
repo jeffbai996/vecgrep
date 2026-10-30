@@ -62,10 +62,21 @@ def parse_events(slice_text: str) -> list[Event]:
         text = " ".join(body.replace(">", " ").split())
         if not text:
             continue
+        raw_time = m.group("time")
+        norm_time = f"0{raw_time}" if len(raw_time) == 4 else raw_time
         events.append(
-            Event(speaker=m.group("speaker").strip(), time=m.group("time"), text=text)
+            Event(speaker=m.group("speaker").strip(), time=norm_time, text=text)
         )
     return events
+
+
+def _anchor_strength(a) -> float:
+    explain = getattr(a, "explain", None) or {}
+    if "rerank_ranked" in explain:
+        return float(explain["rerank_ranked"])
+    if "rerank_score" in explain:
+        return float(explain["rerank_score"])
+    return float(a.score)
 
 
 def build_timeline(
@@ -86,13 +97,17 @@ def build_timeline(
     the document. Groups come back ordered by document date (undated last),
     events chronological within each group.
     """
+    max_groups = max(0, max_groups)
+    padding = max(0, padding)
+    if max_groups == 0:
+        return []
     by_file: dict[tuple[str, str], list] = {}
     for r in anchors:
         by_file.setdefault((r.corpus, r.source_id), []).append(r)
 
     # Keep the best few files, ranked by their strongest anchor.
     ranked = sorted(
-        by_file.items(), key=lambda kv: max(a.score for a in kv[1]), reverse=True
+        by_file.items(), key=lambda kv: max(_anchor_strength(a) for a in kv[1]), reverse=True
     )[:max_groups]
 
     groups: list[dict] = []

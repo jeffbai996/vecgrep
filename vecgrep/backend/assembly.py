@@ -118,6 +118,8 @@ def split_full_and_stubs(
     so it can be crossed by at most one stub (never under-fills on a
     generous budget).
     """
+    full_k = max(0, full_k)
+    max_total = max(full_k, max_total)
     full = results[:full_k]
     stubs: list[ResultStub] = []
     spent = 0
@@ -192,9 +194,12 @@ def _text_similarity(
     # linear word time before constructing the quadratic char SequenceMatcher.
     if la + lb >= 400:
         wa, wb = _words(a), _words(b)
-        if len(wa) >= 8 and len(wb) >= 8:
-            if difflib.SequenceMatcher(None, wa, wb).quick_ratio() < min_ratio * 0.65:
-                return 0.0
+        if (
+            len(wa) >= 8
+            and len(wb) >= 8
+            and difflib.SequenceMatcher(None, wa, wb).quick_ratio() < min_ratio * 0.65
+        ):
+            return 0.0
     sm = difflib.SequenceMatcher(None, na, nb)
     if sm.real_quick_ratio() < min_ratio or sm.quick_ratio() < min_ratio:
         return 0.0

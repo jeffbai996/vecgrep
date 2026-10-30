@@ -271,8 +271,29 @@ class CodeSymbolChunker(Chunker):
                 out.append((off, text))
         return out
 
+    @staticmethod
+    def _bounded_lines(base_off: int, text: str):
+        if len(text) <= MAX_CHARS:
+            yield base_off, text
+            return
+        line_acc, line_off, pos = "", base_off, base_off
+        for line in text.splitlines(keepends=True):
+            if len(line_acc) + len(line) > MAX_CHARS and line_acc.strip():
+                yield line_off, line_acc
+                line_acc, line_off = "", pos
+            if len(line) > MAX_CHARS:
+                for off in range(0, len(line), MAX_CHARS):
+                    yield pos + off, line[off : off + MAX_CHARS]
+                pos += len(line)
+                line_off = pos
+            else:
+                line_acc += line
+                pos += len(line)
+        if line_acc.strip():
+            yield line_off, line_acc
+
     def _bounded(self, block: str):
-        """Yield (offset, piece) — the whole block, or blank-line splits when a
+        """Yield (offset, piece) — the whole block, or blank-line / line splits when a
         single symbol exceeds MAX_CHARS (the never-split rule's escape hatch)."""
         if len(block) <= MAX_CHARS:
             yield 0, block
@@ -281,14 +302,12 @@ class CodeSymbolChunker(Chunker):
         acc, acc_off, cursor = "", 0, 0
         for part in pieces:
             if len(acc) + len(part) > MAX_CHARS and acc.strip():
-                for off in range(0, len(acc), MAX_CHARS):
-                    yield acc_off + off, acc[off:off + MAX_CHARS]
+                yield from self._bounded_lines(acc_off, acc)
                 acc, acc_off = "", cursor
             acc += part
             cursor += len(part)
         if acc.strip():
-            for off in range(0, len(acc), MAX_CHARS):
-                yield acc_off + off, acc[off:off + MAX_CHARS]
+            yield from self._bounded_lines(acc_off, acc)
 
     def _symbol_of(self, block: str, decl: re.Pattern | None) -> str | None:
         first_real: str | None = None

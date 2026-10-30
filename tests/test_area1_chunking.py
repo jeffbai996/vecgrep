@@ -136,8 +136,23 @@ def test_f_chunk_04_fixed_token_splits_multibyte_utf8_and_corrupts_offsets():
     assert chunks[1].start > chunks[0].start
 
 
+def test_f_chunk_01_sentence_window_preserves_short_multi_sentence_doc():
+    """F-CHUNK-01c: When a document has > window sentences whose combined length is still
+    < min_chars, SentenceWindowChunker must preserve the leading sentences instead of
+    skipping i=0 because i + window < len(sents)."""
+    chunker = SentenceWindowChunker(window=3, stride=2, min_chars=30)
+    text = "One. Two. Six. Ten."
+    chunks = chunker.chunk(text)
+    combined = " ".join(c.text for c in chunks)
+    assert "One." in combined
+    assert "Two." in combined
+    assert "Six." in combined
+    assert "Ten." in combined
+
+
 def test_f_chunk_05_code_symbol_unbounded_when_no_blank_lines():
-    """F-CHUNK-05: CodeSymbolChunker._bounded never splits a symbol > MAX_CHARS if it has no blank lines."""
+    """F-CHUNK-05: CodeSymbolChunker._bounded never splits a symbol > MAX_CHARS if it has no blank lines,
+    and when splitting oversized blocks it must split on line boundaries rather than mid-line."""
     chunker = CodeSymbolChunker()
     body_lines = [f"    x_{i} = {i} + 1\n" for i in range(600)]
     code = "def huge_function():\n" + "".join(body_lines)
@@ -145,5 +160,10 @@ def test_f_chunk_05_code_symbol_unbounded_when_no_blank_lines():
 
     doc = Document(source_id="huge.py", text=code, metadata={})
     chunks = chunker.chunk_doc(doc)
-    # BUG: _bounded only splits on r"(\n\s*\n)", so a function without blank lines exceeds MAX_CHARS.
     assert all(len(c.text) <= MAX_CHARS for c in chunks)
+    # Every non-final chunk must end at a newline boundary (no mid-identifier cuts).
+    for c in chunks[:-1]:
+        assert c.text.endswith("\n")
+    for c in chunks:
+        assert code[c.start : c.end] == c.text
+

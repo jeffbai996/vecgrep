@@ -32,7 +32,7 @@ class SearchRequest(BaseModel):
     # Breadth mode: top full_k hits keep context; the rest degrade to
     # one-line stubs (see SearchStub) until ~token_ceiling estimated tokens.
     budget: bool = False
-    full_k: int = Field(8, ge=1, le=100)
+    full_k: int = Field(8, ge=0, le=100)
     # Keep the REST API's breadth ceiling aligned with the service default;
     # the human UI explicitly requests 40 for a useful dense first page.
     max_total: int = Field(100, ge=1, le=100)

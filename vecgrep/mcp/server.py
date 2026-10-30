@@ -645,7 +645,7 @@ def _write_dir(corpus: str):
     return get_settings().home / "write" / corpus
 
 
-def _corpus_doc_dir(corpus: str):
+def _corpus_doc_dir(corpus: str, doc_id: str | None = None):
     """Where THIS corpus's doc files physically live — for the propose
     existence/id checks. A native agent-write corpus (claude-ai, scratch) keeps
     its docs under the write dir. A MIRROR corpus's docs live wherever its
@@ -656,10 +656,16 @@ def _corpus_doc_dir(corpus: str):
     (a brand-new write-only corpus)."""
     from pathlib import Path
     wd = _write_dir(corpus)
+    if doc_id and (wd / f"{doc_id}.md").is_file():
+        return wd
     try:
-        from ..backend.service import VecgrepService
-        for c in VecgrepService().list_corpora():
+        for c in _svc().list_corpora():
             if c.name == corpus and getattr(c, "sources", None):
+                if doc_id:
+                    for src in c.sources:
+                        d = Path(src).parent
+                        if d.is_dir() and (d / f"{doc_id}.md").is_file():
+                            return d
                 d = Path(c.sources[0]).parent
                 if d.is_dir():
                     return d
@@ -688,7 +694,7 @@ def _doc_body(corpus: str, doc_id: str) -> str | None:
     # the no-follow open closes the check-to-read race at the final component.
     _P.validate_edit_id(doc_id)
     try:
-        path = _direct_edit_target(_corpus_doc_dir(corpus), doc_id)
+        path = _direct_edit_target(_corpus_doc_dir(corpus, doc_id), doc_id)
         text = _read_nofollow(path)
     except FileNotFoundError:
         return None
@@ -818,7 +824,7 @@ def _run_propose(corpus: str, content: str | None, edit_id: str | None = None,
     # An EDIT validates its target against where the corpus's docs actually live
     # (a mirror corpus keeps them in its source dir, not the write dir); a NEW
     # write picks its next id from the write dir.
-    corpus_dir = _corpus_doc_dir(corpus) if edit_id else _write_dir(corpus)
+    corpus_dir = _corpus_doc_dir(corpus, edit_id) if edit_id else _write_dir(corpus)
     corpus_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         corpus_dir.chmod(0o700)
@@ -869,7 +875,7 @@ def _run_propose_delete(corpus: str, delete_id: str,
             f"Allowed: {sorted(allowed)}. An operator widens this with "
             f"VECGREP_PROPOSE_ALLOWED_CORPORA. This guard keeps an agent from "
             f"proposing a delete in a shared corpus.")})
-    corpus_dir = _corpus_doc_dir(corpus)  # validate against real doc location
+    corpus_dir = _corpus_doc_dir(corpus, delete_id)  # validate against real doc location
     try:
         pr = _P.propose_delete(corpus, delete_id, corpus_dir,
                                meta={"origin": origin})

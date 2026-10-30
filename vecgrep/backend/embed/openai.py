@@ -10,10 +10,21 @@ _KNOWN_DIMS = {
 }
 
 
+_DEFAULT_TIMEOUT_S = 30.0
+_DEFAULT_MAX_RETRIES = 1
+
+
 class OpenAIBackend(EmbedBackend):
     name = "openai"
 
-    def __init__(self, api_key: str, model: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        *,
+        timeout: float = _DEFAULT_TIMEOUT_S,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
+    ) -> None:
         try:
             from openai import OpenAI
         except ImportError as e:
@@ -22,7 +33,9 @@ class OpenAIBackend(EmbedBackend):
             ) from e
 
         self.model = model
-        self._client = OpenAI(api_key=api_key)
+        self._client = OpenAI(
+            api_key=api_key, timeout=timeout, max_retries=max_retries
+        )
         self.dim = _KNOWN_DIMS.get(model) or self._probe_dim()
 
     def _probe_dim(self) -> int:

@@ -8,9 +8,9 @@ import pytest
 
 pytest.importorskip("mcp")
 
-from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp.server.fastmcp import FastMCP
 
-from vecgrep.mcp import call_log  # noqa: E402
+from vecgrep.mcp import call_log
 
 
 def _server() -> FastMCP:
@@ -43,9 +43,11 @@ def test_http_call_is_logged_with_tool_name_and_outcome(caplog) -> None:
 def test_failed_call_is_logged_as_raised(caplog) -> None:
     server = _server()
     call_log.install(server)
-    with caplog.at_level(logging.INFO, logger=call_log.LOGGER_NAME):
-        with pytest.raises(Exception):
-            asyncio.run(server.call_tool("boom", {}))
+    with (
+        caplog.at_level(logging.INFO, logger=call_log.LOGGER_NAME),
+        pytest.raises(Exception, match="broken"),
+    ):
+        asyncio.run(server.call_tool("boom", {}))
     assert _lines(caplog)[0].startswith("tool=boom outcome=raised ms=")
 
 

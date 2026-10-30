@@ -181,3 +181,141 @@ def test_f_retr_05_related_returns_superseded_and_expired_chunks(tmp_path: Path)
     # BUG: related() returns both the superseded and expired chunks!
     neighbours = svc.related(seed_cid, "notes", top_k=5)
     assert neighbours == []
+
+
+def test_f_retr_02_explicit_meta_filter_pushed_to_qdrant_not_starved_at_400(tmp_path: Path):
+    """F-RETR-02b: Explicit `meta.<key>=<value>` filters must be pushed down to Qdrant so
+    that > 400 non-matching chunks do not starve matching chunks in vector mode."""
+    svc = _make_service(tmp_path)
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+
+    for i in range(410):
+        (docs_dir / f"other_{i:03d}.md").write_text(
+            f"---\nproject: beta\n---\n\nBeta note {i} with target_keyword in body.\n",
+            encoding="utf-8",
+        )
+    (docs_dir / "alpha_target.md").write_text(
+        "---\nproject: alpha\n---\n\nAlpha note with target_keyword in body.\n",
+        encoding="utf-8",
+    )
+
+    svc.index(str(docs_dir), "notes")
+    hits = svc.search(
+        "target_keyword",
+        "notes",
+        top_k=5,
+        mode="vector",
+        filters=["meta.project=alpha"],
+    )
+    assert len(hits) == 1
+    assert "alpha_target.md" in hits[0].source_id
+
+
+def test_f_retr_03_recency_decay_applied_in_vector_and_bm25_modes(tmp_path: Path):
+    """F-RETR-03b: corpus.decay_half_life_days must be applied in vector and bm25 modes,
+    not only in hybrid mode."""
+    svc = _make_service(tmp_path)
+    old_doc = tmp_path / "2020-01-01-old.md"
+    new_doc = tmp_path / "2026-10-25-new.md"
+    old_doc.write_text("# Doc\n\nShared target_keyword content for decay test.\n", encoding="utf-8")
+    new_doc.write_text("# Doc\n\nShared target_keyword content for decay test.\n", encoding="utf-8")
+
+    svc.index(str(old_doc), "notes")
+    svc.index(str(new_doc), "notes")
+    svc.set_decay("notes", 30.0)
+
+    for mode in ("vector", "bm25"):
+        hits = svc.search("target_keyword", "notes", mode=mode)
+        assert len(hits) == 2
+        assert "2026-10-25-new.md" in hits[0].source_id
+        assert hits[0].score > hits[1].score
+
+
+def test_f_retr_04_parse_events_normalizes_time_and_incident_uses_rerank_score(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """F-RETR-04b: parse_events() must normalize single-digit hours to HH:MM, and
+    incident()/build_timeline() must select primary_source and rank groups by rerank_score
+    when reranking is active."""
+    from vecgrep.backend.timeline import parse_events
+
+    evs = parse_events("**alice** · 9:05\n> Morning check-in.\n")
+    assert len(evs) == 1
+    assert evs[0].time == "09:05"
+
+    svc = _make_service(tmp_path)
+    f_low = tmp_path / "2026-10-01-alpha.md"
+    f_high = tmp_path / "2026-10-02-beta.md"
+    f_low.write_text("**alice** · 10:00\n> Mentioned target_keyword briefly.\n", encoding="utf-8")
+    f_high.write_text("**bob** · 11:00\n> Detailed root cause for target_keyword outage.\n", encoding="utf-8")
+    svc.index(str(f_low), "chats")
+    svc.index(str(f_high), "chats")
+
+    # Give f_low a higher pre-rerank vector score by weighting or mocking rerank
+    import vecgrep.backend.rerank as rerank_mod
+
+    monkeypatch.setattr(svc, "_rerank_ready", lambda model=None: True)
+
+    def _fake_rerank(query, pairs, model_name):
+        scored = []
+        for _text, cand in pairs:
+            if "alpha.md" in cand.source_id:
+                cand.score = 0.99  # high pre-rerank score
+                scored.append((0.10, cand))  # low cross-encoder rerank score
+            else:
+                cand.score = 0.50  # lower pre-rerank score
+                scored.append((0.95, cand))  # high cross-encoder rerank score
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return scored
+
+    monkeypatch.setattr(rerank_mod, "rerank", _fake_rerank)
+    inc = svc.incident("target_keyword", "chats", rerank=True)
+    assert inc is not None
+    assert "2026-10-02-beta.md" in inc["primary_source"]
+
+
+def test_f_retr_05_read_helpers_acquire_corpus_read_lock(tmp_path: Path):
+    """F-RETR-05b: Read helpers (related, get_source, browse, corpus_stats, summarize_corpus,
+    get_chunk_window) must acquire locks.read(corpus_name)."""
+    from vecgrep.backend.mutation import LockTimeout
+
+    svc = _make_service(tmp_path)
+    doc = tmp_path / "2026-10-01-notes.md"
+    doc.write_text("**alice** · 10:00\n> Lock test with target_keyword.\n", encoding="utf-8")
+    svc.index(str(doc), "notes")
+    hits = svc.search("target_keyword", "notes")
+    cid = hits[0].chunk_id
+    sid = hits[0].source_id
+
+    svc.settings.search_lock_timeout_s = 0.05
+    import threading
+
+    ready = threading.Event()
+    release = threading.Event()
+
+    def _hold_write_lock():
+        with svc.locks.write("notes"):
+            ready.set()
+            release.wait(timeout=5.0)
+
+    t = threading.Thread(target=_hold_write_lock)
+    t.start()
+    assert ready.wait(timeout=2.0)
+    try:
+        with pytest.raises(LockTimeout):
+            svc.related(cid, "notes")
+        with pytest.raises(LockTimeout):
+            svc.get_source("notes", sid)
+        with pytest.raises(LockTimeout):
+            svc.browse("notes", date="2026-10-01")
+        with pytest.raises(LockTimeout):
+            svc.corpus_stats("notes")
+        with pytest.raises(LockTimeout):
+            svc.summarize_corpus("notes")
+        with pytest.raises(LockTimeout):
+            svc.get_chunk_window("notes", cid, window=200)
+    finally:
+        release.set()
+        t.join(timeout=2.0)
+

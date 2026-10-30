@@ -111,7 +111,7 @@ def test_a_benched_overflow_records_primary_batches_only(receipt_db):
 
 
 def test_the_shared_usage_table_keeps_its_six_columns(receipt_db):
-    """transcriptor and fragwire insert six positional values."""
+    """Sibling services sharing the usage table insert six positional values."""
     with sqlite3.connect(receipt_db) as db:
         db.execute("CREATE TABLE usage (request_id TEXT PRIMARY KEY, at REAL NOT NULL,"
                    " host TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER NOT NULL,"

@@ -1783,7 +1783,15 @@ class VecgrepService:
         if not groups:
             return None
 
-        primary_sid = max(anchors, key=lambda a: a.score).source_id
+        def _anchor_strength(a: SearchResult) -> float:
+            explain = a.explain or {}
+            if "rerank_ranked" in explain:
+                return float(explain["rerank_ranked"])
+            if "rerank_score" in explain:
+                return float(explain["rerank_score"])
+            return float(a.score)
+
+        primary_sid = max(anchors, key=_anchor_strength).source_id
         primary = next(
             (g for g in groups if g["source_id"] == primary_sid), groups[0]
         )
@@ -1842,7 +1850,6 @@ class VecgrepService:
                 "browse needs at least one selector: channel, date, "
                 "since/until, or source_path"
             )
-        corpus = self.registry.get(corpus_name)
         day_start = _parse_filter_time(date) if date else None
         if date and day_start is None:
             raise ValueError(f"unparseable date: {date!r} (want YYYY-MM-DD)")
@@ -1853,132 +1860,135 @@ class VecgrepService:
         if until and until_ts is None:
             raise ValueError(f"unparseable until: {until!r} (want YYYY-MM-DD)")
 
-        matched_records: list[dict] = []
-        for rec in self._explorer_records_for(corpus.name):
-            source_id = str(rec.get("source_id") or "")
-            meta = rec.get("metadata") or {}
-            if channel is not None:
-                have = str(meta.get("channel", "")).strip().strip("\"'")
-                if have != channel:
+        with self.locks.read(corpus_name, timeout=self._search_admission_timeout()):
+            corpus = self.registry.get(corpus_name)
+            matched_records: list[dict] = []
+            for rec in self._explorer_records_for(corpus.name):
+                source_id = str(rec.get("source_id") or "")
+                meta = rec.get("metadata") or {}
+                if channel is not None:
+                    have = str(meta.get("channel", "")).strip().strip("\"'")
+                    if have != channel:
+                        continue
+                ts = rec.get("doc_timestamp")
+                if day_start is not None and (ts is None or not (
+                    day_start <= float(ts) < day_start + _SECONDS_IN_DAY
+                )):
                     continue
-            ts = rec.get("doc_timestamp")
-            if day_start is not None and (ts is None or not (
-                day_start <= float(ts) < day_start + _SECONDS_IN_DAY
-            )):
-                continue
-            if source_path is not None and not fnmatch.fnmatch(
-                source_id, source_path
-            ):
-                continue
-            # since/until: inclusive day range (until covers its whole day).
-            if since_ts is not None and (ts is None or float(ts) < since_ts):
-                continue
-            if until_ts is not None and (
-                ts is None or float(ts) >= until_ts + _SECONDS_IN_DAY
-            ):
-                continue
-            matched_records.append(rec)
+                if source_path is not None and not fnmatch.fnmatch(
+                    source_id, source_path
+                ):
+                    continue
+                # since/until: inclusive day range (until covers its whole day).
+                if since_ts is not None and (ts is None or float(ts) < since_ts):
+                    continue
+                if until_ts is not None and (
+                    ts is None or float(ts) >= until_ts + _SECONDS_IN_DAY
+                ):
+                    continue
+                matched_records.append(rec)
 
-        matched_records.sort(
-            key=lambda r: (
-                r.get("doc_timestamp") is None,
-                float(r["doc_timestamp"])
-                if r.get("doc_timestamp") is not None
-                else 0.0,
+            matched_records.sort(
+                key=lambda r: (
+                    r.get("doc_timestamp") is None,
+                    float(r["doc_timestamp"])
+                    if r.get("doc_timestamp") is not None
+                    else 0.0,
+                )
             )
-        )
 
-        # tail=N: keep only the NEWEST N events across the matched sources —
-        # "the last N messages", not the last N days. Walk newest-first,
-        # trimming the oldest events of the boundary group; groups that fall
-        # entirely outside the window are dropped without fetching or parsing
-        # their carrier documents. A non-transcript source (no parsed events)
-        # counts as one slot.
-        if tail is not None and int(tail) > 0:
-            remaining = int(tail)
-            kept: list[dict] = []
-            for rec in reversed(matched_records):
+            # tail=N: keep only the NEWEST N events across the matched sources —
+            # "the last N messages", not the last N days. Walk newest-first,
+            # trimming the oldest events of the boundary group; groups that fall
+            # entirely outside the window are dropped without fetching or parsing
+            # their carrier documents. A non-transcript source (no parsed events)
+            # counts as one slot.
+            if tail is not None and int(tail) > 0:
+                remaining = int(tail)
+                kept: list[dict] = []
+                for rec in reversed(matched_records):
+                    source_id = str(rec.get("source_id") or "")
+                    ts = rec.get("doc_timestamp")
+                    source_text = self._source_text_for(corpus.name, source_id)
+                    events = parse_events(source_text)
+                    evs = [
+                        {"speaker": e.speaker, "time": e.time, "text": e.text}
+                        for e in events
+                    ]
+                    if evs:
+                        if len(evs) > remaining:
+                            evs = evs[-remaining:]
+                        remaining -= len(evs)
+                    else:
+                        remaining -= 1
+                    kept.append(
+                        {
+                            "corpus": corpus.name,
+                            "source_id": source_id,
+                            "doc_timestamp": float(ts) if ts is not None else None,
+                            "events": evs,
+                            "slice_text": "" if evs else source_text,
+                        }
+                    )
+                    if remaining <= 0:
+                        break
+                kept.reverse()
+                return kept
+
+            groups: list[dict] = []
+            for rec in matched_records:
                 source_id = str(rec.get("source_id") or "")
                 ts = rec.get("doc_timestamp")
                 source_text = self._source_text_for(corpus.name, source_id)
                 events = parse_events(source_text)
-                evs = [
-                    {"speaker": e.speaker, "time": e.time, "text": e.text}
-                    for e in events
-                ]
-                if evs:
-                    if len(evs) > remaining:
-                        evs = evs[-remaining:]
-                    remaining -= len(evs)
-                else:
-                    remaining -= 1
-                kept.append(
+                groups.append(
                     {
                         "corpus": corpus.name,
                         "source_id": source_id,
                         "doc_timestamp": float(ts) if ts is not None else None,
-                        "events": evs,
-                        "slice_text": "" if evs else source_text,
+                        "events": [
+                            {"speaker": e.speaker, "time": e.time, "text": e.text}
+                            for e in events
+                        ],
+                        "slice_text": "" if events else source_text,
                     }
                 )
-                if remaining <= 0:
-                    break
-            kept.reverse()
-            return kept
-
-        groups: list[dict] = []
-        for rec in matched_records:
-            source_id = str(rec.get("source_id") or "")
-            ts = rec.get("doc_timestamp")
-            source_text = self._source_text_for(corpus.name, source_id)
-            events = parse_events(source_text)
-            groups.append(
-                {
-                    "corpus": corpus.name,
-                    "source_id": source_id,
-                    "doc_timestamp": float(ts) if ts is not None else None,
-                    "events": [
-                        {"speaker": e.speaker, "time": e.time, "text": e.text}
-                        for e in events
-                    ],
-                    "slice_text": "" if events else source_text,
-                }
-            )
-        return groups
+            return groups
 
     def get_source(self, corpus_name: str, source_id: str) -> dict | None:
         """Whole source document by source_id: raw text + parsed events (for
         transcripts) + timestamp/metadata. The by-source complement of
         get_chunk_window — a stub or corpus listing hands you the source_id;
         this hands back the file. None when the source isn't indexed."""
-        corpus = self.registry.get(corpus_name)
-        first = self.bm25.first_chunk_for_source(corpus.name, source_id)
-        if first is None:
-            return None
-        first_cid, payload = first
-        # A recovery-built BM25 sidecar intentionally omits the duplicated
-        # full source document. Qdrant is the canonical payload store, so use
-        # it when available and retain BM25 only as the offline fallback.
-        qdrant_payload = self.store.get_by_id(
-            _collection_for(corpus.name), first_cid
-        )
-        if qdrant_payload is not None:
-            payload = qdrant_payload
-        # Whole document, not the hit's chunk — resolved from the carrier.
-        source_text = self._source_text_for(corpus.name, source_id)
-        ts = payload.get("doc_timestamp")
-        events = parse_events(source_text)
-        return {
-            "corpus": corpus.name,
-            "source_id": source_id,
-            "doc_timestamp": float(ts) if ts is not None else None,
-            "metadata": payload.get("metadata", {}) or {},
-            "text": source_text,
-            "events": [
-                {"speaker": e.speaker, "time": e.time, "text": e.text}
-                for e in events
-            ],
-        }
+        with self.locks.read(corpus_name, timeout=self._search_admission_timeout()):
+            corpus = self.registry.get(corpus_name)
+            first = self.bm25.first_chunk_for_source(corpus.name, source_id)
+            if first is None:
+                return None
+            first_cid, payload = first
+            # A recovery-built BM25 sidecar intentionally omits the duplicated
+            # full source document. Qdrant is the canonical payload store, so use
+            # it when available and retain BM25 only as the offline fallback.
+            qdrant_payload = self.store.get_by_id(
+                _collection_for(corpus.name), first_cid
+            )
+            if qdrant_payload is not None:
+                payload = qdrant_payload
+            # Whole document, not the hit's chunk — resolved from the carrier.
+            source_text = self._source_text_for(corpus.name, source_id)
+            ts = payload.get("doc_timestamp")
+            events = parse_events(source_text)
+            return {
+                "corpus": corpus.name,
+                "source_id": source_id,
+                "doc_timestamp": float(ts) if ts is not None else None,
+                "metadata": payload.get("metadata", {}) or {},
+                "text": source_text,
+                "events": [
+                    {"speaker": e.speaker, "time": e.time, "text": e.text}
+                    for e in events
+                ],
+            }
 
     def _explorer_records_for(self, corpus_name: str) -> list[dict]:
         corpus = self.registry.get(corpus_name)
@@ -2104,22 +2114,23 @@ class VecgrepService:
         query-by-example without re-embedding anything. Excludes the seed
         chunk and collapses near-duplicate slices of the same exchange with
         the same dedup the normal search path uses."""
-        corpus = self.registry.get(corpus_name)
-        collection = _collection_for(corpus.name)
-        vector = self.store.get_vector(collection, chunk_id)
-        if vector is None:
-            raise CorpusError(
-                f"chunk '{chunk_id}' not found in corpus '{corpus_name}'"
-            )
-        query_filter, _ = _build_qdrant_filter(["meta.status=active"])
-        hits = self.store.search(collection, vector, top_k * 3 + 1, query_filter=query_filter)
-        results: list[SearchResult] = []
-        for h in hits:
-            r = _hit_to_result(h, ["vector"], model=corpus.embed_model)
-            if r.chunk_id == chunk_id or is_expired(r.metadata):
-                continue
-            results.append(r)
-        return dedup_near_duplicates(results)[:top_k]
+        with self.locks.read(corpus_name, timeout=self._search_admission_timeout()):
+            corpus = self.registry.get(corpus_name)
+            collection = _collection_for(corpus.name)
+            vector = self.store.get_vector(collection, chunk_id)
+            if vector is None:
+                raise CorpusError(
+                    f"chunk '{chunk_id}' not found in corpus '{corpus_name}'"
+                )
+            query_filter, _ = _build_qdrant_filter(["meta.status=active"])
+            hits = self.store.search(collection, vector, top_k * 3 + 1, query_filter=query_filter)
+            results: list[SearchResult] = []
+            for h in hits:
+                r = _hit_to_result(h, ["vector"], model=corpus.embed_model)
+                if r.chunk_id == chunk_id or is_expired(r.metadata):
+                    continue
+                results.append(r)
+            return dedup_near_duplicates(results)[:top_k]
 
     def compare(
         self,
@@ -2172,46 +2183,47 @@ class VecgrepService:
         """Ops-facing health snapshot: counts, date coverage, gaps (days with
         zero chunks inside the covered span — a broken archiver shows up as a
         growing gap), and per-source chunk sizes."""
-        corpus = self.registry.get(corpus_name)
-        records = self._explorer_records_for(corpus.name)
-        by_source: dict[str, int] = {}
-        total_chunks = 0
-        ts: list[float] = []
-        for rec in records:
-            sid = str(rec.get("source_id") or "")
-            cnt = int(rec.get("chunk_count") or 0)
-            by_source[sid] = by_source.get(sid, 0) + cnt
-            total_chunks += cnt
-            if rec.get("doc_timestamp"):
-                ts.append(float(rec["doc_timestamp"]))
-        span: dict = {"first": None, "last": None}
-        gap_days = 0
-        dated_days: set[int] = set()
-        if ts:
-            first, last = min(ts), max(ts)
-            span = {
-                "first": datetime.fromtimestamp(first, tz=timezone.utc)
-                .strftime("%Y-%m-%d"),
-                "last": datetime.fromtimestamp(last, tz=timezone.utc)
-                .strftime("%Y-%m-%d"),
+        with self.locks.read(corpus_name, timeout=self._search_admission_timeout()):
+            corpus = self.registry.get(corpus_name)
+            records = self._explorer_records_for(corpus.name)
+            by_source: dict[str, int] = {}
+            total_chunks = 0
+            ts: list[float] = []
+            for rec in records:
+                sid = str(rec.get("source_id") or "")
+                cnt = int(rec.get("chunk_count") or 0)
+                by_source[sid] = by_source.get(sid, 0) + cnt
+                total_chunks += cnt
+                if rec.get("doc_timestamp"):
+                    ts.append(float(rec["doc_timestamp"]))
+            span: dict = {"first": None, "last": None}
+            gap_days = 0
+            dated_days: set[int] = set()
+            if ts:
+                first, last = min(ts), max(ts)
+                span = {
+                    "first": datetime.fromtimestamp(first, tz=timezone.utc)
+                    .strftime("%Y-%m-%d"),
+                    "last": datetime.fromtimestamp(last, tz=timezone.utc)
+                    .strftime("%Y-%m-%d"),
+                }
+                dated_days = {int(t // 86400) for t in ts}
+                total_days = int(last // 86400) - int(first // 86400) + 1
+                gap_days = total_days - len(dated_days)
+            top_sources = dict(
+                sorted(by_source.items(), key=lambda kv: -kv[1])[:25]
+            )
+            return {
+                "corpus": corpus.name,
+                "chunks": total_chunks,
+                "docs": len(by_source),
+                "date_span": span,
+                "days_covered": len(dated_days),
+                "gap_days": gap_days,
+                "sources": top_sources,
+                # No silent caps: say when the source table was cut.
+                "sources_truncated": len(by_source) > len(top_sources),
             }
-            dated_days = {int(t // 86400) for t in ts}
-            total_days = int(last // 86400) - int(first // 86400) + 1
-            gap_days = total_days - len(dated_days)
-        top_sources = dict(
-            sorted(by_source.items(), key=lambda kv: -kv[1])[:25]
-        )
-        return {
-            "corpus": corpus.name,
-            "chunks": total_chunks,
-            "docs": len(by_source),
-            "date_span": span,
-            "days_covered": len(dated_days),
-            "gap_days": gap_days,
-            "sources": top_sources,
-            # No silent caps: say when the source table was cut.
-            "sources_truncated": len(by_source) > len(top_sources),
-        }
 
     def summarize_corpus(
         self,
@@ -2224,67 +2236,68 @@ class VecgrepService:
         tally (from chunk enrichment), date span, top sources, and an evenly
         spaced deterministic sample of chunks for an LLM to theme. Sampling
         is explicit in the output — never a silent truncation."""
-        corpus = self.registry.get(corpus_name)
-        filters: list[str] = []
-        if after:
-            filters.append(f"after:{after}")
-        if before:
-            filters.append(f"before:{before}")
-        speakers: dict[str, int] = {}
-        by_source: dict[str, int] = {}
-        first_ts: float | None = None
-        last_ts: float | None = None
-        compact_samples: list[tuple[str, int, str]] = []
-        for p in self.bm25.iter_payloads(corpus.name):
-            if filters and not _passes_filters(
-                _payload_to_result(p, 0.0, 0.0, []), filters
-            ):
-                continue
-            md = p.get("metadata", {}) or {}
-            for sp in md.get("speakers") or []:
-                speakers[str(sp)] = speakers.get(str(sp), 0) + 1
-            sid = p.get("source_id", "") or ""
-            by_source[sid] = by_source.get(sid, 0) + 1
-            if p.get("doc_timestamp"):
-                t = float(p["doc_timestamp"])
-                first_ts = t if first_ts is None or t < first_ts else first_ts
-                last_ts = t if last_ts is None or t > last_ts else last_ts
-            compact_samples.append(
-                (
-                    sid,
-                    int(p.get("chunk_index", 0)),
-                    (p.get("text", "") or "")[:240],
+        with self.locks.read(corpus_name, timeout=self._search_admission_timeout()):
+            corpus = self.registry.get(corpus_name)
+            filters: list[str] = []
+            if after:
+                filters.append(f"after:{after}")
+            if before:
+                filters.append(f"before:{before}")
+            speakers: dict[str, int] = {}
+            by_source: dict[str, int] = {}
+            first_ts: float | None = None
+            last_ts: float | None = None
+            compact_samples: list[tuple[str, int, str]] = []
+            for p in self.bm25.iter_payloads(corpus.name):
+                if filters and not _passes_filters(
+                    _payload_to_result(p, 0.0, 0.0, []), filters
+                ):
+                    continue
+                md = p.get("metadata", {}) or {}
+                for sp in md.get("speakers") or []:
+                    speakers[str(sp)] = speakers.get(str(sp), 0) + 1
+                sid = p.get("source_id", "") or ""
+                by_source[sid] = by_source.get(sid, 0) + 1
+                if p.get("doc_timestamp"):
+                    t = float(p["doc_timestamp"])
+                    first_ts = t if first_ts is None or t < first_ts else first_ts
+                    last_ts = t if last_ts is None or t > last_ts else last_ts
+                compact_samples.append(
+                    (
+                        sid,
+                        int(p.get("chunk_index", 0)),
+                        (p.get("text", "") or "")[:240],
+                    )
                 )
-            )
-        span: dict = {"first": None, "last": None}
-        if first_ts is not None and last_ts is not None:
-            span = {
-                "first": datetime.fromtimestamp(first_ts, tz=timezone.utc)
-                .strftime("%Y-%m-%d"),
-                "last": datetime.fromtimestamp(last_ts, tz=timezone.utc)
-                .strftime("%Y-%m-%d"),
+            span: dict = {"first": None, "last": None}
+            if first_ts is not None and last_ts is not None:
+                span = {
+                    "first": datetime.fromtimestamp(first_ts, tz=timezone.utc)
+                    .strftime("%Y-%m-%d"),
+                    "last": datetime.fromtimestamp(last_ts, tz=timezone.utc)
+                    .strftime("%Y-%m-%d"),
+                }
+            n = len(compact_samples)
+            take = min(max(0, sample), n)
+            step = max(1, n // take) if take else 1
+            sampled_rows = compact_samples[::step][:take]
+            sample_chunks = [
+                {
+                    "chunk_id": _chunk_id(corpus.name, sid, cidx),
+                    "source_id": sid,
+                    "text": txt,
+                }
+                for sid, cidx, txt in sampled_rows
+            ]
+            return {
+                "corpus": corpus.name,
+                "chunks": n,
+                "date_span": span,
+                "top_speakers": sorted(speakers.items(), key=lambda kv: -kv[1])[:15],
+                "top_sources": sorted(by_source.items(), key=lambda kv: -kv[1])[:15],
+                "sampled": take < n,
+                "sample_chunks": sample_chunks,
             }
-        n = len(compact_samples)
-        take = min(max(0, sample), n)
-        step = max(1, n // take) if take else 1
-        sampled_rows = compact_samples[::step][:take]
-        sample_chunks = [
-            {
-                "chunk_id": _chunk_id(corpus.name, sid, cidx),
-                "source_id": sid,
-                "text": txt,
-            }
-            for sid, cidx, txt in sampled_rows
-        ]
-        return {
-            "corpus": corpus.name,
-            "chunks": n,
-            "date_span": span,
-            "top_speakers": sorted(speakers.items(), key=lambda kv: -kv[1])[:15],
-            "top_sources": sorted(by_source.items(), key=lambda kv: -kv[1])[:15],
-            "sampled": take < n,
-            "sample_chunks": sample_chunks,
-        }
 
     def _source_text_for(self, corpus_name: str, source_id: str) -> str:
         """Full document text for one source, from its carrier point.
@@ -2818,32 +2831,50 @@ class VecgrepService:
                     )
                 ]
 
+        half_life = corpus.decay_half_life_days
+        weight = getattr(corpus, "rank_weight", 1.0) or 1.0
+        now = time.time()
+        symbol = symbol_query(query)
+
         if mode == "vector":
+            scored_vec: list[tuple[float, int, StoredHit]] = []
+            for rank, h in enumerate(vector_hits):
+                pl = _hit_payload(h)
+                decay = _recency_factor(pl.get("doc_timestamp"), half_life, now)
+                weighted = float(h.score) * decay * weight * definition_boost(symbol, pl)
+                scored_vec.append((weighted, rank, h))
+            scored_vec.sort(key=lambda item: item[0], reverse=True)
             out: list[SearchResult] = []
-            for rank, h in enumerate(vector_hits[:top_k]):
+            for weighted, rank, h in scored_vec[:top_k]:
                 r = _hit_to_result(h, ["vector"], model=corpus.embed_model)
                 # Always include raw vector_cosine + rank so the UI can
                 # re-derive display % under user-tuned calibration without
                 # re-querying. Cheap, never sensitive.
                 r.explain = {"vector_cosine": float(h.score), "vector_rank": rank + 1}
-                r.score *= corpus.rank_weight
+                r.score = weighted
                 out.append(r)
             return out
 
         if mode == "bm25":
             out = []
             max_score = max((s for _, s, _ in bm25_hits), default=0.0)
-            selected = bm25_hits[:top_k]
+            scored_bm25: list[tuple[float, int, str, float, dict]] = []
+            for rank, (cid, score, payload) in enumerate(bm25_hits):
+                decay = _recency_factor(payload.get("doc_timestamp"), half_life, now)
+                weighted = float(score) * decay * weight * definition_boost(symbol, payload)
+                scored_bm25.append((weighted, rank, cid, score, payload))
+            scored_bm25.sort(key=lambda item: item[0], reverse=True)
+            selected = scored_bm25[:top_k]
             missing = [
-                cid for cid, _, payload in selected
+                cid for _, _, cid, _, payload in selected
                 if "context_before" not in payload
             ]
             hydrated = self.store.get_many_by_id(collection, missing)
-            for rank, (cid, score, payload) in enumerate(selected):
+            for weighted, rank, cid, score, payload in selected:
                 if "context_before" not in payload:
                     payload = hydrated.get(cid) or payload
                 r = _bm25_to_result(corpus.name, cid, score, payload, ["bm25"], max_score=max_score)
-                r.score *= corpus.rank_weight
+                r.score = weighted
                 r.explain = {
                     "bm25_score": float(score),
                     "bm25_rank": rank + 1,
@@ -3142,42 +3173,43 @@ class VecgrepService:
         `window` is the number of chars on each side. Pass -1 for the full
         source. Returns None if the chunk can't be found in either store.
         """
-        corpus = self.registry.get(corpus_name)
-        payload = self.store.get_by_id(_collection_for(corpus.name), chunk_id)
-        if payload is None:
-            # Vector store missed — try BM25 in case this chunk only lives
-            # there (shouldn't happen under normal indexing, but be safe).
-            payload = self.bm25.get_by_id(corpus.name, chunk_id)
-        if payload is None:
-            return None
-        chunk_start = int(payload.get("chunk_start", 0))
-        chunk_end = int(payload.get("chunk_end", 0))
-        # An expanded window is explicitly asking to see past the chunk, so
-        # resolve the whole document from the carrier rather than clamping to
-        # the CONTEXT_CHARS stored alongside this chunk.
-        source_text = payload.get("source_text", "") or ""
-        if not source_text:
-            source_text = self._source_text_for(
-                corpus.name, payload.get("source_id", "") or ""
-            )
-        if window < 0:
-            before_start = 0
-            after_end = len(source_text)
-        else:
-            before_start = max(0, chunk_start - window)
-            after_end = min(len(source_text), chunk_end + window)
-        return {
-            "corpus": corpus.name,
-            "chunk_id": chunk_id,
-            "source_id": payload.get("source_id", ""),
-            "chunk_start": chunk_start,
-            "chunk_end": chunk_end,
-            "before": source_text[before_start:chunk_start],
-            "chunk": payload.get("text", "") or source_text[chunk_start:chunk_end],
-            "after": source_text[chunk_end:after_end],
-            "source_length": len(source_text),
-            "window": window,
-        }
+        with self.locks.read(corpus_name, timeout=self._search_admission_timeout()):
+            corpus = self.registry.get(corpus_name)
+            payload = self.store.get_by_id(_collection_for(corpus.name), chunk_id)
+            if payload is None:
+                # Vector store missed — try BM25 in case this chunk only lives
+                # there (shouldn't happen under normal indexing, but be safe).
+                payload = self.bm25.get_by_id(corpus.name, chunk_id)
+            if payload is None:
+                return None
+            chunk_start = int(payload.get("chunk_start", 0))
+            chunk_end = int(payload.get("chunk_end", 0))
+            # An expanded window is explicitly asking to see past the chunk, so
+            # resolve the whole document from the carrier rather than clamping to
+            # the CONTEXT_CHARS stored alongside this chunk.
+            source_text = payload.get("source_text", "") or ""
+            if not source_text:
+                source_text = self._source_text_for(
+                    corpus.name, payload.get("source_id", "") or ""
+                )
+            if window < 0:
+                before_start = 0
+                after_end = len(source_text)
+            else:
+                before_start = max(0, chunk_start - window)
+                after_end = min(len(source_text), chunk_end + window)
+            return {
+                "corpus": corpus.name,
+                "chunk_id": chunk_id,
+                "source_id": payload.get("source_id", ""),
+                "chunk_start": chunk_start,
+                "chunk_end": chunk_end,
+                "before": source_text[before_start:chunk_start],
+                "chunk": payload.get("text", "") or source_text[chunk_start:chunk_end],
+                "after": source_text[chunk_end:after_end],
+                "source_length": len(source_text),
+                "window": window,
+            }
 
     def _cancel_visual_target(self, source: str | None, corpus: str) -> None:
         queue_path = self.settings.home / "visual" / "queue.db"
@@ -4691,6 +4723,50 @@ def _build_qdrant_filter(
                 qm.FieldCondition(key="metadata.status", match=qm.MatchValue(value="active")),
                 qm.IsEmptyCondition(is_empty=qm.PayloadField(key="metadata.status")),
             ]))
+        elif form.startswith("meta.") and "=" in form[len("meta."):]:
+            key, value = form[len("meta."):].split("=", 1)
+            if key:
+                field_key = f"metadata.{key}"
+                if value == "":
+                    cond = qm.Filter(
+                        should=[
+                            qm.FieldCondition(
+                                key=field_key, match=qm.MatchValue(value="")
+                            ),
+                            qm.IsEmptyCondition(
+                                is_empty=qm.PayloadField(key=field_key)
+                            ),
+                        ]
+                    )
+                else:
+                    candidates: list = [
+                        qm.FieldCondition(
+                            key=field_key, match=qm.MatchValue(value=value)
+                        )
+                    ]
+                    if value in ("True", "False"):
+                        candidates.append(
+                            qm.FieldCondition(
+                                key=field_key,
+                                match=qm.MatchValue(value=(value == "True")),
+                            )
+                        )
+                    elif value.lstrip("-").isdigit():
+                        with contextlib.suppress(ValueError):
+                            candidates.append(
+                                qm.FieldCondition(
+                                    key=field_key,
+                                    match=qm.MatchValue(value=int(value)),
+                                )
+                            )
+                    cond = (
+                        candidates[0]
+                        if len(candidates) == 1
+                        else qm.Filter(should=candidates)
+                    )
+                target.append(cond)
+            else:
+                has_unpushed = True
         elif form.startswith("has:"):
             shape = form[len("has:"):].strip().lower()
             if shape in ("code", "table", "link"):

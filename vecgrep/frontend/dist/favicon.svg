@@ -4,7 +4,7 @@
        collapsed into a blob. The shaft runs corner to corner of a 220-unit
        box centred in the 512 grid, so the margins are an even 120 on every
        side once the round caps are counted.
-       House style follows babylog: 512 box, rx=120 ground, flat accent, one
+       House style: 512 box, rx=120 ground, flat accent, one
        dark glyph, round caps and joins. -->
   <rect width="512" height="512" rx="120" fill="#a78bfa"/>
   <g fill="none" stroke="#1c1033" stroke-width="52" stroke-linecap="round" stroke-linejoin="round">

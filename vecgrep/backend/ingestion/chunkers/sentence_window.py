@@ -61,8 +61,10 @@ class SentenceWindowChunker(Chunker):
             joined = text[window[0][1]:window[-1][2]]
             start = window[0][1]
             end = window[-1][2]
-            if len(joined) >= self.min_chars or i + self.window >= len(sents):
+            if len(joined) >= self.min_chars or end_idx >= len(sents):
                 chunks.append(Chunk(text=joined, start=start, end=end, index=ordinal))
                 ordinal += 1
+                if len(joined) < self.min_chars:
+                    break
             i += self.stride
         return chunks

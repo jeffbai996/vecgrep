@@ -119,18 +119,18 @@ def test_multi_paragraph_turn_propagates_speaker_to_body_chunks(svc, make_doc):
         f"Sentence number {i} discusses deployment throughput and memory limits."
         for i in range(30)
     )
-    doc = make_doc("chat.md", f"**Gemma** · 14:20\n{para}\n")
+    doc = make_doc("chat.md", f"**Alice** · 14:20\n{para}\n")
     svc.index(str(doc), "chats")
 
     points = dict(svc.store.iter_payloads(_collection_for("chats")))
     assert len(points) >= 2
     for payload in points.values():
-        assert payload["metadata"].get("speakers") == ["Gemma"]
+        assert payload["metadata"].get("speakers") == ["Alice"]
 
     hits = svc.search(
         "Sentence number 28 discusses deployment",
         "chats",
-        filters=["speaker:gemma"],
+        filters=["speaker:alice"],
     )
     assert hits
 
