@@ -2,6 +2,10 @@
 
 Local-first semantic search over files, source code, PDFs, URLs, and chat transcripts. It runs hybrid BM25 + vector retrieval on your machine and exposes the same index through a CLI, an HTTP API, a web UI, and an MCP server.
 
+[![Python](https://img.shields.io/badge/python-3.10%2B-1a7f37?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
+[![MCP server](https://img.shields.io/badge/MCP-server-1a7f37?style=flat-square)](https://modelcontextprotocol.io/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-1a7f37?style=flat-square)](LICENSE)
+
 ![vecgrep web UI](docs/assets/web-ui.png)
 
 Five workspaces in the web UI (`Search`, `Timeline`, `Compare`, `Browse`, `Health`), showing hybrid results with retriever badges (`VK` both, `V` semantic, `K` keyword), line anchors, and per-corpus health.
