@@ -84,6 +84,10 @@ required-version = ">=0.17.3,<0.18"
 # Deliberately malformed input used to test parser failure handling.
 extend-exclude = ["tests/fixtures/code_symbols/broken.py"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI reads Query() defaults as parameter metadata when the route is built.
+extend-immutable-calls = ["fastapi.Query"]
+
 [tool.pyright]
 include = ["vecgrep", "tests", "scripts"]
 exclude = [

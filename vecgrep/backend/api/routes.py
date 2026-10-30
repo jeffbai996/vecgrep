@@ -410,7 +410,7 @@ def browse(req: BrowseRequest) -> list[dict]:
 @router.get("/explorer/{corpus}")
 def explore_corpus(
     corpus: str,
-    path: list[str] = Query(default=[]),  # noqa: B008 -- FastAPI reads Query metadata at route construction.
+    path: list[str] = Query(default=[]),
     q: str = Query(default="", max_length=200),
     sort: str = Query(default="name"),
     offset: int = Query(default=0, ge=0),
