@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+# 77 is the first release that reads an SPDX `license` string and `license-files`.
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,13 +12,13 @@ dynamic = ["version"]
 description = "grep for meaning, not keywords. Local-first semantic search for any corpus."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "vecgrep contributors" }]
 keywords = ["search", "semantic-search", "embeddings", "vector-search", "ollama", "qdrant", "rag"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
