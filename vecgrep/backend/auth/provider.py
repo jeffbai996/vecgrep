@@ -94,7 +94,9 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
             raise AuthorizeError("invalid_request", "Invalid redirect URI") from exc
         allow_sibling = _is_google_connector(client) and _same_origin_resource(params.resource, self.resource)
         if self.resource and params.resource not in (None, self.resource) and not allow_sibling:
-            raise AuthorizeError("invalid_target", "wrong OAuth resource")  # pyright: ignore[reportArgumentType]  # RFC 8707 error code
+            # RFC 8707 names this invalid_target, but the SDK validates error
+            # codes against a list without it and would answer server_error.
+            raise AuthorizeError("invalid_request", "wrong OAuth resource")
         raw_scopes = params.scopes
         if _is_google_connector(client) and raw_scopes:
             mapped = [

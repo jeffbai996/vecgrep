@@ -272,7 +272,7 @@ async def test_configured_provider_rejects_authorization_for_another_resource():
             redirect_uri=CLAUDE_REDIRECT,
             redirect_uri_provided_explicitly=True, resource="https://other.example/mcp",
         ))
-    assert error.value.error == "invalid_target"
+    assert error.value.error == "invalid_request"
     assert not provider.store._codes
 
 
@@ -408,7 +408,7 @@ async def test_google_connector_accepts_same_origin_sibling_resource_and_normali
             redirect_uri_provided_explicitly=True,
             resource="https://other.example/notes-mcp/mcp",
         ))
-    assert error.value.error == "invalid_target"
+    assert error.value.error == "invalid_request"
 
 
 @pytest.mark.anyio
@@ -430,4 +430,28 @@ async def test_exchange_consumed_authorization_code_raises_invalid_grant_token_e
     assert exc.value.error == "invalid_grant"
 
 
+def test_wrong_resource_reaches_the_client_as_an_oauth_error_not_a_server_error():
+    # The SDK re-validates AuthorizeError codes against its own Literal when it
+    # builds the redirect, so a code outside that list becomes server_error.
+    from urllib.parse import parse_qs, urlsplit
 
+    from mcp.server.auth.handlers.authorize import AuthorizationHandler
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    provider = VecgrepOAuthProvider(resource="https://resource.example/mcp")
+    provider.store.save_client(_client())
+    app = Starlette(routes=[
+        Route("/authorize", AuthorizationHandler(provider).handle, methods=["GET"]),
+    ])
+    response = TestClient(app).get("/authorize", params={
+        "client_id": "claude-ai", "response_type": "code", "state": "s",
+        "code_challenge": "c" * 43, "code_challenge_method": "S256",
+        "redirect_uri": str(CLAUDE_REDIRECT), "resource": "https://other.example/mcp",
+    }, follow_redirects=False)
+
+    assert response.status_code == 302
+    query = parse_qs(urlsplit(response.headers["location"]).query)
+    assert query["error"] == ["invalid_request"]
+    assert query["error_description"] == ["wrong OAuth resource"]
