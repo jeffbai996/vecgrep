@@ -153,7 +153,7 @@ The **21 MCP tools** grouped by intent:
 | Intent | Tools |
 |---|---|
 | Find evidence | `search`, `timeline`, `incident`, `browse`, `related`, `compare` |
-| Expand and inspect | `get_chunk`, `get_source`, `stats`, `summarize_corpus` |
+| Expand and inspect | `get_chunk`, `get_source`, `stats`, `summarize_corpus`, `list_aliases` |
 | Discover corpora | `list_corpora`, `get_corpus` |
 | Direct mutation | `write`, `edit`, `write_temp`, `renew_temp` |
 | Human-confirmed mutation | `propose_write`, `propose_edit`, `propose_delete`, `propose_merge` |

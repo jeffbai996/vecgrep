@@ -30,7 +30,7 @@ def test_build_mcp_server_registers_tools() -> None:
     tools = {t.name for t in result.root.tools}
     assert tools == {
         "search", "timeline", "incident", "browse", "get_chunk", "get_source",
-        "list_corpora", "get_corpus",
+        "list_aliases", "list_corpora", "get_corpus",
         # v1.2 insight tools
         "related", "compare", "stats", "summarize_corpus",
         # write path — parity with the HTTP transport as of v1.1
