@@ -84,6 +84,7 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
     async def authorize(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
+        assert client.client_id is not None
         try:
             resolved = resolve_redirect(client, str(params.redirect_uri)
                                         if params.redirect_uri_provided_explicitly else None)
@@ -93,7 +94,7 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
             raise AuthorizeError("invalid_request", "Invalid redirect URI") from exc
         allow_sibling = _is_google_connector(client) and _same_origin_resource(params.resource, self.resource)
         if self.resource and params.resource not in (None, self.resource) and not allow_sibling:
-            raise AuthorizeError("invalid_target", "wrong OAuth resource")
+            raise AuthorizeError("invalid_target", "wrong OAuth resource")  # pyright: ignore[reportArgumentType]  # RFC 8707 error code
         raw_scopes = params.scopes
         if _is_google_connector(client) and raw_scopes:
             mapped = [
@@ -128,11 +129,13 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
     async def load_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: str
     ) -> AuthorizationCode | None:
+        assert client.client_id is not None
         return self.store.load_authorization_code(client.client_id, authorization_code)
 
     async def exchange_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
     ) -> OAuthToken:
+        assert client.client_id is not None
         # Single-use: consume so the code can't be replayed for a second token.
         # (The SDK already verified PKCE before we got here.)
         ac = self.store.consume_authorization_code(client.client_id, authorization_code.code)
@@ -147,6 +150,7 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
     async def load_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: str
     ) -> RefreshToken | None:
+        assert client.client_id is not None
         # A refresh token this client already rotated revokes its family here,
         # before the SDK answers invalid_grant.
         return self.store.load_refresh_token(client.client_id, refresh_token)
@@ -157,6 +161,7 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
+        assert client.client_id is not None
         resource = getattr(refresh_token, "resource", None)
         if self.resource and resource != self.resource:
             from mcp.server.auth.provider import TokenError

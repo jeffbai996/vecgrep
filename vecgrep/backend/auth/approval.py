@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse, RedirectResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .ingress import PRIVATE_INGRESS, has_exact_loopback_peer, has_trusted_proxied_peer
 from .redirects import check_consent, post_authorize_target, resolve_authorization
@@ -173,7 +173,7 @@ class OAuthApprovalMiddleware:
 
         expected = approval_cookie_value(settings.oauth_approval_token or "")
         headers = Headers(scope=scope)
-        cookies = {}
+        cookies: dict[str, str] = {}
         for item in headers.get("cookie", "").split(";"):
             name, sep, value = item.strip().partition("=")
             if sep:
@@ -190,7 +190,7 @@ class OAuthApprovalMiddleware:
             await response(scope, receive, send)
             return
 
-        async def no_store(message: dict) -> None:
+        async def no_store(message: Message) -> None:
             if message.get("type") == "http.response.start":
                 mutable = list(message.get("headers", []))
                 mutable.append((b"cache-control", b"no-store"))
