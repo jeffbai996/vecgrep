@@ -74,7 +74,16 @@ def test_the_rest_search_response_carries_the_timings(svc, make_doc, monkeypatch
 
     _index(svc, make_doc, "a.md", "notes")
     monkeypatch.setattr(routes, "_service", lambda: svc)
-    body = routes.search(SearchRequest(query="alpha", corpus="notes"))
+    body = routes.search(
+        SearchRequest(
+            query="alpha",
+            corpus="notes",
+            top_k=None,
+            full_k=8,
+            max_total=100,
+            token_ceiling=4000,
+        )
+    )
     assert STAGES <= set(body.timings_ms)
 
 

@@ -8,6 +8,7 @@ import html
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
+from pydantic import AnyUrl
 
 from tests import test_oauth_root_discovery as flow
 from tests.oauth_flow import FormFields as Inputs
@@ -370,6 +371,7 @@ def test_base_install_can_import_approval_without_optional_mcp(monkeypatch) -> N
         ),
     ):
         spec = importlib.util.spec_from_file_location(name, path)
+        assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
@@ -383,12 +385,11 @@ def provider():
 def test_registration_change_invalidates_a_visible_form_and_a_previous_approval(
     client,
 ) -> None:
-    from pydantic import AnyUrl
-
     cid = register(client, ["https://client.example/a"])
     request = target(cid)
     _, fields = page(client, request)
     info = provider().store.get_client(cid)
+    assert info is not None
     info.redirect_uris = [AnyUrl("https://client.example/b")]
     provider().store.save_client(info)
     response = client.post(
@@ -396,6 +397,7 @@ def test_registration_change_invalidates_a_visible_form_and_a_previous_approval(
     )
     assert response.status_code == 400
     assert approve(client, request).status_code == 303
+    assert info is not None
     info.redirect_uris = [AnyUrl("https://client.example/c")]
     provider().store.save_client(info)
     response = client.get(local(request), follow_redirects=False)
@@ -410,7 +412,7 @@ def test_existing_unsafe_registration_is_rejected_before_consent_or_issuance(
 
     provider().store.save_client(
         OAuthClientInformationFull(
-            client_id="legacy", redirect_uris=["http://remote.example/callback"]
+            client_id="legacy", redirect_uris=[AnyUrl("http://remote.example/callback")]
         )
     )
     request = target("legacy")

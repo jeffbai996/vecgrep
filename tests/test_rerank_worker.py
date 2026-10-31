@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import time
+from typing import Any, cast
 
 import pytest
 
@@ -47,6 +48,9 @@ class _Process:
         return self.alive
 
     def join(self, timeout=None):
+        pass
+
+    def start(self):
         pass
 
     def terminate(self):
@@ -145,8 +149,8 @@ def test_prediction_timeout_opens_circuit_before_retry(monkeypatch):
     monkeypatch.setattr(rr, "RERANK_WORKER_FAILURE_COOLDOWN_S", 60.0)
     monkeypatch.setattr(rr, "_worker_pressure_active", lambda: False)
     worker = rr._WorkerClient("model")
-    worker._process = _Process()
-    worker._connection = _TimeoutConnection()
+    worker._process = cast(Any, _Process())
+    worker._connection = cast(Any, _TimeoutConnection())
     worker.ready.set()
     worker.attempt_done.set()
     started = []
@@ -198,8 +202,8 @@ def test_retirement_keeps_ownership_until_child_exits(monkeypatch, exit_on, forc
                 self.alive = False
 
     child = Child()
-    worker._process = child
-    worker._connection = _Connection([])
+    worker._process = cast(Any, child)
+    worker._connection = cast(Any, _Connection([]))
     worker.ready.set()
     started = []
     monkeypatch.setattr(worker, "_start", lambda: started.append(True))

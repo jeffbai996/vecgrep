@@ -61,6 +61,7 @@ def test_a_bearer_issued_to_gemini_is_recorded_by_digest(tmp_path):
     _, at, _ = _approved(tmp_path)
 
     entry = _registry(tmp_path).lookup(digest(at.token))
+    assert entry is not None
     assert entry["issuer"] == "vecgrep"
     assert at.token not in Path(_paths(tmp_path)[1]).read_text()
 
@@ -70,7 +71,7 @@ def test_a_bearer_another_mcp_registered_is_accepted_under_this_approval(tmp_pat
     _registered_elsewhere(tmp_path, "from-another-mcp", time.time() + 30 * DAY)
 
     at = store.load_access_token("from-another-mcp")
-
+    assert at is not None
     assert at.client_id == "vg-google"
     assert at.scopes == ["read"]
     assert at.resource == RESOURCE
@@ -88,7 +89,9 @@ def test_a_registered_bearer_never_outlives_the_approval_here(tmp_path):
     store, _, rt = _approved(tmp_path)
     _registered_elsewhere(tmp_path, "from-another-mcp", time.time() + 900 * DAY)
 
-    assert store.load_access_token("from-another-mcp").expires_at <= rt.expires_at
+    loaded = store.load_access_token("from-another-mcp")
+    assert loaded is not None and loaded.expires_at is not None and rt.expires_at is not None
+    assert loaded.expires_at <= rt.expires_at
 
 
 def test_a_registered_bearer_is_refused_once_it_expires(tmp_path, monkeypatch):
@@ -109,7 +112,7 @@ def test_a_copy_that_expired_here_gives_way_to_a_longer_one_recorded_elsewhere(t
 
     at = store.load_access_token(short.token)
 
-    assert at is not None and at.expires_at > later
+    assert at is not None and at.expires_at is not None and at.expires_at > later
 
 
 def test_without_a_registry_a_foreign_bearer_is_refused(tmp_path):

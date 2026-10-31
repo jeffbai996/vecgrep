@@ -21,7 +21,9 @@ come out time-sorted without any re-sorting heuristics.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 # Archiver speaker header: **name** · HH:MM  (name may contain spaces,
 # CJK, or a "[bot]" suffix — anything but '*' and newline).
@@ -81,10 +83,10 @@ def _anchor_strength(a) -> float:
 
 def build_timeline(
     anchors: list,
-    payload_for: callable,
+    payload_for: Callable[..., Any],
     max_groups: int = MAX_GROUPS,
     padding: int = SLICE_PADDING,
-    source_text_for: callable | None = None,
+    source_text_for: Callable[..., Any] | None = None,
 ) -> list[dict]:
     """Assemble timeline groups from anchor SearchResults.
 

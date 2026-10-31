@@ -244,7 +244,7 @@ class QdrantStore:
             quantization_config=quant,
         )
         with self._lock_for_meta():
-            if getattr(self, "_known_collections", None) is None:
+            if self._known_collections is None:
                 self._known_collections = {name}
             else:
                 self._known_collections.add(name)
@@ -281,7 +281,7 @@ class QdrantStore:
             return self.client.count(collection_name=name, exact=True).count
         except Exception:  # noqa: BLE001 -- The storage adapter retains its existing missing-item and optional-index error contract.
             with self._lock_for_meta():
-                if getattr(self, "_known_collections", None) is not None:
+                if self._known_collections is not None:
                     self._known_collections.discard(name)
             return 0
 
@@ -499,7 +499,9 @@ class QdrantStore:
             return None
         v = points[0].vector
         # Named-vector collections return a dict; we use a single unnamed one.
-        return list(v) if not isinstance(v, dict) else None
+        if isinstance(v, list):
+            return [float(x) for x in v if isinstance(x, (int, float))]
+        return None
 
     def get_by_id(self, collection: str, point_id: str) -> dict | None:
         """Fetch a single point's payload by id. Returns None if missing."""

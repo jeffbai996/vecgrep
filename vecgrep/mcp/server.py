@@ -239,7 +239,7 @@ def _corpus_chunk_counts(svc, corpus: str | None = None) -> dict[str, int]:
             if cn:
                 out[str(cn)] = int(n or 0)
             return out
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
     if hasattr(svc, "registry"):
         try:
@@ -278,12 +278,14 @@ def _fanout_chunk_count(svc, args: dict, counts: list[int] | dict[str, int] | No
             return sum(counts.get(str(n), 0) for n in names)
         searchable = getattr(svc, "_searchable_corpora", None)
         if callable(searchable):
-            total = 0
-            for c in searchable():
-                name = c.get("name") if isinstance(c, dict) else getattr(c, "name", None)
-                if name:
-                    total += counts.get(str(name), 0)
-            return total
+            corpora = searchable()
+            if isinstance(corpora, (list, tuple)):
+                total = 0
+                for c in corpora:
+                    name = c.get("name") if isinstance(c, dict) else getattr(c, "name", None)
+                    if name:
+                        total += counts.get(str(name), 0)
+                return total
         return sum(counts.values())
     elif isinstance(counts, (list, tuple)):
         return sum(counts)
@@ -871,7 +873,7 @@ def _run_propose(corpus: str, content: str | None, edit_id: str | None = None,
         corpus_dir.chmod(0o700)
     except OSError:
         pass
-    meta = {"origin": origin}
+    meta: dict[str, Any] = {"origin": origin}
     if source_kind:
         meta["source_kind"] = source_kind
     if tags:
@@ -960,7 +962,7 @@ def _run_propose_merge(corpus: str, doc_ids: list, content: str,
             f"content is {n_bytes} bytes, over the {MAX_PROPOSAL_CONTENT_BYTES}"
             f"-byte proposal cap.")})
     corpus_dir = _corpus_doc_dir(corpus)
-    meta = {"origin": "bot-suggested"}
+    meta: dict[str, Any] = {"origin": "bot-suggested"}
     if tags:
         meta["tags"] = list(tags)
     try:
@@ -1105,7 +1107,7 @@ def _commit_direct_write(corpus: str, content: str, title: str | None,
         except OSError:
             pass
         doc_id = _P.next_doc_id(corpus_dir, corpus)
-        meta = {
+        meta: dict[str, Any] = {
             "origin": "agent-direct",
             "status": "active",
             "tier": "normal",
@@ -1194,6 +1196,7 @@ def _run_temp_write(content: str, expires: str | None,
     refused = _temp_preflight(corpus)
     if refused:
         return refused
+    assert corpus is not None
     if not content or not content.strip():
         return json.dumps({"error": "write_temp needs non-empty content."})
     n_bytes = len(content.encode("utf-8"))
@@ -1229,6 +1232,7 @@ def _run_temp_renew(doc_id: str, expires: str | None) -> str:
     refused = _temp_preflight(corpus)
     if refused:
         return refused
+    assert corpus is not None
     # The id regex admits only one path-safe token, so no traversal out of
     # the temp corpus's own directory.
     if not _P._ID_RE.match(doc_id or ""):
@@ -1359,11 +1363,15 @@ def _commit_direct_edit(corpus: str, doc_id: str, content: str | None,
         body = body.strip("\n")
 
         if is_patch:
+            if old_str is None or new_str is None:
+                return json.dumps({"error": "patch mode needs both old_str and new_str."})
             try:
                 new_body = _apply_patch(body, old_str, new_str)
             except ValueError as e:
                 return json.dumps({"error": str(e)})
         else:
+            if content is None:
+                return json.dumps({"error": "direct edit needs content."})
             new_body = content
 
         n_bytes = len(new_body.encode("utf-8"))
@@ -2283,7 +2291,7 @@ def _mcp_transport_security(
 ):
     from urllib.parse import urlsplit
 
-    from mcp.server.fastmcp.server import TransportSecuritySettings
+    from mcp.server.transport_security import TransportSecuritySettings
 
     local_hosts = [
         "localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*",
@@ -2598,7 +2606,7 @@ class _LoopbackResourceMetadata:
     async def __call__(self, scope, receive, send):
         import json as _json
 
-        start = None
+        start: dict[str, Any] | None = None
         chunks: list[bytes] = []
 
         async def capture(message):
@@ -2639,7 +2647,7 @@ class _PublicClientMetadata:
 
     async def __call__(self, scope, receive, send):
         import json as _json
-        start = None
+        start: dict[str, Any] | None = None
         chunks: list[bytes] = []
 
         async def capture(message):

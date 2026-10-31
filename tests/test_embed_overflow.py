@@ -188,5 +188,6 @@ def test_factory_hands_the_overflow_url_to_the_backend(monkeypatch) -> None:
     s.ollama_overflow_url = "http://overflow:11434"
     monkeypatch.setattr(factory, "_ollama_alive", lambda url: url == "http://primary:11434")
     b = factory.get_embed_backend(s)
+    assert isinstance(b, OllamaBackend)
     assert b.base_url == "http://primary:11434"
     assert b.overflow_url == "http://overflow:11434"

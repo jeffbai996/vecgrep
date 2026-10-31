@@ -40,6 +40,7 @@ from urllib.parse import urlsplit
 
 from mcp.server.auth.provider import AccessToken, AuthorizationCode, RefreshToken
 from mcp.shared.auth import OAuthClientInformationFull
+from pydantic import AnyUrl
 
 from . import google_bearers
 from .google_bearers import GoogleBearerRegistry
@@ -205,7 +206,8 @@ class TokenStore:
                 changed = True
         by_client: dict[str, set[str]] = {}
         for rt in self._refresh.values():
-            by_client.setdefault(rt.client_id, set()).add(rt.family)
+            if rt.family is not None:
+                by_client.setdefault(rt.client_id, set()).add(rt.family)
         for token, at in list(self._access.items()):
             if at.family is None:
                 owned = by_client.get(at.client_id, set())
@@ -258,6 +260,8 @@ class TokenStore:
             self._save_unlocked()
 
     def _save_unlocked(self) -> None:
+        if not self._path:
+            return
         now = _now()
         self._prune_families()
         access = {k: v for k, v in self._access.items()
@@ -308,7 +312,8 @@ class TokenStore:
 
     def _withdraw_google_bearers(self, tokens) -> None:
         if self._google_bearers is not None:
-            self._google_bearers.revoke(self._google_expiries(tokens), now=_now())
+            expiries: dict[str, float | None] = dict(self._google_expiries(tokens))
+            self._google_bearers.revoke(expiries, now=_now())
 
     def _approved_google_grant(self) -> ResourceRefreshToken | None:
         """The live refresh token of an approved Google client, latest expiry
@@ -328,7 +333,7 @@ class TokenStore:
             return None
         entry = self._google_bearers.lookup(google_bearers.digest(token), now=_now())
         grant = self._approved_google_grant() if entry else None
-        if grant is None:
+        if grant is None or entry is None:
             return None
         expires = float(entry["expires_at"])
         if grant.expires_at is not None:
@@ -344,6 +349,7 @@ class TokenStore:
 
     # ----- clients -----
     def save_client(self, info: OAuthClientInformationFull) -> None:
+        assert info.client_id is not None
         self._clients[info.client_id] = info
         self._prune_unapproved_clients()
         self._save()
@@ -413,9 +419,10 @@ class TokenStore:
         record = self._retired_legacy.get(_legacy_key(token))
         if record is not None:
             family = record.get("family")
-            meta = self._families.get(family)
-            if record.get("client_id") == client_id and meta and meta.get("client_id") == client_id:
-                return family
+            if isinstance(family, str):
+                meta = self._families.get(family)
+                if record.get("client_id") == client_id and meta and meta.get("client_id") == client_id:
+                    return family
             return None
         return self._signed_family(client_id, token)
 
@@ -589,7 +596,7 @@ class TokenStore:
             expires_at=_now() + ttl_s,
             client_id=client_id,
             code_challenge=code_challenge,
-            redirect_uri=redirect_uri,
+            redirect_uri=AnyUrl(redirect_uri),
             redirect_uri_provided_explicitly=redirect_uri_provided_explicitly,
             resource=resource,
         )

@@ -22,7 +22,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +220,9 @@ def _release_cuda_cache() -> None:
             torch.cuda.empty_cache()
     except Exception:  # noqa: BLE001, S110 -- External model and process failures cross this worker boundary as explicit error results.
         pass
+
+
+PayloadT = TypeVar("PayloadT")
 
 
 class RerankerError(RuntimeError):
@@ -822,9 +825,9 @@ def _load(model_name: str):
 
 def rerank(
     query: str,
-    candidates: list[tuple[str, dict]],
+    candidates: list[tuple[str, PayloadT]],
     model_name: str = DEFAULT_RERANKER,
-) -> list[tuple[float, dict]]:
+) -> list[tuple[float, PayloadT]]:
     """Score (query, chunk_text) for each candidate. Returns (score, payload)
     pairs sorted descending. Scores are sigmoid-mapped 0..1 for downstream
     display.
@@ -862,6 +865,7 @@ def rerank(
     scored = [
         (1 / (1 + math.exp(-float(s))), payload)
         for s, (_, payload) in zip(raw, candidates)
+        if s is not None
     ]
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored

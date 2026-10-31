@@ -63,7 +63,9 @@ def test_the_signature_survives_so_the_schema_is_unchanged():
     def probe(query: str, corpus: str | None = None, top_k: int = 5) -> str:
         return query
 
-    params = fmcp._tool_manager.get_tool("probe").parameters["properties"]
+    tool = fmcp._tool_manager.get_tool("probe")
+    assert tool is not None
+    params = tool.parameters["properties"]
     assert sorted(params) == ["corpus", "query", "top_k"], sorted(params)
 
 
@@ -74,7 +76,9 @@ def test_an_async_tool_is_left_alone():
     async def probe(query: str) -> str:
         return query
 
-    assert fmcp._tool_manager.get_tool("probe").is_async
+    tool = fmcp._tool_manager.get_tool("probe")
+    assert tool is not None
+    assert tool.is_async
 
 
 def test_a_slow_tool_does_not_block_the_event_loop():

@@ -14,6 +14,7 @@ knob exists, documented with that number, and ships off.
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from vecgrep.backend import rerank
 
@@ -66,11 +67,11 @@ def _construct_with(monkeypatch, cls, *, cuda: bool = False):
     import sys
     import types
 
-    st = types.ModuleType("sentence_transformers")
+    st: Any = types.ModuleType("sentence_transformers")
     st.CrossEncoder = cls
     monkeypatch.setitem(sys.modules, "sentence_transformers", st)
 
-    torch = types.ModuleType("torch")
+    torch: Any = types.ModuleType("torch")
     torch.float16 = "float16"
     torch.cuda = types.SimpleNamespace(is_available=lambda: cuda,
                                        empty_cache=lambda: None)

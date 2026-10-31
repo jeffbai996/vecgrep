@@ -7,6 +7,7 @@ Past bugs / risks covered:
 from __future__ import annotations
 
 import sqlite3
+from typing import Any, cast
 
 import pytest
 
@@ -19,6 +20,7 @@ class _Counting(EmbedBackend):
     name = "fake"
     model = "fake-1"
     dim = 4
+    batch_size: int = 0
 
     def __init__(self) -> None:
         self.calls = 0
@@ -203,6 +205,7 @@ def _service_cap(vg_home, monkeypatch, config: dict) -> int:
     monkeypatch.setattr(cfg_mod, "_settings", None)
     svc = VecgrepService(ephemeral=False)
     try:
+        assert svc._embed_cache is not None
         return svc._embed_cache._max_rows
     finally:
         svc.store.client.close()
@@ -658,7 +661,7 @@ def test_flush_touches_coalesces_across_multiple_get_many_calls(tmp_path):
             return getattr(self.inner, name)
 
     spy_conn = SpyingConnection(cache._conn)
-    cache._conn = spy_conn
+    cache._conn = cast(Any, spy_conn)
     cache.flush_touches()
 
     # Coalescing by identity produces exactly 1 UPDATE statement for < 500 keys
@@ -768,7 +771,7 @@ def test_approx_rows_avoids_count_query(tmp_path):
                 raise AssertionError("Unexpected COUNT(*) query executed!")
             return real_conn.execute(sql, *args, **kwargs)
 
-    cache._conn = ConnProxy()
+    cache._conn = cast(Any, ConnProxy())
     try:
         # Eviction check should use fast-path because _approx_rows (5) <= max_rows (100)
         cache.put_many("id", ["f"], [[6.0]])

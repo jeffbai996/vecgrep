@@ -12,6 +12,7 @@ def test_jobs_are_deduplicated_and_results_survive_restart(tmp_path):
     key = q.enqueue(source)
     assert q.enqueue(source) == key
     job = q.claim(now=100)
+    assert job is not None
     q.complete(job, 'Revenue rises', now=101)
     assert VisualQueue(tmp_path / 'queue.db').result(source) == 'Revenue rises'
     assert q.claim(now=102) is None
@@ -23,6 +24,7 @@ def test_changed_source_never_receives_old_enrichment(tmp_path):
     q = VisualQueue(tmp_path / 'queue.db')
     q.enqueue(source)
     job = q.claim(now=100)
+    assert job is not None
     source.write_bytes(b'second')
     assert not q.complete(job, 'Old chart', now=101)
     assert q.result(source) is None
@@ -35,8 +37,10 @@ def test_claim_is_exclusive_and_expired_lease_is_recoverable(tmp_path):
     q = VisualQueue(tmp_path / 'queue.db')
     q.enqueue(source)
     first = q.claim(now=100, lease_s=10)
+    assert first is not None
     assert q.claim(now=105) is None
     second = q.claim(now=111, lease_s=10)
+    assert second is not None
     assert second['key'] == first['key']
     assert not q.complete(first, 'Late answer', now=112)
     assert q.complete(second, 'Current answer', now=112)
@@ -48,6 +52,7 @@ def test_retry_keeps_ocr_text_available_and_records_error(tmp_path):
     q = VisualQueue(tmp_path / 'queue.db')
     q.enqueue(source)
     job = q.claim(now=100)
+    assert job is not None
     q.retry(job, 'worker unavailable', text='Invoice 123', now=101)
     assert q.result(source) == 'Invoice 123'
     assert q.claim(now=102) is None
@@ -61,6 +66,7 @@ def test_deleted_source_is_cancelled_without_reindexing(tmp_path):
     q = VisualQueue(tmp_path / 'queue.db')
     q.enqueue(source)
     job = q.claim(now=100)
+    assert job is not None
     source.unlink()
     assert not q.complete(job, 'Invoice', now=101)
     assert q.status()[0]['state'] == 'cancelled'
@@ -73,6 +79,7 @@ def test_delivery_targets_are_durable_and_cancelled_on_source_removal(tmp_path):
     q.enqueue(source)
     q.target(source, 'documents', 'sentence_window')
     job = q.claim(now=100)
+    assert job is not None
     q.complete(job, 'Invoice', now=101)
     deliveries = q.deliveries()
     assert len(deliveries) == 1
@@ -99,6 +106,7 @@ def test_image_adapter_returns_pending_then_cached_text(tmp_path, monkeypatch):
     assert doc.metadata['visual_state'] == 'pending'
     q = VisualQueue.default()
     job = q.claim()
+    assert job is not None
     q.complete(job, '[page 1]\nInvoice 123')
     doc = next(ImageAdapter().load(str(source)))
     assert 'Invoice 123' in doc.text
@@ -147,6 +155,7 @@ def test_empty_pending_image_does_not_embed_and_completion_uses_existing_backend
     assert svc.index(str(source), 'documents')[1] == 0
     q = VisualQueue.default()
     job = q.claim()
+    assert job is not None
     q.complete(job, 'Invoice 123')
     assert svc.index(str(source), 'documents')[1] > 0
     assert svc.index(str(source), 'documents')[2] == 1
@@ -163,6 +172,7 @@ def test_delayed_delivery_cannot_resurrect_deleted_source(svc, tmp_path, monkeyp
     svc.index(str(source), 'documents')
     q = VisualQueue.default()
     job = q.claim()
+    assert job is not None
     q.complete(job, 'Invoice 123')
     item = q.deliveries()[0]
     svc.delete_source('documents', str(source.resolve()))
@@ -181,7 +191,9 @@ def test_worker_delivery_retries_index_failures(tmp_path):
     q = VisualQueue(tmp_path / 'queue.db')
     q.enqueue(source)
     q.target(source, 'documents', 'sentence_window')
-    q.complete(q.claim(), 'Invoice 123')
+    claimed = q.claim()
+    assert claimed is not None
+    q.complete(claimed, 'Invoice 123')
     with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(503))) as client:
         assert deliver(q, url='http://example.test', client=client) == 0
     assert len(q.deliveries()) == 1
@@ -270,7 +282,9 @@ def test_reverting_file_content_requeues_cancelled_work(tmp_path):
     q.enqueue(source)
     source.write_bytes(b'first')
     assert q.enqueue(source) == original
-    assert q.claim()['key'] == original
+    claimed = q.claim()
+    assert claimed is not None
+    assert claimed['key'] == original
 
 
 def test_visual_size_limit_does_not_block_native_pdf_text(tmp_path, monkeypatch):

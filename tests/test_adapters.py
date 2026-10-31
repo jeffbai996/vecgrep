@@ -190,7 +190,11 @@ def test_discord_load_preserves_message_order(tmp_path):
 
 def test_json_file_cache_avoids_repeated_loads(tmp_path, monkeypatch):
     from unittest.mock import patch
-    from vecgrep.backend.ingestion.adapters.base import try_load_json_file, load_json_file
+
+    from vecgrep.backend.ingestion.adapters.base import (
+        load_json_file,
+        try_load_json_file,
+    )
     p = tmp_path / "sample.json"
     p.write_text(json.dumps({"key": "val"}))
 
@@ -205,3 +209,21 @@ def test_json_file_cache_avoids_repeated_loads(tmp_path, monkeypatch):
         obj3 = load_json_file(p, str(p))
         assert obj3 == {"key": "val"}
         loads_mock.assert_not_called()
+
+
+def test_chatgpt_and_claude_export_adapters_reject_non_list_json_root(tmp_path):
+    import pytest
+
+    from vecgrep.backend.ingestion.adapters.base import AdapterError
+
+    null_json = tmp_path / "null.json"
+    null_json.write_text("null", encoding="utf-8")
+    dict_json = tmp_path / "dict.json"
+    dict_json.write_text('{"mapping": {}}', encoding="utf-8")
+
+    for adapter in (ChatGPTExportAdapter(), ClaudeExportAdapter()):
+        with pytest.raises(AdapterError):
+            list(adapter.load(str(null_json)))
+        with pytest.raises(AdapterError):
+            list(adapter.load(str(dict_json)))
+

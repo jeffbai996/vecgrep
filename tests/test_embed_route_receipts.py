@@ -48,6 +48,7 @@ def _backend(overflow, *, primary=_answer, clock=None):
     b = OllamaBackend("http://primary.invalid", "bge-m3", overflow_url="http://overflow.invalid",
                       clock=clock or Clock())
     b._client.close()
+    assert b._overflow_client is not None
     b._overflow_client.close()
     b._client = httpx.Client(transport=httpx.MockTransport(primary))
     b._overflow_client = httpx.Client(transport=httpx.MockTransport(overflow))

@@ -98,6 +98,26 @@ def _without_source_text(payload: dict) -> dict:
     return {k: v for k, v in payload.items() if k != "source_text"}
 
 
+_DOC_TS_JSON = "json_extract(c.payload, '$.doc_timestamp')"
+_DOC_TS_REAL = f"CAST({_DOC_TS_JSON} AS REAL)"
+
+
+def _coerce_filter_timestamp(val: Any) -> float | None:
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return float(val)
+    if isinstance(val, str):
+        stripped = val.strip()
+        if not stripped:
+            return None
+        try:
+            return float(stripped)
+        except ValueError:
+            from vecgrep.backend.service import _parse_filter_time
+
+            return _parse_filter_time(stripped)
+    return None
+
+
 def _sql_filter_clauses(
     source_ids: set[str] | list[str] | None = None,
     filter_clauses: list[Any] | None = None,
@@ -106,12 +126,16 @@ def _sql_filter_clauses(
 ) -> tuple[list[str], list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
-    if source_ids is not None and not isinstance(source_ids, (set, frozenset)):
-        if isinstance(source_ids, list) and source_ids:
-            first = source_ids[0]
-            if hasattr(first, "negated") or (isinstance(first, str) and (":" in first or first.startswith("-"))):
-                filter_clauses = source_ids
-                source_ids = None
+    if (
+        source_ids is not None
+        and not isinstance(source_ids, (set, frozenset))
+        and isinstance(source_ids, list)
+        and source_ids
+    ):
+        first = source_ids[0]
+        if hasattr(first, "negated") or (isinstance(first, str) and (":" in first or first.startswith("-"))):
+            filter_clauses = source_ids
+            source_ids = None
 
     if source_ids is not None and len(source_ids) <= 200:
         sorted_ids = sorted(source_ids)
@@ -135,20 +159,24 @@ def _sql_filter_clauses(
                 negated = clause.startswith("-")
                 raw = clause[1:] if negated else clause
                 kind, _, val = raw.partition(":")
-            if negated:
-                if kind in ("after", "doc_timestamp_after"):
-                    clauses.append("(c.doc_timestamp IS NULL OR c.doc_timestamp < ?)")
-                    params.append(float(val))
-                elif kind in ("before", "doc_timestamp_before"):
-                    clauses.append("(c.doc_timestamp IS NULL OR c.doc_timestamp > ?)")
-                    params.append(float(val))
-            else:
-                if kind in ("after", "doc_timestamp_after"):
-                    clauses.append("(c.doc_timestamp >= ?)")
-                    params.append(float(val))
-                elif kind in ("before", "doc_timestamp_before"):
-                    clauses.append("(c.doc_timestamp < ?)")
-                    params.append(float(val))
+            if kind in ("after", "doc_timestamp_after", "before", "doc_timestamp_before"):
+                ts = _coerce_filter_timestamp(val)
+                if ts is None:
+                    clauses.append("0 = 1")
+                elif negated:
+                    if kind in ("after", "doc_timestamp_after"):
+                        clauses.append(f"({_DOC_TS_JSON} IS NULL OR {_DOC_TS_REAL} < ?)")
+                        params.append(ts)
+                    else:
+                        clauses.append(f"({_DOC_TS_JSON} IS NULL OR {_DOC_TS_REAL} >= ?)")
+                        params.append(ts)
+                else:
+                    if kind in ("after", "doc_timestamp_after"):
+                        clauses.append(f"({_DOC_TS_JSON} IS NOT NULL AND {_DOC_TS_REAL} >= ?)")
+                        params.append(ts)
+                    else:
+                        clauses.append(f"({_DOC_TS_JSON} IS NOT NULL AND {_DOC_TS_REAL} < ?)")
+                        params.append(ts)
 
     return clauses, params
 
@@ -162,7 +190,7 @@ class BM25SqliteStore:
         self.root = root
         self._conns: dict[str, sqlite3.Connection] = {}
         self._corpus_locks: dict[str, threading.RLock] = {}
-        self._counts: dict[str, tuple[tuple[int, int] | None, int]] = {}
+        self._counts: dict[str, tuple[tuple[int, int, int, int, int] | None, int]] = {}
         self._lock = threading.RLock()
         self._bulk: set[str] = set()
 

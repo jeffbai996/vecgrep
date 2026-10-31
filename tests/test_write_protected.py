@@ -25,11 +25,17 @@ def store(tmp_path):
     return C.ProposalStore(tmp_path / "pending")
 
 
+class _FakeResult:
+    source_id: str | None = None
+
+
 class _FakeService:
+    _live: str | None = None
+
     def __init__(self): self.indexed = []
     def index(self, s, c, **k): self.indexed.append(s); return (1, 1, 0)
     def search(self, q, corpus_name=None, top_k=5, **k):
-        r = type("R", (), {})(); r.source_id = self._live; return [r]
+        r = _FakeResult(); r.source_id = self._live; return [r]
 
 
 OWNER = "owner-123"

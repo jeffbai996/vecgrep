@@ -54,7 +54,9 @@ def test_f_retr_01a_qdrant_store_search_swallows_backend_failure_as_empty_result
         svc.search_with_diagnostics("target_keyword", "notes", mode="vector")
 
 
-def test_f_retr_01b_ollama_5xx_returns_zero_vector_for_query_instead_of_raising():
+def test_f_retr_01b_ollama_5xx_returns_zero_vector_for_query_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """F-RETR-01b: OllamaBackend.embed_one returns [0.0]*dim on HTTP 500/503 instead of raising
     EmbedBackendError, preventing failover and silently zeroing out query vector similarity."""
     backend = OllamaBackend(base_url="http://127.0.0.1:9", model="nomic-embed-text")
@@ -62,30 +64,30 @@ def test_f_retr_01b_ollama_5xx_returns_zero_vector_for_query_instead_of_raising(
     def _mock_post(url: str, json: dict):
         return httpx.Response(503, text="model runner crashed / overloaded")
 
-    backend._client.post = _mock_post  # type: ignore[method-assign]
+    monkeypatch.setattr(backend._client, "post", _mock_post)
 
     # BUG: embed_one("search query") returns [0.0] * 768 instead of raising EmbedBackendError!
     with pytest.raises(EmbedBackendError):
         backend.embed_one("search query")
 
 
-def test_f_retr_01c_ollama_unknown_model_probe_5xx_raises_attribute_error():
+def test_f_retr_01c_ollama_unknown_model_probe_5xx_raises_attribute_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """F-RETR-01c: When probing dim for an unknown model in OllamaBackend.__init__, a 5xx response
     reaches `return [0.0] * self.dim` before `self.dim` is assigned, raising AttributeError."""
     orig_make = OllamaBackend._make_client
 
     def _failing_client(connect: float = 2.0, read: float = 60.0):
         client = orig_make(connect=connect, read=read)
-        client.post = lambda url, json: httpx.Response(500, text="internal server error")  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            client, "post", lambda url, json: httpx.Response(500, text="internal server error"))
         return client
 
-    OllamaBackend._make_client = staticmethod(_failing_client)  # type: ignore[assignment]
-    try:
-        # Should raise EmbedBackendError, not AttributeError: 'OllamaBackend' object has no attribute 'dim'
-        with pytest.raises(EmbedBackendError):
-            OllamaBackend(base_url="http://127.0.0.1:9", model="custom-unknown-embed-model")
-    finally:
-        OllamaBackend._make_client = staticmethod(orig_make)  # type: ignore[assignment]
+    monkeypatch.setattr(OllamaBackend, "_make_client", staticmethod(_failing_client))
+    # Should raise EmbedBackendError, not AttributeError: 'OllamaBackend' object has no attribute 'dim'
+    with pytest.raises(EmbedBackendError):
+        OllamaBackend(base_url="http://127.0.0.1:9", model="custom-unknown-embed-model")
 
 
 def test_f_retr_02_superseded_chunks_starve_active_results_without_qdrant_pushdown(tmp_path: Path):

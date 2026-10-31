@@ -157,7 +157,9 @@ def test_the_corpus_queries_agree_across_backends(tmp_path):
 
     for sid in ("/animals", "/ops", "/code", "/missing"):
         assert pickled.first_chunk_for_source("c", sid) == lite.first_chunk_for_source("c", sid)
-    assert lite.first_chunk_for_source("c", "/ops")[1]["chunk_index"] == 3
+    ops_chunk = lite.first_chunk_for_source("c", "/ops")
+    assert ops_chunk is not None
+    assert ops_chunk[1]["chunk_index"] == 3
     assert dict(lite.source_counts("c")) == {"/animals": 3, "/ops": 3, "/code": 2}
 
 
@@ -308,3 +310,29 @@ def test_large_sqlite_mutations_checkpoint_without_changing_ranking(
     assert checkpoints == ["c", "c"]
     assert before
     assert after_checkpoint == before_checkpoint
+
+
+def test_sqlite_search_filter_clauses_handles_iso_and_numeric_timestamps(tmp_path):
+    lite = BM25SqliteStore(tmp_path / "db")
+    lite.upsert(
+        "c",
+        ["old", "new", "undated"],
+        ["needle alpha", "needle beta", "needle gamma"],
+        [
+            {"source_id": "/old", "doc_timestamp": 1704067200.0},  # 2024-01-01T00:00:00Z
+            {"source_id": "/new", "doc_timestamp": 1768435200.0},  # 2026-01-15T00:00:00Z
+            {"source_id": "/undated", "doc_timestamp": None},
+        ],
+    )
+    hits_iso = lite.search("c", "needle", 5, filter_clauses=["after:2026-01-01"])
+    assert [cid for cid, _s, _p in hits_iso] == ["new"]
+
+    hits_num = lite.search("c", "needle", 5, filter_clauses=["after:1760000000"])
+    assert [cid for cid, _s, _p in hits_num] == ["new"]
+
+    hits_neg = lite.search("c", "needle", 5, filter_clauses=["-after:2026-01-01"])
+    assert {cid for cid, _s, _p in hits_neg} == {"old", "undated"}
+
+    hits_invalid = lite.search("c", "needle", 5, filter_clauses=["after:not-a-date"])
+    assert hits_invalid == []
+

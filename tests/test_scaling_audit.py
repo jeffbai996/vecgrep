@@ -146,11 +146,15 @@ def test_mutation_journal_advance_phase_uses_sidecar(tmp_path):
         "old_points": [{"id": f"p{i}", "vector": [0.1] * 8, "payload": {}} for i in range(50)],
     }
     journal.write(big_record)
-    main_mtime = journal.path("chats").stat().st_mtime_ns
+    jpath = journal.path("chats")
+    assert jpath is not None
+    main_mtime = jpath.stat().st_mtime_ns
 
     journal.advance_phase("chats", "qdrant_done")
-    assert journal.phase_path("chats").exists()
-    assert journal.path("chats").stat().st_mtime_ns == main_mtime
+    phase_path = journal.phase_path("chats")
+    assert phase_path is not None
+    assert phase_path.exists()
+    assert jpath.stat().st_mtime_ns == main_mtime
     read_back = journal.read("chats")
     assert read_back is not None
     assert read_back["phase"] == "qdrant_done"
@@ -158,7 +162,8 @@ def test_mutation_journal_advance_phase_uses_sidecar(tmp_path):
 
     journal.finish("chats")
     assert not journal.has("chats")
-    assert not journal.phase_path("chats").exists()
+    phase_path_after = journal.phase_path("chats")
+    assert phase_path_after is not None and not phase_path_after.exists()
 
 
 def test_incremental_tail_append_embeds_only_new_chunks_and_strips_bm25_source_text(

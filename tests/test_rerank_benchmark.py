@@ -10,6 +10,7 @@ from vecgrep.backend import rerank
 
 spec = importlib.util.spec_from_file_location(
     "rerank_benchmark", Path(__file__).parents[1]/"scripts/rerank_benchmark.py")
+assert spec is not None and spec.loader is not None
 bench = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bench)
 
@@ -106,6 +107,7 @@ def test_benchmark_import_survives_a_platform_without_resource(monkeypatch):
             raise ModuleNotFoundError('resource is unavailable on this platform')
         return real_import(name, *args, **kwargs)
     monkeypatch.setattr(builtins, '__import__', without_resource)
+    assert bench.__file__ is not None
     module = bench.load_module('benchmark_without_resource', Path(bench.__file__))
     assert module.peak_rss_bytes() is None
 

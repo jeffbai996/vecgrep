@@ -102,6 +102,7 @@ def svc(vg_home: Path, stub_backend: StubEmbed) -> Iterator[VecgrepService]:
     from vecgrep.backend.embed.cache import CachedBackend
 
     s = VecgrepService(ephemeral=False)
+    assert s._embed_cache is not None
     s._backend_cache["auto"] = CachedBackend(stub_backend, s._embed_cache)
     yield s
     # Best-effort qdrant cleanup so the next test's fixture doesn't trip

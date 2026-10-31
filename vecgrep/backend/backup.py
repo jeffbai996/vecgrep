@@ -459,7 +459,7 @@ class BackupManager:
                 try:
                     c_obj = service.registry.get(name)
                     service._rebuild_bm25_from_store(c_obj)
-                except Exception:
+                except Exception:  # noqa: BLE001 -- Backup rollback and cleanup must contain arbitrary storage-provider failures.
                     service.rebuild_bm25(name)
 
             issues = service.diagnose()

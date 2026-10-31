@@ -4,6 +4,7 @@ import hmac
 import logging
 import threading
 from dataclasses import asdict
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
@@ -409,7 +410,7 @@ def browse(req: BrowseRequest) -> list[dict]:
 @router.get("/explorer/{corpus}")
 def explore_corpus(
     corpus: str,
-    path: list[str] = Query(default=[]),  # noqa: B008 -- FastAPI reads Query metadata at route construction.
+    path: list[str] = Query(default=[]),
     q: str = Query(default="", max_length=200),
     sort: str = Query(default="name"),
     offset: int = Query(default=0, ge=0),
@@ -591,7 +592,7 @@ def instance_health() -> dict:
     check("corpora", bool(corpora), f"{len(corpora)} corpora, {chunks:,} chunks")
 
     # ---- embedding cache ----------------------------------------------
-    cache = {"path": None, "bytes": None, "rows": None, "coverage_pct": None}
+    cache: dict[str, Any] = {"path": None, "bytes": None, "rows": None, "coverage_pct": None}
     # `home` is vecgrep's data root; the cache lives beside the vector store.
     home = getattr(settings, "home", None)
     cache_path = Path(home) / "embed_cache.db" if home else None
@@ -605,11 +606,12 @@ def instance_health() -> dict:
         except sqlite3.Error as exc:
             check("embed cache", False, str(exc)[:80])
         if cache["rows"] is not None and chunks:
-            cache["coverage_pct"] = round(100 * cache["rows"] / chunks, 1)
+            coverage_pct = round(100 * cache["rows"] / chunks, 1)
+            cache["coverage_pct"] = coverage_pct
             # Re-embedding is the expensive half of a rebuild; a cache that has
             # fallen behind the index is the warning you want before, not after.
-            check("embed cache", cache["coverage_pct"] >= 80,
-                  f"{cache['rows']:,} embeddings, {cache['coverage_pct']}% of chunks")
+            check("embed cache", coverage_pct >= 80,
+                  f"{cache['rows']:,} embeddings, {coverage_pct}% of chunks")
     else:
         check("embed cache", None, "no cache file")
 

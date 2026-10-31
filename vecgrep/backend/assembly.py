@@ -134,26 +134,26 @@ def split_full_and_stubs(
 
 def _normalized(r: SearchResult) -> str:
     """Whitespace-collapsed lowercase chunk text, cached on the result."""
-    cached = getattr(r, "_asm_norm", None)
+    cached = r._asm_norm
     if cached is None:
         cached = " ".join(r.chunk.lower().split())
-        r._asm_norm = cached  # type: ignore[attr-defined]
+        r._asm_norm = cached
     return cached
 
 
 def _words(r: SearchResult) -> list[str]:
     """Whitespace-split lowercase words, cached on the result."""
-    cached = getattr(r, "_asm_words", None)
+    cached = r._asm_words
     if cached is None:
         cached = _normalized(r).split()
-        r._asm_words = cached  # type: ignore[attr-defined]
+        r._asm_words = cached
     return cached
 
 
-def _shingles(r: SearchResult) -> frozenset:
+def _shingles(r: SearchResult) -> frozenset[str]:
     """Token 8-gram shingles of the normalized text (cached). Only shingles
     long enough to be distinctive (>= MIN_CLONE_CHARS chars) are kept."""
-    cached = getattr(r, "_asm_shingles", None)
+    cached = r._asm_shingles
     if cached is None:
         toks = _words(r)
         grams = set()
@@ -162,7 +162,7 @@ def _shingles(r: SearchResult) -> frozenset:
             if len(g) >= MIN_CLONE_CHARS:
                 grams.add(g)
         cached = frozenset(grams)
-        r._asm_shingles = cached  # type: ignore[attr-defined]
+        r._asm_shingles = cached
     return cached
 
 
@@ -283,17 +283,21 @@ def mmr_select(
     max_sim: dict[int, float] = {id(r): 0.0 for r in results}
 
     while remaining and len(selected) < k:
-        best = best_mmr = None
-        best_clone = best_clone_mmr = None
+        best: SearchResult | None = None
+        best_mmr: float | None = None
+        best_clone: SearchResult | None = None
+        best_clone_mmr: float | None = None
         for r in remaining:
             s = max_sim[id(r)]
             mmr = lambda_ * rel[id(r)] - (1.0 - lambda_) * s
             if s >= exclude_sim:
-                if best_clone is None or mmr > best_clone_mmr:
+                if best_clone_mmr is None or mmr > best_clone_mmr:
                     best_clone, best_clone_mmr = r, mmr
-            elif best is None or mmr > best_mmr:
+            elif best_mmr is None or mmr > best_mmr:
                 best, best_mmr = r, mmr
         pick = best if best is not None else best_clone
+        if pick is None:
+            break
         selected.append(pick)
         remaining.remove(pick)
         for r in remaining:

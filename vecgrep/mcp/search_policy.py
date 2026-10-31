@@ -36,7 +36,8 @@ def resolve_search(args: dict) -> dict:
     profile = args.get('profile')
     if profile is not None and profile not in PRESETS:
         raise ValueError('profile must be lookup, explore, or deep')
-    resolved = {**PRESETS.get(profile, {}),
+    preset = PRESETS[profile] if profile is not None else {}
+    resolved = {**preset,
                 **{k: v for k, v in args.items() if v is not None}}
     for key in ('top_k', 'full_k', 'token_ceiling', 'response_token_ceiling'):
         value = resolved.get(key)

@@ -192,6 +192,7 @@ def test_f_index_05_failed_force_index_leaves_embed_cache_bypass_stuck_true(tmp_
     # Register CachedBackend wrapping raw_backend in svc._backend_cache
     from vecgrep.backend.embed.cache import CachedBackend
 
+    assert svc._embed_cache is not None
     cached_backend = CachedBackend(raw_backend, svc._embed_cache)
     svc._backend_cache["ollama:nomic-embed-text"] = cached_backend
     svc._backend_cache["auto"] = cached_backend

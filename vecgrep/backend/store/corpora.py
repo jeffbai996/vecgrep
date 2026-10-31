@@ -162,14 +162,13 @@ class CorpusRegistry:
             stat = self._file_stat()
             if self._loaded and stat == self._loaded_stat:
                 return
-        with self.locks.registry_read():
-            with self._cache_lock:
-                stat = self._file_stat()
-                if not self._loaded or stat != self._loaded_stat:
-                    self._corpora = {}
-                    self._load()
-                    self._loaded = True
-                    self._loaded_stat = self._file_stat()
+        with self.locks.registry_read(), self._cache_lock:
+            stat = self._file_stat()
+            if not self._loaded or stat != self._loaded_stat:
+                self._corpora = {}
+                self._load()
+                self._loaded = True
+                self._loaded_stat = self._file_stat()
 
     def _reload(self, *, force: bool = False) -> None:
         """Replace in-memory state with the current on-disk state.
@@ -180,12 +179,11 @@ class CorpusRegistry:
         by the CLI were silently reverted when the running server next saved.
         """
         if force:
-            with self.locks.registry_read():
-                with self._cache_lock:
-                    self._corpora = {}
-                    self._load()
-                    self._loaded = True
-                    self._loaded_stat = self._file_stat()
+            with self.locks.registry_read(), self._cache_lock:
+                self._corpora = {}
+                self._load()
+                self._loaded = True
+                self._loaded_stat = self._file_stat()
         else:
             self._reload_if_needed()
 

@@ -33,9 +33,16 @@ def store(tmp_path):
     return C.ProposalStore(tmp_path / "pending")
 
 
+class _FakeResult:
+    source_id: str | None = None
+
+
 class _FakeService:
     """Stand-in for VecgrepService: records index()/delete_file() calls, fakes
     search verify."""
+
+    _last_written: str | None = None
+
     def __init__(self, found=True):
         self.indexed = []
         self.deleted = []
@@ -51,7 +58,7 @@ class _FakeService:
     def search(self, query, corpus_name=None, top_k=5, **kw):
         if not self._found:
             return []
-        r = type("R", (), {})()
+        r = _FakeResult()
         r.source_id = self._last_written  # set by the test via attribute
         return [r]
 

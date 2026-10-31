@@ -93,15 +93,27 @@ backend/model migration — i.e. the surfaces where shipped bugs have
 historically lived. New extension points (adapters, chunkers, embed
 backends) should land with a unit test in the matching `test_*.py`.
 
-## Lint
+## Lint & Typecheck
 
-Install the dev extra and run `ruff check .`. The dev extra pins Ruff to the
-validated minor release so the gate does not depend on a developer's global
-tool version. The only excluded Python source is
+```bash
+pip install -e ".[dev,mcp,code,openai,watch]"
+ruff check .
+pyright
+```
+
+Install the dev and runtime extras and run `ruff check .` and `pyright`. The
+dev extra pins Ruff (`>=0.17.3,<0.18`) and Pyright (`pyright[nodejs]==1.1.408`,
+configured in `[tool.pyright]` under `typeCheckingMode = "standard"`) so
+neither gate depends on a developer's global tool or Node installation. When
+invoking `pyright` outside an activated virtualenv, pass `--pythonpath
+./venv/bin/python`. The only excluded Python source is
 `tests/fixtures/code_symbols/broken.py`, deliberately invalid input used by
 the parser-failure tests.
 
 Broad exception handlers are retained only at documented backend, worker,
 cleanup and protocol boundaries. Their local annotations preserve established
 failure isolation and error responses; new ordinary application code should
-catch the errors it can handle.
+catch the errors it can handle. The code carries no `# pyright: ignore` or
+`# type: ignore` comments. `typings/` holds partial stubs for the optional
+`rerank` extra (`torch`, `sentence_transformers`) so the gate runs without it;
+extend them when the code uses more of either library.

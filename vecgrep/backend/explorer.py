@@ -409,10 +409,12 @@ def _metadata(record: dict) -> dict:
 def _timestamp(value: object) -> float | None:
     if value is None:
         return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    if isinstance(value, (int, float, str, bytes)):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def _label(value: object, fallback: str) -> str:
@@ -421,9 +423,8 @@ def _label(value: object, fallback: str) -> str:
 
 
 def _split_fragment(source_id: str) -> tuple[str, str]:
-    if "#" not in source_id:
-        return source_id, ""
-    return tuple(source_id.split("#", 1))  # type: ignore[return-value]
+    head, _, fragment = source_id.partition("#")
+    return head, fragment
 
 
 def _record_prefix(record: dict) -> str:

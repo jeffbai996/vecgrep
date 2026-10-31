@@ -8,17 +8,20 @@ from __future__ import annotations
 
 import logging
 import time
+import weakref
+from collections.abc import Callable
 from typing import Any
 
 LOGGER_NAME = "vecgrep.mcp.calls"
 logger = logging.getLogger(LOGGER_NAME)
+_wrapped: weakref.WeakSet[Callable[..., Any]] = weakref.WeakSet()
 
 
 def install(server: Any) -> None:
     """Log every tool call made through this FastMCP server. Safe to call twice."""
     manager = server._tool_manager
     inner = manager.call_tool
-    if getattr(inner, "_call_logged", False):
+    if inner in _wrapped:
         return
 
     async def call_tool(name: str, arguments: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
@@ -32,5 +35,5 @@ def install(server: Any) -> None:
             logger.info("tool=%s outcome=%s ms=%d", name, outcome,
                         (time.monotonic() - started) * 1000)
 
-    call_tool._call_logged = True  # type: ignore[attr-defined]
+    _wrapped.add(call_tool)
     manager.call_tool = call_tool

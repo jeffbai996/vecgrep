@@ -13,7 +13,13 @@ from __future__ import annotations
 from collections.abc import Iterator
 from pathlib import Path
 
-from .base import Adapter, Document, load_json_file, try_load_json_file
+from .base import (
+    Adapter,
+    AdapterError,
+    Document,
+    load_json_file,
+    try_load_json_file,
+)
 from .registry import register_adapter
 
 
@@ -85,6 +91,8 @@ class ChatGPTExportAdapter(Adapter):
     def load(self, source: str) -> Iterator[Document]:
         p = Path(source)
         data = load_json_file(p, source)
+        if not isinstance(data, list):
+            raise AdapterError(f"{source}: expected top-level JSON list")
 
         for conv in data:
             if not isinstance(conv, dict):

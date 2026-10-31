@@ -13,9 +13,10 @@ import statistics
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from vecgrep.backend import service as service_mod
-from vecgrep.backend.service import VecgrepService, _collection_for
+from vecgrep.backend.service import SearchMode, VecgrepService, _collection_for
 from vecgrep.backend.store.corpora import Corpus
 
 from .gold import GoldCase
@@ -65,7 +66,7 @@ def build_side_by_side(
     chunker: str | None = None,
     include: str | None = None,
     root: str | None = None,
-    decay_half_life_days: float | None | str = "inherit",
+    decay_half_life_days: float | None | Literal["inherit"] = "inherit",
     quantization: str | None = None,
     datatype: str = "float32",
     force: bool = False,
@@ -95,6 +96,15 @@ def build_side_by_side(
         else:
             raise ValueError(f"{dst} already exists (pass --force to rebuild)")
 
+    if isinstance(decay_half_life_days, str):
+        if decay_half_life_days != "inherit":
+            raise ValueError(
+                f"decay_half_life_days must be float, None, or 'inherit', got {decay_half_life_days!r}"
+            )
+        resolved_decay = live.decay_half_life_days
+    else:
+        resolved_decay = decay_half_life_days
+
     # Pre-create with the live corpus's pinned model so _index_locked resolves
     # the same backend identity the cache was filled under.
     now = time.time()
@@ -106,10 +116,7 @@ def build_side_by_side(
         chunker=chunker,
         created_at=now,
         updated_at=now,
-        decay_half_life_days=(
-            live.decay_half_life_days if decay_half_life_days == "inherit"
-            else decay_half_life_days
-        ),
+        decay_half_life_days=resolved_decay,
         rank_weight=getattr(live, "rank_weight", 1.0),
     )
     svc.registry.upsert(c)
@@ -212,7 +219,7 @@ class RunConfig:
     the duration of the run."""
     name: str
     corpora: dict[str, str] = field(default_factory=dict)
-    mode: str = "hybrid"
+    mode: SearchMode = "hybrid"
     rerank: bool = False
     rerank_model: str | None = None
     top_k: int = 10
@@ -220,7 +227,7 @@ class RunConfig:
     rrf_k: int | None = None
     cosine_floor_margin: float | None = None
     decay_floor: float | None = None
-    decay_half_life_days: float | None | str = "keep"    # per actual corpus, restored after
+    decay_half_life_days: float | None | Literal["keep"] = "keep"    # per actual corpus, restored after
     bm25_weight_by_corpus: dict[str, float] = field(default_factory=dict)  # logical -> weight, restored after
     unscoped: bool = False   # search with NO corpus argument (see run_config)
     notes: str = ""
@@ -285,7 +292,7 @@ def run_config(
     if cfg.decay_half_life_days != "keep":
         for a in set(searched):
             saved_decay[a] = svc.registry.get(a).decay_half_life_days
-            svc.set_decay(a, cfg.decay_half_life_days)  # type: ignore[arg-type]
+            svc.set_decay(a, cfg.decay_half_life_days)
     saved_bm25w: dict[str, float | None] = {}
     for logical, w in cfg.bm25_weight_by_corpus.items():
         a = cfg.corpora.get(logical, logical)

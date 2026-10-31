@@ -320,19 +320,21 @@ def test_http_code_and_refresh_tokens_initialize_and_list_tools(loopback_client,
     import anyio
     from mcp.server.auth.provider import AuthorizationParams
     from mcp.shared.auth import OAuthClientInformationFull
+    from pydantic import AnyUrl
 
     provider = mcp_server._shared_provider()
     client = OAuthClientInformationFull(
-        client_id="resource-flow", redirect_uris=["https://client.example/callback"],
+        client_id="resource-flow", redirect_uris=[AnyUrl("https://client.example/callback")],
         grant_types=["authorization_code", "refresh_token"], response_types=["code"],
         token_endpoint_auth_method="none", scope="read",
     )
+    assert client.redirect_uris is not None
     verifier = "v" * 64
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     anyio.run(provider.register_client, client)
     params = AuthorizationParams(
         state="s", scopes=["read"], code_challenge=challenge,
-        redirect_uri=str(client.redirect_uris[0]), redirect_uri_provided_explicitly=True,
+        redirect_uri=client.redirect_uris[0], redirect_uri_provided_explicitly=True,
         resource=authorization_resource,
     )
     redirect = anyio.run(provider.authorize, client, params)

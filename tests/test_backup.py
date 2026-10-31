@@ -4,6 +4,7 @@ import json
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -160,7 +161,7 @@ def test_server_snapshot_transport_downloads_and_uploads(vg_home: Path, monkeypa
     monkeypatch.setattr("vecgrep.backend.backup.httpx.stream", lambda *a, **k: Download())
     monkeypatch.setattr("vecgrep.backend.backup.httpx.post", lambda *a, **k: (uploaded.append((a, k)) or Upload()))
     settings = Settings(home=vg_home, qdrant_url="http://localhost:6333")
-    snapshots = QdrantSnapshots(settings, Service())
+    snapshots = QdrantSnapshots(settings, cast(Any, Service()))
     vg_home.mkdir(parents=True)
 
     snapshot_format, path = snapshots.create("notes", vg_home)
@@ -198,7 +199,7 @@ def test_server_snapshot_cleanup_failure_keeps_download(
 
     monkeypatch.setattr("vecgrep.backend.backup.httpx.stream", lambda *a, **k: Download())
     settings = Settings(home=vg_home, qdrant_url="http://localhost:6333")
-    snapshots = QdrantSnapshots(settings, Service())
+    snapshots = QdrantSnapshots(settings, cast(Any, Service()))
     vg_home.mkdir(parents=True)
 
     snapshot_format, path = snapshots.create("notes", vg_home)

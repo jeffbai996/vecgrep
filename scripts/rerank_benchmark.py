@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Offline, fixed-candidate reranker comparison; defaults to a NOT_RUN plan.
 
 Run only with a local model directory and an approved CPU work budget. Inputs
@@ -15,6 +14,7 @@ import math
 import os
 import platform
 from pathlib import Path
+from typing import Any
 
 try:
     import resource
@@ -42,9 +42,11 @@ def identity(root):
             "rerank_blob": git(root, "rev-parse", "HEAD:vecgrep/backend/rerank.py")}
 
 
-def load_module(name, path):
+def load_module(name, path) -> Any:
     spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load module spec for {name} from {path}")
+    module: Any = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module

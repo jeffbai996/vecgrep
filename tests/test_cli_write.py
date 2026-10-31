@@ -65,7 +65,9 @@ def test_edit_overwrites_existing(runner_home):
     w = runner_home.invoke(cli, ["write", "notes", "old content"])
     assert w.exit_code == 0, w.output
     # Use the generated id so the edit exercises the actual newly written doc.
-    doc_id = re.search(r"notes-\d+", w.output).group(0)
+    match = re.search(r"notes-\d+", w.output)
+    assert match is not None
+    doc_id = match.group(0)
     r = runner_home.invoke(cli, ["edit", doc_id, "new content"])
     assert r.exit_code == 0, r.output
     f = glob.glob(f"{os.environ['VECGREP_HOME']}/write/notes/{doc_id}.md")[0]
