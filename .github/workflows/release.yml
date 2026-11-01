@@ -4,7 +4,7 @@ on:
   pull_request:
   push:
     branches:
-      - "**"
+      - main
     tags:
       - "v*"
   workflow_dispatch:
@@ -18,7 +18,59 @@ permissions:
   contents: read
 
 jobs:
+  # Decides whether the build runs. Docs-only pull requests and pushes to main
+  # skip it. This is a job and not a path filter on the push trigger:
+  # GitHub applies path filters to tag pushes too, and a release tag must never
+  # be skipped. It also makes a docs-only change report a skipped (passing)
+  # build instead of a check that never starts. Any doubt, such as a failed API
+  # call, a force-push or an oversized diff, builds.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.scope.outputs.build }}
+    steps:
+      - id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # Pure documentation. Source, tests, scripts, workflows, pyproject and
+          # lockfiles are never listed here.
+          is_doc() {
+            case "$1" in
+              tests/*|vecgrep/*|scripts/*|typings/*) return 1 ;;
+              docs/*|*.md|.github/ISSUE_TEMPLATE/*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+          build=true
+          files=""
+          if [[ "$EVENT" == pull_request ]]; then
+            # The files API lists at most 3000 files; build when it may be cut off.
+            count=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .changed_files) || count=""
+            if [[ "$count" =~ ^[0-9]+$ && "$count" -lt 3000 ]]; then
+              files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
+                --jq '.[] | .filename, (.previous_filename // empty)') || files=""
+            fi
+          elif [[ "$EVENT" == push && "$GITHUB_REF" == refs/heads/* && "$BEFORE" =~ [1-9a-f] ]]; then
+            # The compare API lists at most 300 files; build when it may be cut off.
+            files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BEFORE...$GITHUB_SHA" \
+              --jq 'if (.files | length) >= 300 then empty else .files[] | .filename, (.previous_filename // empty) end') || files=""
+          fi
+          if [[ -n "$files" ]]; then
+            build=false
+            while IFS= read -r path; do
+              is_doc "$path" || { build=true; break; }
+            done <<< "$files"
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "build=$build"
+
   build:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -28,6 +80,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
