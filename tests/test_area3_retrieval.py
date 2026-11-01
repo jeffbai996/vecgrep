@@ -37,6 +37,29 @@ def _make_service(tmp_path: Path) -> VecgrepService:
     return svc
 
 
+def _small_candidate_pool(svc, monkeypatch, pool: int = 3) -> list[tuple[int, object]]:
+    """Shrink the vector candidate pool so a handful of docs can starve it.
+
+    Starvation needs more non-matching chunks than the pool holds, so patching
+    the pool down proves what indexing hundreds of docs did. The returned list
+    records (top_k, query_filter) of every vector search: a filter that is
+    pushed down to Qdrant arrives non-None with the fetch left at pool size,
+    while one evaluated in Python after the fetch widens it.
+    """
+    import vecgrep.backend.service as svc_mod
+
+    monkeypatch.setattr(svc_mod, "CANDIDATE_POOL", pool)
+    calls: list[tuple[int, object]] = []
+    real_search = svc.store.search
+
+    def spy(collection, query_vector, top_k, **kwargs):
+        calls.append((top_k, kwargs.get("query_filter")))
+        return real_search(collection, query_vector, top_k, **kwargs)
+
+    monkeypatch.setattr(svc.store, "search", spy)
+    return calls
+
+
 def test_f_retr_01a_qdrant_store_search_swallows_backend_failure_as_empty_results(tmp_path: Path):
     """F-RETR-01a: QdrantStore.search has bare `except Exception: return []`, turning a closed
     or broken Qdrant connection into a silent 0-hit result with no warning or error."""
@@ -90,17 +113,22 @@ def test_f_retr_01c_ollama_unknown_model_probe_5xx_raises_attribute_error(
         OllamaBackend(base_url="http://127.0.0.1:9", model="custom-unknown-embed-model")
 
 
-def test_f_retr_02_superseded_chunks_starve_active_results_without_qdrant_pushdown(tmp_path: Path):
+def test_f_retr_02_superseded_chunks_starve_active_results_without_qdrant_pushdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """F-RETR-02: Default `meta.status=active` filter is not passed to _build_qdrant_filter (which
-    only receives user_filters and doesn't push down meta.* anyway). When 55 superseded docs have
-    matching vectors, fetch_k=50 only retrieves superseded docs and post-filtering drops all of them,
-    returning 0 results even though an active matching doc exists in the corpus!"""
+    only receives user_filters and doesn't push down meta.* anyway). When more superseded docs than
+    the candidate pool hold have matching vectors, the pool fills with superseded docs and
+    post-filtering drops all of them, returning 0 results even though an active matching doc
+    exists in the corpus!"""
     svc = _make_service(tmp_path)
+    pool = 3
+    calls = _small_candidate_pool(svc, monkeypatch, pool)
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
 
-    # Create 55 superseded docs and 1 active doc, all matching "target_keyword"
-    for i in range(55):
+    # More superseded docs than the pool, and 1 active doc, all matching "target_keyword"
+    for i in range(pool + 2):
         (docs_dir / f"old_{i:02d}.md").write_text(
             f"---\nstatus: superseded\n---\n\nSuperseded note {i} with target_keyword in body.\n",
             encoding="utf-8",
@@ -111,11 +139,11 @@ def test_f_retr_02_superseded_chunks_starve_active_results_without_qdrant_pushdo
     )
 
     svc.index(str(docs_dir), "notes")
-    # In vector mode with default top_k=5 (fetch_k=50), Qdrant returns 50 points without filtering
-    # metadata.status == "active", and Python post-filtering drops all 50 superseded hits!
-    hits = svc.search("target_keyword", "notes", top_k=5, mode="vector")
+    hits = svc.search("target_keyword", "notes", top_k=2, mode="vector")
     assert len(hits) == 1
     assert "active_doc.md" in hits[0].source_id
+    # the status filter reached Qdrant instead of being applied to a full pool
+    assert calls and all(flt is not None and k <= pool for k, flt in calls)
 
 
 def test_f_retr_03_rank_weight_ignored_in_vector_and_bm25_modes(tmp_path: Path):
@@ -185,14 +213,19 @@ def test_f_retr_05_related_returns_superseded_and_expired_chunks(tmp_path: Path)
     assert neighbours == []
 
 
-def test_f_retr_02_explicit_meta_filter_pushed_to_qdrant_not_starved_at_400(tmp_path: Path):
+def test_f_retr_02_explicit_meta_filter_pushed_to_qdrant_not_starved_by_the_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """F-RETR-02b: Explicit `meta.<key>=<value>` filters must be pushed down to Qdrant so
-    that > 400 non-matching chunks do not starve matching chunks in vector mode."""
+    that more non-matching chunks than the candidate pool holds do not starve matching
+    chunks in vector mode."""
     svc = _make_service(tmp_path)
+    pool = 3
+    calls = _small_candidate_pool(svc, monkeypatch, pool)
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
 
-    for i in range(410):
+    for i in range(pool + 3):
         (docs_dir / f"other_{i:03d}.md").write_text(
             f"---\nproject: beta\n---\n\nBeta note {i} with target_keyword in body.\n",
             encoding="utf-8",
@@ -206,12 +239,15 @@ def test_f_retr_02_explicit_meta_filter_pushed_to_qdrant_not_starved_at_400(tmp_
     hits = svc.search(
         "target_keyword",
         "notes",
-        top_k=5,
+        top_k=2,
         mode="vector",
         filters=["meta.project=alpha"],
     )
     assert len(hits) == 1
     assert "alpha_target.md" in hits[0].source_id
+    # pushed down: a filter went to Qdrant and the fetch was not widened to
+    # compensate for evaluating it in Python afterwards
+    assert calls and all(flt is not None and k <= pool for k, flt in calls)
 
 
 def test_f_retr_03_recency_decay_applied_in_vector_and_bm25_modes(tmp_path: Path):
