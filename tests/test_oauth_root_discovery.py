@@ -358,7 +358,7 @@ def test_unlock_page_names_the_client_and_its_scopes(oauth_client):
     r = oauth_client.get(f"/oauth/unlock?next=/authorize?client_id={cid}%26scope=read%20propose")
     assert r.status_code == 200
     assert "Connect Claude to vecgrep" in r.text
-    assert "Search and read" in r.text and "Propose changes" in r.text
+    assert "<b>Search and read</b>" in r.text and "<b>Save and edit notes</b>" in r.text
     assert "<script" not in r.text
     # Unknown clients cannot produce a consent form.
     r = oauth_client.get("/oauth/unlock?next=/authorize?client_id=nope")
@@ -420,7 +420,7 @@ def test_unlock_and_issuance_both_default_omitted_scope_to_read(oauth_client):
     cid = reg.json()["client_id"]
     page = oauth_client.get(f"/oauth/unlock?next=/authorize?client_id={cid}")
     assert "Search and read" in page.text
-    assert "Propose changes" not in page.text
+    assert "<b>Save and edit notes</b>" not in page.text
 
 
 @pytest.mark.parametrize(
