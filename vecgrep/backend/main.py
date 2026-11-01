@@ -275,7 +275,7 @@ def create_app() -> FastAPI:
 
         _SCOPE_COPY = {
             "read": ("Search and read", "your indexed corpora"),
-            "propose": ("Propose changes", "every write still waits for your confirmation"),
+            "propose": ("Save and edit notes", "write to enabled corpora; deletion proposals still require confirmation"),
         }
 
         def _unlock_form(
@@ -355,6 +355,13 @@ def create_app() -> FastAPI:
                 controls = """<label for="token">Owner approval code</label>
 <input id="token" name="token" type="password" autocomplete="current-password" placeholder="••••••••" required autofocus>
 <button type="submit">Approve &amp; continue</button>"""
+            if raw_service == "vecgrep" and ctx.get("scopes") == ["read"]:
+                # Some clients always request read, including during reauth.
+                # Only this separate owner action may expand that request.
+                controls += ('<button type="submit" class="secondary" name="access" value="read-write">'
+                             'Also allow saving and editing</button>'
+                             '<p class="sub">Save and edit notes in enabled corpora. '
+                             'Deletion proposals still require confirmation.</p>')
             redirect_uri = ctx.get("redirect_uri", "")
             callback_origin = oauth_callback_origin("/authorize?" + urlencode({"redirect_uri": redirect_uri}))
             form_action = "'self'" + (f" {callback_origin}" if callback_origin else "")
@@ -536,6 +543,9 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
             if content_type != "application/x-www-form-urlencoded" or len(body) > 8192:
                 raise invalid_request()
             fields = {key: [value] for key, value in unique_form(body).items()}
+            access = (fields.get("access") or ["requested"])[0]
+            if access not in {"requested", "read-write"}:
+                raise invalid_request()
             # .strip(): the owner pastes this from a terminal (grep output,
             # a copied env line), and that copy near-universally carries a
             # trailing newline or trailing space. `expected` was already
@@ -615,6 +625,12 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
                     nonce=request.cookies.get(CONSENT_COOKIE, ""),
                     tailnet_login=tailnet_login,
                 )
+            if access == "read-write":
+                if ctx.get("service") != "vecgrep" or ctx.get("scopes") != ["read"]:
+                    raise invalid_request()
+                from .auth.scopes import approve_write_request
+                from ..mcp.server import _shared_provider
+                next_target = await approve_write_request(next_target, _shared_provider())
             # Finish the form navigation on our origin. Otherwise browsers
             # apply its form-action policy to the client's callback redirects.
             from urllib.parse import urlencode

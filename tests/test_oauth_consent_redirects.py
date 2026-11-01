@@ -70,6 +70,53 @@ def approve(client, request: str):
     )
 
 
+def test_owner_can_explicitly_add_write_access_to_a_read_only_client(client) -> None:
+    cid = register(client, ["https://client.example/callback"])
+    request = target(cid)
+    response, fields = page(client, request)
+    assert 'name="access" value="read-write"' in response.text
+    assert "Save and edit notes" in response.text
+    approved = client.post("/oauth/unlock", data={
+        **fields, "token": APPROVAL, "access": "read-write",
+    }, follow_redirects=False)
+    assert approved.status_code == 303
+    expanded = parse_qs(urlsplit(approved.headers["location"]).query)["next"][0]
+    params = parse_qs(urlsplit(expanded).query)
+    assert params["scope"] == ["read propose"]
+    original = parse_qs(urlsplit(request).query)
+    assert {k: v for k, v in params.items() if k != "scope"} == {
+        k: v for k, v in original.items() if k != "scope"
+    }
+    authorized = client.get(expanded, follow_redirects=False)
+    assert authorized.status_code == 302
+    code = parse_qs(urlsplit(authorized.headers["location"]).query)["code"][0]
+    token = client.post("/token", data={
+        "grant_type": "authorization_code", "client_id": cid,
+        "code": code, "code_verifier": "v" * 64,
+    })
+    assert token.status_code == 200, token.text
+    assert token.json()["scope"] == "read"
+    assert token.json()["scope"] == "read propose"
+    refreshed = client.post("/token", data={
+        "grant_type": "refresh_token", "client_id": cid,
+        "refresh_token": token.json()["refresh_token"],
+    })
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json()["scope"] == "read propose"
+
+
+def test_write_choice_without_owner_approval_does_not_expand_registration(client) -> None:
+    cid = register(client, ["https://client.example/callback"])
+    request = target(cid)
+    _, fields = page(client, request)
+    denied = client.post("/oauth/unlock", data={
+        **fields, "token": "incorrect", "access": "read-write",
+    }, follow_redirects=False)
+    assert denied.status_code == 401
+    from vecgrep.mcp.server import _shared_provider
+    assert _shared_provider().store.get_client(cid).scope == "read"
+
+
 @pytest.mark.parametrize(
     "redirect",
     [
