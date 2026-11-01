@@ -40,6 +40,7 @@ FRONTMATTER_FIELDS = (
     "id", "title", "status", "created_at", "origin", "confirmed_by",
     "confirmed_at", "edited_at", "tier", "corpus", "source_kind", "tags",
     "merged_from", "expires_at", "until",
+    "retired_at", "retired_reason", "superseded_by",
 )
 
 

@@ -16,6 +16,14 @@ patch = fixes). The version is a single source of truth in
   hits report `expires_in`. `vecgrep temp sweep`, and every temp write, delete
   expired documents from that corpus only. The direct-write corpus cannot be
   the temp corpus.
+- Retire for stale documents. The MCP `retire` tool sets `status: retired` on a
+  document in the direct-write corpus, with a required reason and an optional
+  `superseded_by`. Search hides it at once, and `unretire` restores it. Retire
+  needs no confirm, refuses protected documents and counts against the hourly
+  direct-write cap; unretire is never capped. A document retired for longer
+  than `VECGREP_RETIRE_RETENTION_DAYS` (default 30) is removed from the index
+  by `vecgrep retired sweep` or the next retire, and its file is renamed to a
+  `.bak`.
 
 ### Fixed
 - Tailscale Serve identity still counts after uvicorn rewrites the loopback peer to the forwarded address.

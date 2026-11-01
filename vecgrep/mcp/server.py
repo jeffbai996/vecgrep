@@ -95,8 +95,8 @@ def _require_mcp() -> None:
 def _tool_annotations(name: str) -> Any:
     from mcp.types import ToolAnnotations
 
-    writes = {"write", "edit", "write_temp", "renew_temp", "propose_write",
-              "propose_edit", "propose_delete", "propose_merge"}
+    writes = {"write", "edit", "write_temp", "renew_temp", "retire", "unretire",
+              "propose_write", "propose_edit", "propose_delete", "propose_merge"}
     return ToolAnnotations(
         readOnlyHint=name not in writes,
         destructiveHint=name == "edit",
@@ -1473,6 +1473,143 @@ def _atomic_write_private(path, text: str) -> None:
             pass
 
 
+# ── Retire: stale docs leave search, no confirm, reversible ─────────────────
+# Same single corpus and guards as direct edit. Retiring changes frontmatter
+# only, so search drops the doc while the body stays; see
+# backend/write/retire.py for the retention sweep.
+def _retire_preflight() -> tuple[str | None, str | None]:
+    """(corpus, None) when retire may run, else (None, error JSON)."""
+    denied = _require_remote_scope("propose")
+    if denied:
+        return None, denied
+    corpus = _direct_write_corpus()
+    if not corpus:
+        return None, json.dumps({"error": (
+            "retire is not enabled. An operator enables it, with direct write "
+            "and edit, for one corpus with VECGREP_DIRECT_WRITE_CORPUS=<corpus>. "
+            "Use propose_delete instead.")})
+    conflict = _temp_corpus_conflict(corpus)
+    if conflict:
+        return None, conflict
+    from ..backend.write.confirm import _writethrough_cmd
+    if _writethrough_cmd(corpus) is not None:
+        return None, json.dumps({"error": (
+            f"corpus {corpus!r} has a write-through configured, so its docs are "
+            f"retired in the upstream store. Use propose_delete.")})
+    return corpus, None
+
+
+def _load_direct_doc(svc, corpus: str, doc_id: str):
+    """(target, text, meta) for a non-protected doc in the direct-write corpus,
+    or an error JSON string. Call with the corpus write lock held."""
+    import errno
+
+    from ..backend.ingestion.adapters.base import AdapterError
+    from ..backend.ingestion.adapters.markdown import parse_frontmatter
+
+    svc._recover_corpus_locked(corpus)
+    try:
+        target = _direct_edit_target(_write_dir(corpus), doc_id)
+        text = _read_nofollow(target)
+    except (OSError, ValueError) as exc:
+        reason = "not found" if getattr(exc, "errno", None) == errno.ENOENT else str(exc)
+        return json.dumps({"error": (
+            f"doc {doc_id!r} is not a file in corpus {corpus!r}: {reason}. "
+            f"(Nothing was changed.)")})
+    try:
+        meta = dict(parse_frontmatter(text) or {})
+    except AdapterError as exc:
+        return json.dumps({"error": f"invalid frontmatter: {exc}"})
+    if meta.get("tier") == "protected":
+        return json.dumps({"error": (
+            f"{doc_id} is tier: protected, which only a human may change.")})
+    return target, text, meta
+
+
+def _save_direct_doc(svc, corpus: str, target, doc_id: str, text: str,
+                     meta: dict) -> str:
+    """Rewrite the doc's frontmatter, keep its body, re-index. Returns a note
+    for the response when the index could not be refreshed."""
+    from ..backend.write import proposal as _P
+
+    _atomic_write_private(target, _P.render_doc(doc_id, _P._body_of(text), meta))
+    try:
+        svc.index(str(target), corpus)
+    except Exception as e:  # noqa: BLE001 - the file on disk is the truth
+        return f" (index not refreshed: {e}; `vecgrep index` will reconcile)"
+    return ""
+
+
+def _run_retire(doc_id: str, reason: str | None,
+                superseded_by: str | None = None) -> str:
+    """RETIRE a doc in the direct-write corpus: search stops returning it, the
+    file stays, and unretire undoes it until the retention sweep purges it."""
+    from ..backend.write import retire as _R
+    from ..backend.write.proposal import ProposalError
+
+    corpus, refused = _retire_preflight()
+    if refused:
+        return refused
+    assert corpus is not None
+    svc = _svc()
+    swept = _R.sweep_retired(svc, _write_dir(corpus))
+    with svc.locks.write(corpus):
+        loaded = _load_direct_doc(svc, corpus, doc_id)
+        if isinstance(loaded, str):
+            return loaded
+        target, text, meta = loaded
+        if meta.get("status") == _R.RETIRED:
+            return json.dumps({
+                "retired": True, "doc_id": doc_id, "corpus": corpus,
+                "retired_at": meta.get("retired_at"), "swept": len(swept),
+                "status": "already retired; nothing changed",
+            })
+        if not _direct_write_rate_ok(target.parent):
+            return json.dumps({"error": (
+                f"rate cap reached ({_direct_write_max_per_hour()} direct writes/hour "
+                f"into {corpus!r}). Nothing was retired. Raise it with "
+                f"VECGREP_DIRECT_WRITE_MAX_PER_HOUR.")})
+        try:
+            new_meta = _R.retire_meta(meta, reason, superseded_by)
+        except ProposalError as e:
+            return json.dumps({"error": str(e)})
+        note = _save_direct_doc(svc, corpus, target, doc_id, text, new_meta)
+    at = _R.retired_at_of(new_meta)
+    assert at is not None
+    return json.dumps({
+        "retired": True, "doc_id": doc_id, "corpus": corpus,
+        "retired_at": new_meta["retired_at"],
+        "purge_after": (at + _R.retention()).isoformat(timespec="seconds"),
+        "swept": len(swept),
+        "status": f"retired; search no longer returns it{note}",
+    })
+
+
+def _run_unretire(doc_id: str) -> str:
+    """Return a retired doc to search. Not rate-capped: an undo must always
+    be available."""
+    from ..backend.write import retire as _R
+
+    corpus, refused = _retire_preflight()
+    if refused:
+        return refused
+    assert corpus is not None
+    svc = _svc()
+    with svc.locks.write(corpus):
+        loaded = _load_direct_doc(svc, corpus, doc_id)
+        if isinstance(loaded, str):
+            return loaded
+        target, text, meta = loaded
+        if meta.get("status") != _R.RETIRED:
+            return json.dumps({"error": f"{doc_id} is not retired. (Nothing was changed.)"})
+        note = _save_direct_doc(svc, corpus, target, doc_id, text,
+                                _R.unretire_meta(meta))
+    return json.dumps({
+        "unretired": True, "doc_id": doc_id, "corpus": corpus,
+        "status": f"active; search returns it again{note}",
+    })
+
+
 def _fire_propose_hook(pr) -> None:
     """Optionally notify an external command that a proposal was created.
 
@@ -1908,6 +2045,42 @@ def build_mcp_server() -> Any:
                 },
             ),
             Tool(
+                name="retire",
+                description=(
+                    "RETIRE an entry that is out of date, with no human confirm. "
+                    "Same single operator-designated corpus as `write` and `edit`. "
+                    "Search stops returning it at once; the file stays, and "
+                    "`unretire` brings it back. After the retention period "
+                    "(default 30 days) it leaves the index and its file is kept "
+                    "as a backup. `reason` is required: say what made it stale. "
+                    "`superseded_by` optionally names the entry that replaces it. "
+                    "Use it for stale, retracted or duplicated entries; use "
+                    "propose_delete when content must be removed now."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "doc_id": {"type": "string"},
+                        "reason": {"type": "string"},
+                        "superseded_by": {"type": "string"},
+                    },
+                    "required": ["doc_id", "reason"],
+                },
+            ),
+            Tool(
+                name="unretire",
+                description=(
+                    "Return a retired entry to search. Clears the retirement "
+                    "and keeps the body. Works until the retention sweep "
+                    "removes it."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {"doc_id": {"type": "string"}},
+                    "required": ["doc_id"],
+                },
+            ),
+            Tool(
                 name="propose_write",
                 description=(
                     "PROPOSE a new entry for a corpus. Writes NOTHING — "
@@ -2056,6 +2229,13 @@ def build_mcp_server() -> Any:
                     args.get("doc_id", ""), content=args.get("content"),
                     old_str=args.get("old_str"), new_str=args.get("new_str"),
                 )
+            elif name == "retire":
+                text = _run_retire(
+                    args.get("doc_id", ""), args.get("reason"),
+                    superseded_by=args.get("superseded_by"),
+                )
+            elif name == "unretire":
+                text = _run_unretire(args.get("doc_id", ""))
             elif name == "propose_write":
                 text = _run_propose(
                     args.get("corpus") or DEFAULT_PROPOSE_CORPUS,
@@ -3324,6 +3504,34 @@ def build_http_app(
         overwrite) or old_str+new_str (surgical patch), not both."""
         return _run_direct_edit(doc_id, content=content,
                                 old_str=old_str, new_str=new_str)
+
+    @fmcp.tool(
+        description=(
+            "RETIRE an entry that is out of date, with no human confirm. "
+            "Same single operator-designated corpus as `write` and `edit`. "
+            "Search stops returning it at once; the file stays, and "
+            "`unretire` brings it back. After the retention period "
+            "(default 30 days) it leaves the index and its file is kept "
+            "as a backup. `reason` is required: say what made it stale. "
+            "`superseded_by` optionally names the entry that replaces it. "
+            "Use it for stale, retracted or duplicated entries; use "
+            "propose_delete when content must be removed now."
+        )
+    )
+    def retire(doc_id: str, reason: str, superseded_by: str | None = None) -> str:
+        """doc_id: the entry's id. reason: what made it stale, one line.
+        superseded_by: optional id of the entry that replaces it."""
+        return _run_retire(doc_id, reason, superseded_by=superseded_by)
+
+    @fmcp.tool(
+        description=(
+            "Return a retired entry to search. Clears the retirement and keeps "
+            "the body. Works until the retention sweep removes it."
+        )
+    )
+    def unretire(doc_id: str) -> str:
+        """doc_id: the retired entry's id."""
+        return _run_unretire(doc_id)
 
     @fmcp.tool(
         description=(

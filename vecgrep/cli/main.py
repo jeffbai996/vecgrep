@@ -1390,6 +1390,29 @@ def temp_sweep() -> None:
 
 
 @cli.group()
+def retired() -> None:
+    """Manage retired docs in the direct-write corpus."""
+
+
+@retired.command("sweep")
+def retired_sweep() -> None:
+    """Purge docs retired longer than VECGREP_RETIRE_RETENTION_DAYS (default 30).
+
+    Search already hides retired docs; this removes them from the index and
+    keeps each file as a .bak. Touches only VECGREP_DIRECT_WRITE_CORPUS."""
+    from ..backend.service import VecgrepService
+    from ..backend.write.retire import retire_corpus, sweep_retired
+
+    corpus = retire_corpus()
+    if not corpus:
+        click.echo("retire is not enabled (set VECGREP_DIRECT_WRITE_CORPUS).")
+        return
+    svc = VecgrepService()
+    removed = sweep_retired(svc, get_settings().home / "write" / corpus)
+    click.echo(f"swept {len(removed)} retired doc(s) from {corpus}")
+
+
+@cli.group()
 def cache() -> None:
     """Inspect and manage the embedding cache."""
 

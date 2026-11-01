@@ -40,6 +40,8 @@ def test_build_mcp_server_registers_tools() -> None:
         "write", "edit",
         # temp corpus: expiring direct writes, inert unless VECGREP_TEMP_CORPUS
         "write_temp", "renew_temp",
+        # retire: stale docs leave search, same corpus as direct write
+        "retire", "unretire",
     }
     search = next(t for t in result.root.tools if t.name == "search")
     assert search.inputSchema["properties"]["corpora"]["minItems"] == 1
