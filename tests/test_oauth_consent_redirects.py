@@ -95,7 +95,6 @@ def test_owner_can_explicitly_add_write_access_to_a_read_only_client(client) -> 
         "code": code, "code_verifier": "v" * 64,
     })
     assert token.status_code == 200, token.text
-    assert token.json()["scope"] == "read"
     assert token.json()["scope"] == "read propose"
     refreshed = client.post("/token", data={
         "grant_type": "refresh_token", "client_id": cid,
