@@ -408,7 +408,7 @@ def test_unlock_page_names_target_sibling_service_from_resource_query(oauth_clie
 
 
 
-def test_unlock_and_issuance_both_default_omitted_scope_to_read(oauth_client):
+def test_omitted_scope_reads_by_default_and_full_access_needs_the_approve_button(oauth_client):
     reg = oauth_client.post("/register", json={
         "client_name": "Example client",
         "redirect_uris": ["https://example.test/callback"],
@@ -418,9 +418,26 @@ def test_unlock_and_issuance_both_default_omitted_scope_to_read(oauth_client):
         "scope": "read propose",
     })
     cid = reg.json()["client_id"]
-    page = oauth_client.get(f"/oauth/unlock?next=/authorize?client_id={cid}")
+    request = f"/authorize?client_id={cid}"
+    page = oauth_client.get("/oauth/unlock", params={"next": request})
     assert "Search and read" in page.text
-    assert "<b>Save and edit notes</b>" not in page.text
+    # The one approve button asks for full access; the page must say so.
+    assert "<b>Save and edit notes</b>" in page.text
+    assert page.text.count('<button type="submit"') == 1
+    assert '<button type="submit" name="access" value="read-write">' in page.text
+    fields = FormFields(page.text).values
+
+    def approved_next(extra: dict[str, str]) -> str:
+        response = oauth_client.post("/oauth/unlock", data={
+            **fields, "token": TEST_APPROVAL, **extra,
+        }, follow_redirects=False)
+        assert response.status_code == 303, response.text
+        return parse_qs(urlsplit(response.headers["location"]).query)["next"][0]
+
+    # An approval that does not carry the button's access choice stays read-only.
+    assert "scope" not in parse_qs(urlsplit(approved_next({})).query)
+    expanded = parse_qs(urlsplit(approved_next({"access": "read-write"})).query)
+    assert expanded["scope"] == ["read propose"]
 
 
 @pytest.mark.parametrize(
