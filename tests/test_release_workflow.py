@@ -26,8 +26,12 @@ def test_release_workflow_contract() -> None:
     assert workflow.count("persist-credentials: false") == checkout_count
 
     # Event and publish contract.
-    assert 'branches:\n      - "**"' in workflow
-    assert 'tags:\n      - "v*"' in workflow
+    # Branch pushes build main only; every other branch builds through its pull
+    # request. Tags stay unfiltered and are never skipped by the docs check.
+    assert 'branches:\n      - main\n    tags:\n      - "v*"' in workflow
+    assert '"**"' not in workflow
+    assert "paths-ignore" not in workflow and "paths:" not in workflow
+    assert "needs: changes\n    if: needs.changes.outputs.build == 'true'" in workflow
     assert "workflow_dispatch:" in workflow
     assert "required: true" in workflow
     assert (
@@ -41,6 +45,7 @@ def test_release_workflow_contract() -> None:
     install = re.search(r'pip install -e "\.\[([^]]+)\]" build', workflow)
     assert install is not None
     assert {"dev", "mcp", "visual", "code"} <= set(install.group(1).split(","))
+    assert "cache: pip\n          cache-dependency-path: pyproject.toml" in workflow
     assert "python -m pytest tests" in workflow
     assert "python -m venv /tmp/vecgrep-smoke" in workflow
     assert "/tmp/vecgrep-smoke/bin/pip install dist/*.whl\n" in workflow
