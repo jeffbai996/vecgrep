@@ -89,7 +89,7 @@ def test_correct_code_below_the_limit_redirects_through_approved_continuation(pu
     assert continuation.headers["cache-control"] == "no-store"
     assert continuation.headers["referrer-policy"] == "no-referrer"
     assert continuation.headers["content-security-policy"] == (
-        "default-src 'none'; form-action 'none'; "
+        "default-src 'none'; style-src 'unsafe-inline'; font-src data:; form-action 'none'; "
         "base-uri 'none'; frame-ancestors 'none'"
     )
 

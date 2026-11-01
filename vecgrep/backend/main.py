@@ -4,6 +4,8 @@ the optional `mcp` extra is installed.
 """
 from __future__ import annotations
 
+from .oauth_ui import theme_css, render_navigation
+
 import contextlib
 import hmac
 import html
@@ -445,7 +447,7 @@ footer {{ margin: 16px 4px 0; display: flex; justify-content: space-between; fon
 .brand span:last-child {{ overflow-wrap: anywhere; text-transform: none; letter-spacing: 0; }}
 h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16px; }}
 @media(max-width:440px) {{ body {{ padding:20px 16px; }} .card {{ padding:24px 20px; }} footer {{ gap:12px; flex-wrap:wrap; }} }}
-</style>
+</style><style>{theme_css()}</style>
 <body>
 <main>
 <div class="brand">
@@ -467,7 +469,7 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
                 headers={
                     "Cache-Control": "no-store",
                     "Content-Security-Policy": (
-                        "default-src 'none'; style-src 'unsafe-inline'; "
+                        "default-src 'none'; style-src 'unsafe-inline'; font-src data:; "
                         f"form-action {form_action}; base-uri 'none'; "
                         "frame-ancestors 'none'"
                     ),
@@ -657,7 +659,7 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
                 "Cache-Control": "no-store",
                 "Referrer-Policy": "no-referrer",
                 "Content-Security-Policy": (
-                    "default-src 'none'; form-action 'none'; "
+                    "default-src 'none'; style-src 'unsafe-inline'; font-src data:; form-action 'none'; "
                     "base-uri 'none'; frame-ancestors 'none'"
                 ),
                 "X-Content-Type-Options": "nosniff",
@@ -675,14 +677,8 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
             if not check_consent(secret, resolved_target, ctx["redirect_uri"],
                                  request.cookies.get(REQUEST_COOKIE, "")):
                 raise invalid_request()
-            target = html.escape(resolved_target, quote=True)
             return HTMLResponse(
-                '<!doctype html><html lang="en"><head><meta charset="utf-8">'
-                '<title>Continue connection</title>'
-                f'<meta http-equiv="refresh" content="0;url={target}">'
-                '</head><body>'
-                f'<a href="{target}">Continue connection</a>'
-                '</body></html>',
+                render_navigation(resolved_target),
                 headers=headers,
             )
 

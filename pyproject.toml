@@ -78,7 +78,7 @@ include = ["vecgrep*"]
 exclude = ["vecgrep.frontend*"]
 
 [tool.setuptools.package-data]
-vecgrep = ["frontend/dist/**/*"]
+vecgrep = ["frontend/dist/**/*", "backend/oauth_fonts/*.woff2"]
 
 [tool.ruff]
 required-version = ">=0.17.3,<0.18"
