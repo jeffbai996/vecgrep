@@ -181,6 +181,9 @@ def test_ephemeral_store_keeps_all_corpora_without_persistence():
         )
 
     assert list(store._cache) == ["one", "two"]
+    # an in-memory store has no budget to evict by
+    assert store.max_cached_bytes is None
+    assert store.max_cached_corpora is None
 
 
 def test_short_query_requires_full_coverage(monkeypatch: pytest.MonkeyPatch):

@@ -223,14 +223,6 @@ def test_env_cache_cap_overrides_config_json(vg_home, monkeypatch):
     assert _service_cap(vg_home, monkeypatch, {"embed_cache_max_rows": 1_234_567}) == 42
 
 
-def test_cap_disabled_when_nonpositive(tmp_path, monkeypatch):
-    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "0")
-    cache = EmbedCache(tmp_path / "embed.db")
-    texts = [f"t{i}" for i in range(20)]
-    cache.put_many("id", texts, [[float(i + 1)] for i in range(20)])
-    assert sum(cache.stats().values()) == 20
-
-
 # ─────────── concurrency (added 2026-08-07, after a live failure) ───────────
 # The cache file is shared by every vecgrep process on a host: the serve
 # daemon, the watchers, and any one-shot reindex. When get_many started
@@ -419,28 +411,23 @@ def _vecs(n: int) -> tuple[list[str], list[list[float]]]:
     return [f"t{i}" for i in range(n)], [[1.0, 0.0, 0.0, 0.0]] * n
 
 
-def test_cap_warning_fires_near_cap(tmp_path, caplog, monkeypatch):
+@pytest.mark.parametrize("cap, rows, warns", [
+    pytest.param(10, 9, True, id="near-cap-warns"),        # 90% of the cap
+    pytest.param(10, 8, False, id="below-threshold-silent"),
+    pytest.param(0, 50, False, id="cap-disabled-silent"),  # 0 means no cap, so no eviction either
+])
+def test_cap_warning_follows_headroom(tmp_path, caplog, monkeypatch, cap, rows, warns):
     import logging
 
-    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "10")
+    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", str(cap))
     cache = EmbedCache(tmp_path / "embed.db")
-    texts, vecs = _vecs(9)  # 90% of cap
+    texts, vecs = _vecs(rows)
     with caplog.at_level(logging.WARNING, logger="vecgrep.backend.embed.cache"):
         cache.put_many("id", texts, vecs)
-    assert "VECGREP_EMBED_CACHE_MAX_ROWS" in caplog.text, (
+    assert cache.stats() == {"id": rows}
+    assert ("VECGREP_EMBED_CACHE_MAX_ROWS" in caplog.text) is warns, (
         "operator must be told which knob to raise before the cap binds"
     )
-
-
-def test_cap_warning_silent_below_threshold(tmp_path, caplog, monkeypatch):
-    import logging
-
-    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "10")
-    cache = EmbedCache(tmp_path / "embed.db")
-    texts, vecs = _vecs(8)  # below the 90% line
-    with caplog.at_level(logging.WARNING, logger="vecgrep.backend.embed.cache"):
-        cache.put_many("id", texts, vecs)
-    assert "VECGREP_EMBED_CACHE_MAX_ROWS" not in caplog.text
 
 
 def test_cap_warning_fires_once_not_per_put(tmp_path, caplog, monkeypatch):
@@ -468,17 +455,6 @@ def test_eviction_is_logged_when_cap_binds(tmp_path, caplog, monkeypatch):
     assert any("evict" in r.message.lower() for r in caplog.records), (
         "the cap binding is the documented danger state; it must be visible"
     )
-
-
-def test_cap_disabled_stays_silent(tmp_path, caplog, monkeypatch):
-    import logging
-
-    monkeypatch.setenv("VECGREP_EMBED_CACHE_MAX_ROWS", "0")
-    cache = EmbedCache(tmp_path / "embed.db")
-    texts, vecs = _vecs(50)
-    with caplog.at_level(logging.WARNING, logger="vecgrep.backend.embed.cache"):
-        cache.put_many("id", texts, vecs)
-    assert "VECGREP_EMBED_CACHE_MAX_ROWS" not in caplog.text
 
 
 # ── sweep delete-fraction guard ─────────────────────────────────────────────

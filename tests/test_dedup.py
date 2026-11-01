@@ -6,6 +6,8 @@ keeping the higher-scoring one.
 """
 from __future__ import annotations
 
+import pytest
+
 from vecgrep.backend.service import SearchResult, _dedup_overlapping
 
 
@@ -36,37 +38,19 @@ def test_overlapping_same_source_collapses_keeping_higher_score() -> None:
     assert kept[0].score == 0.9  # higher-scoring of the pair survives
 
 
-def test_non_overlapping_same_source_both_kept() -> None:
-    results = [
-        _hit("a.md", 0, 100, 0.8),
-        _hit("a.md", 200, 300, 0.7),  # no overlap
-    ]
-    assert len(_dedup_overlapping(results)) == 2
-
-
-def test_different_sources_never_collide() -> None:
-    results = [
-        _hit("a.md", 0, 100, 0.8),
-        _hit("b.md", 0, 100, 0.7),  # identical span, different source
-    ]
-    assert len(_dedup_overlapping(results)) == 2
-
-
-def test_different_corpus_same_span_kept() -> None:
-    results = [
-        _hit("a.md", 0, 100, 0.8, corpus="c1"),
-        _hit("a.md", 0, 100, 0.7, corpus="c2"),
-    ]
-    assert len(_dedup_overlapping(results)) == 2
-
-
-def test_minor_overlap_below_threshold_kept() -> None:
-    # 10-char overlap on 100-char chunks = 10% < 50% threshold -> both kept.
-    results = [
-        _hit("a.md", 0, 100, 0.8),
-        _hit("a.md", 90, 190, 0.7),
-    ]
-    assert len(_dedup_overlapping(results)) == 2
+@pytest.mark.parametrize("hits", [
+    pytest.param([_hit("a.md", 0, 100, 0.8), _hit("a.md", 200, 300, 0.7)],
+                 id="same-source-no-overlap"),
+    pytest.param([_hit("a.md", 0, 100, 0.8), _hit("b.md", 0, 100, 0.7)],
+                 id="different-sources-identical-span"),
+    pytest.param([_hit("a.md", 0, 100, 0.8, corpus="c1"), _hit("a.md", 0, 100, 0.7, corpus="c2")],
+                 id="different-corpus-same-span"),
+    # 10-char overlap on 100-char chunks = 10% < 50% threshold.
+    pytest.param([_hit("a.md", 0, 100, 0.8), _hit("a.md", 90, 190, 0.7)],
+                 id="minor-overlap-below-threshold"),
+])
+def test_distinct_hits_are_both_kept(hits) -> None:
+    assert len(_dedup_overlapping(hits)) == 2
 
 
 def test_search_dedups_overlapping_windows(svc, make_doc) -> None:

@@ -18,7 +18,7 @@ from vecgrep.backend.assembly import (
     mmr_select,
     pair_similarity,
 )
-from vecgrep.backend.service import SearchResult, _dedup_overlapping
+from vecgrep.backend.service import SearchResult
 
 ALERT = (
     "ALERT: pipeline health check failed. ERR-9999 on every request. "
@@ -122,15 +122,6 @@ def test_dedup_keeps_cross_source_clones() -> None:
         _hit("b.md", 0, 130, 0.8, chunk=ALERT),
     ]
     assert len(dedup_near_duplicates(results)) == 2
-
-
-def test_legacy_dedup_overlapping_alias_still_works() -> None:
-    # Backcompat: service._dedup_overlapping remains importable + functional.
-    results = [
-        _hit("a.md", 0, 100, 0.4),
-        _hit("a.md", 50, 150, 0.9),
-    ]
-    assert len(_dedup_overlapping(results)) == 1
 
 
 # ── mmr_select (diversity-aware selection) ───────────────────────────────────
