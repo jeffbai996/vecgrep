@@ -887,7 +887,11 @@ def _run_propose(corpus: str, content: str | None, edit_id: str | None = None,
     except _P.ProposalError as e:
         return json.dumps({"error": str(e)})
     _pending_store().put(pr)
+    from ..backend.write.change_diff import change_diff
+    previous = body if is_patch else (_doc_body(corpus, edit_id) or "") if edit_id else ""
     result = {
+        **change_diff(previous, content),
+        "line_number_scope": "body",
         "proposal_id": pr.proposal_id, "doc_id": pr.doc_id,
         "is_edit": pr.is_edit, "corpus": corpus,
         "status": "pending — a human must run `vecgrep confirm "
@@ -1269,7 +1273,7 @@ def _run_temp_renew(doc_id: str, expires: str | None) -> str:
 
 def _run_direct_edit(doc_id: str, content: str | None = None,
                      old_str: str | None = None,
-                     new_str: str | None = None) -> str:
+                     new_str: str | None = None, change_summary: str | None = None) -> str:
     """EDIT an existing entry immediately, no human confirm, in the ONE corpus the
     operator designated. Counterpart to propose_edit.
 
@@ -1285,6 +1289,8 @@ def _run_direct_edit(doc_id: str, content: str | None = None,
     Deletes are deliberately absent: propose_delete stays the only route, for
     every corpus. Losing an entry should always cross a human."""
 
+    if change_summary is not None and (not isinstance(change_summary,str) or not change_summary.strip() or len(change_summary)>300 or '\n' in change_summary):
+        return json.dumps({"error":"change_summary must be one plain-language sentence up to 300 characters"})
     denied = _require_remote_scope("propose")
     if denied:
         return denied
@@ -1319,7 +1325,9 @@ def _run_direct_edit(doc_id: str, content: str | None = None,
         return json.dumps({"error": (
             "direct edit needs content (or old_str/new_str for a patch).")})
 
-    return _commit_direct_edit(corpus, doc_id, content, old_str, new_str, is_patch)
+    result=json.loads(_commit_direct_edit(corpus, doc_id, content, old_str, new_str, is_patch))
+    if result.get('committed') and change_summary:result['change_summary']=change_summary.strip()
+    return json.dumps(result)
 
 
 def _commit_direct_edit(corpus: str, doc_id: str, content: str | None,
@@ -1406,7 +1414,13 @@ def _commit_direct_edit(corpus: str, doc_id: str, content: str | None,
         except Exception as e:  # noqa: BLE001 - the file on disk is the truth
             index_note = (f" (index stale: {e}; `vecgrep index` will reconcile)")
 
+        from ..backend.write.change_diff import change_diff
         return json.dumps({
+            **change_diff(body, _P._body_of(rendered),
+                          before_offset=on_disk[:len(on_disk.rstrip("\n"))-len(body)].count("\n"),
+                          after_offset=rendered[:len(rendered.rstrip("\n"))-len(_P._body_of(rendered))].count("\n")),
+            "line_number_scope": "file",
+            "title": str(meta.get("title") or ""),
             "committed": True, "doc_id": doc_id, "corpus": corpus,
             "path": str(target), "backup": str(bak),
             "mode": "patch" if is_patch else "overwrite",
@@ -2040,6 +2054,7 @@ def build_mcp_server() -> Any:
                         "content": {"type": "string"},
                         "old_str": {"type": "string"},
                         "new_str": {"type": "string"},
+                        "change_summary": {"type":"string","maxLength":300,"description":"One short human-readable sentence explaining what changed, not an edited excerpt. Included in the edit card without another call."},
                     },
                     "required": ["doc_id"],
                 },
@@ -2227,7 +2242,7 @@ def build_mcp_server() -> Any:
             elif name == "edit":
                 text = _run_direct_edit(
                     args.get("doc_id", ""), content=args.get("content"),
-                    old_str=args.get("old_str"), new_str=args.get("new_str"),
+                    old_str=args.get("old_str"), new_str=args.get("new_str"),change_summary=args.get("change_summary"),
                 )
             elif name == "retire":
                 text = _run_retire(
@@ -3499,11 +3514,12 @@ def build_http_app(
         )
     )
     def edit(doc_id: str, content: str | None = None,
-             old_str: str | None = None, new_str: str | None = None) -> str:
+             old_str: str | None = None, new_str: str | None = None, change_summary: str | None = None) -> str:
         """doc_id: the entry's id (e.g. external-123). Either content (full
-        overwrite) or old_str+new_str (surgical patch), not both."""
+        overwrite) or old_str+new_str (surgical patch), not both. change_summary:
+        one short human-readable sentence explaining the edit, not a raw excerpt."""
         return _run_direct_edit(doc_id, content=content,
-                                old_str=old_str, new_str=new_str)
+                                old_str=old_str, new_str=new_str,change_summary=change_summary)
 
     @fmcp.tool(
         description=(

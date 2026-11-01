@@ -429,3 +429,15 @@ def test_propose_edit_patch_confirm_round_trip(home):
     assert "July 17" in body and "July 25" not in body
     # frontmatter (the id line) survived the body-only patch
     assert "id: notes-001" in body
+
+
+def test_proposed_patch_receipt_contains_surrounding_lines_without_applying(home):
+    from vecgrep.mcp import server as S
+    from click.testing import CliRunner
+    from vecgrep.cli.main import cli
+    seed=json.loads(S._run_propose('notes','Above\nOriginal\nBelow'))
+    assert CliRunner().invoke(cli,['confirm',seed['proposal_id']]).exit_code==0
+    result=json.loads(S._run_propose('notes',None,edit_id=seed['doc_id'],old_str='Original',new_str='Proposed'))
+    assert ' Above\n' in result['unified_diff'] and ' Below\n' in result['unified_diff']
+    assert '-Original\n' in result['unified_diff'] and '+Proposed\n' in result['unified_diff']
+    assert 'Original' in S._doc_body('notes',seed['doc_id'])
