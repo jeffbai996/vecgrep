@@ -249,3 +249,13 @@ def test_edit_diff_positions_match_both_real_files_including_frontmatter(home):
         if line[:1] in (' ','-'):old+=1
         if line[:1] in (' ','+'):next_+=1
     assert result['line_number_scope']=='file'
+
+
+def test_edit_can_include_its_plain_language_description_in_the_same_call(home):
+    from vecgrep.mcp import server as S
+    doc_id=_seed('Old detail')
+    result=json.loads(S._run_direct_edit(doc_id,old_str='Old detail',new_str='New detail',change_summary='Corrected the project start date.'))
+    assert result['committed'] is True
+    assert result['change_summary']=='Corrected the project start date.'
+    rejected=json.loads(S._run_direct_edit(doc_id,content='Must not be written',change_summary='x'*301))
+    assert 'error' in rejected and 'Must not be written' not in _body_on_disk(doc_id)
