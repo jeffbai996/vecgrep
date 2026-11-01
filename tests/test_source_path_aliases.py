@@ -116,24 +116,67 @@ def test_alias_detection_respects_corpus_selection(svc, tmp_path, make_doc):
     assert _alias_issues(svc, "other") == []
 
 
-@pytest.mark.parametrize("fix", [False, True])
-def test_real_cli_reports_aliases_and_refuses_a_healthy_exit(svc, tmp_path, fix):
-    _move_to_symlink(svc, tmp_path)
-    svc.store.client.close()
+def _run_in_subprocess(args):
     root = Path(__file__).resolve().parents[1]
     env = dict(os.environ, PYTHONPATH=str(root))
-    args = [sys.executable, "-m", "vecgrep.cli.main", "doctor",
-            "--corpus", "fixture", "--require-healthy"]
+    done = subprocess.run([sys.executable, "-m", "vecgrep.cli.main", *args], cwd=root,
+                          env=env, text=True, capture_output=True, timeout=30, check=False)
+    return done.returncode, done.stdout, done.stderr
+
+
+@pytest.fixture
+def run_in_process(monkeypatch):
+    """Invoke the CLI in this interpreter.
+
+    `doctor` opens a service and leaves it for process exit to close, which
+    would keep the local Qdrant folder locked for the next invocation here, so
+    close every service the command opened as soon as it returns.
+    """
+    from click.testing import CliRunner
+
+    from vecgrep.cli import main as cli_main
+
+    opened = []
+    real_service = cli_main.VecgrepService
+
+    def tracking(*args, **kwargs):
+        opened.append(real_service(*args, **kwargs))
+        return opened[-1]
+
+    monkeypatch.setattr(cli_main, "VecgrepService", tracking)
+
+    def run(args):
+        try:
+            result = CliRunner().invoke(cli_main.cli, args)
+        finally:
+            for service in opened:
+                service.store.client.close()
+            opened.clear()
+        return result.exit_code, result.stdout, result.output
+
+    return run
+
+
+# One case goes through a real interpreter so the process exit status is
+# checked end to end; the other drives the same command in-process, which is
+# several seconds cheaper and covers the exit code and output just as well.
+@pytest.mark.parametrize("fix, in_process", [
+    pytest.param(False, False, id="real-process"),
+    pytest.param(True, True, id="in-process-with-fix"),
+])
+def test_cli_reports_aliases_and_refuses_a_healthy_exit(svc, tmp_path, request, fix, in_process):
+    run = request.getfixturevalue("run_in_process") if in_process else _run_in_subprocess
+    _move_to_symlink(svc, tmp_path)
+    svc.store.client.close()
+    args = ["doctor", "--corpus", "fixture", "--require-healthy"]
     if fix:
         args.append("--fix")
-    human = subprocess.run(args, cwd=root, env=env, text=True,
-                           capture_output=True, timeout=30, check=False)
-    assert human.returncode == 1, human.stderr
-    assert "source_path_aliases" in human.stdout
-    assert "confirm canonical coverage" in human.stdout
-    assert "vecgrep index <source>" not in human.stdout
-    machine = subprocess.run([*args, "--json"], cwd=root, env=env, text=True,
-                             capture_output=True, timeout=30, check=False)
-    assert machine.returncode == 1, machine.stderr
-    report = json.loads(machine.stdout)
+    code, stdout, detail = run(args)
+    assert code == 1, detail
+    assert "source_path_aliases" in stdout
+    assert "confirm canonical coverage" in stdout
+    assert "vecgrep index <source>" not in stdout
+    code, stdout, detail = run([*args, "--json"])
+    assert code == 1, detail
+    report = json.loads(stdout)
     assert report["remaining_issues"][0]["kind"] == "source_path_aliases"
