@@ -887,7 +887,11 @@ def _run_propose(corpus: str, content: str | None, edit_id: str | None = None,
     except _P.ProposalError as e:
         return json.dumps({"error": str(e)})
     _pending_store().put(pr)
+    from ..backend.write.change_diff import change_diff
+    previous = body if is_patch else (_doc_body(corpus, edit_id) or "") if edit_id else ""
     result = {
+        **change_diff(previous, content),
+        "line_number_scope": "body",
         "proposal_id": pr.proposal_id, "doc_id": pr.doc_id,
         "is_edit": pr.is_edit, "corpus": corpus,
         "status": "pending — a human must run `vecgrep confirm "
@@ -1406,7 +1410,13 @@ def _commit_direct_edit(corpus: str, doc_id: str, content: str | None,
         except Exception as e:  # noqa: BLE001 - the file on disk is the truth
             index_note = (f" (index stale: {e}; `vecgrep index` will reconcile)")
 
+        from ..backend.write.change_diff import change_diff
         return json.dumps({
+            **change_diff(body, _P._body_of(rendered),
+                          before_offset=on_disk[:len(on_disk.rstrip("\n"))-len(body)].count("\n"),
+                          after_offset=rendered[:len(rendered.rstrip("\n"))-len(_P._body_of(rendered))].count("\n")),
+            "line_number_scope": "file",
+            "title": str(meta.get("title") or ""),
             "committed": True, "doc_id": doc_id, "corpus": corpus,
             "path": str(target), "backup": str(bak),
             "mode": "patch" if is_patch else "overwrite",

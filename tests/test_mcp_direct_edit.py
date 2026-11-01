@@ -215,3 +215,37 @@ def test_protected_doc_refused(home):
 
 def _body_on_disk(doc_id: str) -> str:
     return Path(f"{os.environ['VECGREP_HOME']}/write/external/{doc_id}.md").read_text()
+
+
+def test_edit_receipt_keeps_unchanged_context_at_the_mutation_version(home):
+    from vecgrep.mcp import server as S
+    original='\n'.join(f'Line {i}' for i in range(50))
+    doc_id=_seed(original)
+    result=json.loads(S._run_direct_edit(doc_id,old_str='Line 25',new_str='Revised line'))
+    diff=result['unified_diff']
+    assert ' Line 24\n' in diff and ' Line 26\n' in diff
+    assert '-Line 25\n' in diff and '+Revised line\n' in diff
+    assert ' Line 0\n' not in diff
+    assert result['diff_truncated'] is False
+    S._run_direct_edit(doc_id,old_str='Line 24',new_str='Later edit')
+    assert 'Later edit' not in diff
+
+
+def test_edit_diff_positions_match_both_real_files_including_frontmatter(home):
+    import re
+    from vecgrep.mcp import server as S
+    doc_id=_seed('Above\nOld detail\nBelow')
+    before=_body_on_disk(doc_id)
+    result=json.loads(S._run_direct_edit(doc_id,old_str='Old detail',new_str='New detail'))
+    after=_body_on_disk(doc_id)
+    old_line=next(i for i,line in enumerate(before.splitlines(),1) if line=='Old detail')
+    new_line=next(i for i,line in enumerate(after.splitlines(),1) if line=='New detail')
+    old=next_=0
+    for line in result['unified_diff'].splitlines():
+        match=re.match(r'@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@',line)
+        if match:old,next_=map(int,match.groups());continue
+        if line=='-Old detail':assert old==old_line
+        if line=='+New detail':assert next_==new_line
+        if line[:1] in (' ','-'):old+=1
+        if line[:1] in (' ','+'):next_+=1
+    assert result['line_number_scope']=='file'
