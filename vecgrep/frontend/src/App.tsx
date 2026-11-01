@@ -13,6 +13,7 @@ import TuningPanel from "./components/TuningPanel";
 import TimelinePanel from "./components/TimelinePanel";
 import ComparePanel from "./components/ComparePanel";
 import BrowsePanel from "./components/BrowsePanel";
+import { documentLink } from "./documentLink";
 import {
   loadTuning,
   saveTuning,
@@ -33,14 +34,17 @@ function viewFromHash(): View {
 }
 
 export default function App() {
+  const [initialDocument] = useState(() => documentLink(window.location.search));
   // The view lives in the URL hash so a tab can be linked, bookmarked and
   // reopened where you left it. It was component state only, which meant
   // /#health could not be sent to anyone or reloaded into.
-  const [view, setView] = useState<View>(viewFromHash);
+  const [view, setView] = useState<View>(() => initialDocument ? "browse" : viewFromHash());
   const [corpora, setCorpora] = useState<Corpus[]>([]);
   const [corporaLoading, setCorporaLoading] = useState(true);
   const [corporaError, setCorporaError] = useState<string | null>(null);
-  const [selectedCorpus, setSelectedCorpus] = useState<string | null>(null);
+  const [selectedCorpus, setSelectedCorpus] = useState<string | null>(
+    () => new URLSearchParams(window.location.search).get("corpus"),
+  );
   const [query, setQuery] = useState("");
   const [response, setResponse] = useState<SearchResponse | null>(null);
   const [searching, setSearching] = useState(false);
@@ -49,7 +53,7 @@ export default function App() {
     corpus: string;
     sourceId: string;
     nonce: number;
-  } | null>(null);
+  } | null>(initialDocument);
   const [tuning, setTuning] = useState<Tuning>(() => loadTuning());
   const [automaticTuning, setAutomaticTuning] = useState<Tuning>(() => ({
     ...DEFAULT_TUNING,
