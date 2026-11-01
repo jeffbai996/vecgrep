@@ -301,8 +301,8 @@ def test_score_tuning_names_its_controls_without_explaining_them() -> None:
     assert "localStorage.removeItem" in tuning
     # The panel explains itself by working: a named control, a live number and
     # the two words at each end of its track. The paragraphs that used to sit
-    # above and under the sliders are tooltips now (Jeff 2026-09-09, and the
-    # squad's no-explanatory-copy rule).
+    # above and under the sliders are tooltips now (no explanatory copy on the
+    # page).
     assert "title={slider.help}" in panel, "the help text lost its tooltip home"
     for gone in ("Search retrieval stays unchanged",
                  "How raw matches become percentages",
@@ -328,7 +328,7 @@ def test_the_app_ships_a_favicon_and_serves_it() -> None:
     """vecgrep had no icon at all — no link in the head, nothing on disk — so
     every tab showed the browser's default globe. And only /assets is mounted,
     so a file at the root falls through to the SPA catch-all and the browser
-    asking for /favicon.svg gets handed a page (Jeff 2026-09-09)."""
+    asking for /favicon.svg gets handed a page."""
     head = (FRONTEND.parent / "index.html").read_text(encoding="utf-8")
     assert 'rel="icon"' in head and "favicon.svg" in head
 
@@ -350,9 +350,9 @@ def test_the_app_ships_a_favicon_and_serves_it() -> None:
 
 
 def test_instance_health_is_a_page_not_a_question() -> None:
-    """Jeff 2026-09-09: "so that I can inspect vecgrep health at a glance
-    without having to ask yall". A Health view, backed by an endpoint that is
-    cheap enough to poll."""
+    """Instance health should be inspectable at a glance without having to ask
+    anyone. A Health view, backed by an endpoint that is cheap enough to
+    poll."""
     app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
     panel = (FRONTEND / "components" / "InstanceHealth.tsx").read_text(encoding="utf-8")
     client = (FRONTEND / "api.ts").read_text(encoding="utf-8")
@@ -393,7 +393,7 @@ def test_health_detail_avoids_the_expensive_stats_walk() -> None:
 def test_the_view_lives_in_the_url() -> None:
     """A tab you cannot link to is a tab you have to describe over Discord.
     The view was component state, so /#health could not be sent, bookmarked or
-    reloaded into (Jeff 2026-09-09, asking for health at a glance)."""
+    reloaded into."""
     app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
     assert "viewFromHash" in app, "the view does not read the URL"
     assert "hashchange" in app, "back/forward and a hand-edited hash do nothing"
@@ -401,10 +401,9 @@ def test_the_view_lives_in_the_url() -> None:
 
 
 def test_search_reports_its_own_wall_time() -> None:
-    """Jeff 2026-09-09: "it took like over a minute to load. we should include
-    load time in seconds on the vecgrep results tbh so i can debug a bit
-    better". Server-side, so a slow retrieval can be told apart from a slow
-    round trip — which from a browser look identical."""
+    """A search that takes over a minute to load needs its load time in seconds
+    on the results page, to debug against. Server-side, so a slow retrieval can
+    be told apart from a slow round trip — which from a browser look identical."""
     schemas = (
         FRONTEND.parent.parent / "backend" / "api" / "schemas.py"
     ).read_text(encoding="utf-8")
@@ -423,7 +422,7 @@ def test_search_reports_its_own_wall_time() -> None:
 def test_every_icon_a_browser_asks_for_is_served() -> None:
     """One SVG was not enough. Safari ignores an SVG apple-touch-icon, and a
     browser falling back to /favicon.ico was being handed the SPA's index.html
-    — so Jeff saw no icon at all (2026-09-09)."""
+    — so the tab showed no icon at all."""
     public = FRONTEND.parent / "public"
     dist = FRONTEND.parent / "dist"
     for name in ("favicon.svg", "favicon.ico", "apple-touch-icon.png"):
@@ -476,7 +475,7 @@ def test_the_svg_carries_explicit_dimensions() -> None:
 
 def test_the_result_count_offers_a_short_page() -> None:
     """The shortest page was 25, which is a scroll when the question is "did
-    this ever come up". 10 fits on a screen (Jeff 2026-09-10)."""
+    this ever come up". 10 fits on a screen."""
     search = (FRONTEND / "components" / "SearchBar.tsx").read_text(encoding="utf-8")
     assert "<option value={10}>10</option>" in search
     # ...without moving the default, which is a separate decision.
@@ -485,8 +484,7 @@ def test_the_result_count_offers_a_short_page() -> None:
 
 def test_the_mode_selector_is_lowercase() -> None:
     """The rest of that row is a mono, lowercase control strip — the labels
-    were Title Case and read as three proper nouns (Jeff 2026-09-10:
-    "all lowercaps, not Hybrid Semantic")."""
+    were Title Case and read as three proper nouns."""
     search = (FRONTEND / "components" / "SearchBar.tsx").read_text(encoding="utf-8")
     for label in ("hybrid", "semantic", "keyword"):
         assert f'label: "{label}"' in search, f"{label} is not lowercase"
@@ -497,8 +495,7 @@ def test_the_icon_links_carry_a_version() -> None:
     """A browser that once asked for /favicon.ico and was handed the SPA's
     index.html caches that miss, and it keeps caching it after the file is
     real: the icon shipped at 03:22 and the tab was still blank at 07:25
-    (Jeff 2026-09-10, "still no favicon ... even tho bots r claiming there
-    is" — the bots were right, the bytes were on the wire). A version on the
+    (the bytes were on the wire the whole time). A version on the
     href is a different URL, so the stale entry cannot answer for it."""
     import re
 

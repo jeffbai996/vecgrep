@@ -168,7 +168,7 @@ def test_proposal_store_roundtrip(store, corpus_dir):
     assert got.rendered == pr.rendered
 
 
-# --- delete proposals: confirm removes the file + de-indexes (Jeff 2026-06-25) ---
+# --- delete proposals: confirm removes the file + de-indexes ---
 
 def test_confirm_delete_removes_file_and_deindexes(corpus_dir, store):
     # Seed a doc, propose its delete, confirm → file gone + delete_file called.

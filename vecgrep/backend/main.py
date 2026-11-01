@@ -238,8 +238,7 @@ def create_app() -> FastAPI:
         async def _unlock_context(next_target: str) -> dict:
             """Who is asking, and for what — read off the authorize target so
             the owner approves a named client with named permissions, not a
-            blank form (Jeff 2026-08-22: "should be as lit as logging into
-            Claude Code")."""
+            blank form."""
             from urllib.parse import urlsplit
 
             from ..mcp.server import _shared_provider
@@ -539,7 +538,7 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
             # a copied env line), and that copy near-universally carries a
             # trailing newline or trailing space. `expected` was already
             # stripped; `provided` wasn't, so a clean correct paste failed
-            # hmac.compare_digest on whitespace alone (Jeff 2026-08-22).
+            # hmac.compare_digest on whitespace alone.
             provided = (fields.get("token") or [""])[0].strip()
             next_target = safe_authorize_target((fields.get("next") or [""])[0])
             expected = _gs().oauth_approval_token or ""
@@ -625,7 +624,7 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
             response.set_cookie(
                 APPROVAL_COOKIE,
                 approval_cookie_value(expected),
-                max_age=365 * 86400,  # a year (Jeff 2026-08-22)
+                max_age=365 * 86400,  # a year
                 secure=True,
                 httponly=True,
                 samesite="strict",

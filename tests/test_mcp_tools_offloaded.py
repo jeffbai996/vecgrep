@@ -14,7 +14,7 @@ server went dark for the length of one search.
 Measured 2026-09-12 against the live server: one MCP search took 17.90s and
 `/api/health` — whose entire body is `return {"status": "ok"}` — was blocked
 for 17.89s of it, against a 2ms baseline. Three of those in a row is three
-watchdog strikes, which is a restart, which is the 504s Jeff saw.
+watchdog strikes, which is a restart, which is the 504s clients saw.
 
 The blocking call had been there all along; 2026-09-10's cf21ce9 (rerank
 cross-corpus fan-out by default) made a routine search long enough to cross

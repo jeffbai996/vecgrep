@@ -58,7 +58,7 @@ def extract_timestamp(text: str, path: str | None = None) -> float | None:
     mtime fallbacks. Never raises.
     """
     # 1 + 2: labeled date line, searching only the head so a date mentioned
-    # deep in prose doesn't win over the document's own metadata. The squad
+    # deep in prose doesn't win over the document's own metadata. A memory
     # store writes `Saved: <iso>` near the top; transcripts use frontmatter
     # `date: <iso>`.
     head = "\n".join(text.splitlines()[:15])

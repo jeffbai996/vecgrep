@@ -1,6 +1,6 @@
 """AnyIO's default worker-thread limiter is sized for a dedicated host, not
 a lightly-loaded background service — a live instance was observed idling
-at 63 threads under a few requests/minute (Jeff, 2026-08-02). The lifespan
+at 63 threads under a few requests/minute. The lifespan
 now caps it to Settings.thread_pool_size on startup.
 
 Entering create_app()'s lifespan directly (rather than routing through

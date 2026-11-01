@@ -5,8 +5,8 @@ magnitude — 27 kB for a tiny corpus, 270 MB for a large one — so "keep 1
 corpus" is not a limit on memory at all, and it forced a re-unpickle of the
 largest index every time a caller touched a different corpus.
 
-That is not hypothetical. The squad memory hook searches three corpora on every
-prompt submission of every bot, so it happened on every turn. Measured on a live
+That is not hypothetical. A memory hook searches three corpora on every
+prompt submission, so it happened on every turn. Measured on a live
 deployment 2026-08-26: twelve searches against ONE corpus cost -3 MB; twelve
 searches ROTATING three corpora cost +957 MB and the memory never came back,
 because repeatedly building and discarding a 270 MB object graph shreds the

@@ -161,7 +161,7 @@ each other, not against the round-2 absolutes.
 - **Not adopted as default — blocked by the serve path, not the numbers.**
   Rerank runs synchronously in the request handler. The first v2-m3
   load+predict inside `vecgrep-serve` blocked the event loop for 5+ minutes
-  (20 GB box, 5.2 GB RSS + swap already), `squad-watchdog` (strikes=1) killed
+  (20 GB box, 5.2 GB RSS + swap already), a watchdog (strikes=1) killed
   and restarted the server mid-request, and a hook that reranks by default
   would re-trigger that on every restart. `DEFAULT_RERANKER` is now
   env-overridable (`VECGREP_RERANKER`) and stays `bge-reranker-base` until the
@@ -172,7 +172,7 @@ each other, not against the round-2 absolutes.
   blocker was never compute, it was a 2.2 GB weight download happening
   *inside* a request. Search runs in FastAPI's sync threadpool, capped at 8
   (`VECGREP_THREAD_POOL_SIZE`), so that load held one of eight slots for its
-  whole duration and starved the health route — which is what squad-watchdog
+  whole duration and starved the health route — which is what the watchdog
   saw. The fix is structural rather than a bigger timeout: `ensure_warm()`
   loads the model in a background thread from the app lifespan, and
   `wait_ready()` gives a search a bounded wait (`VECGREP_RERANK_WAIT_S`,
@@ -199,7 +199,7 @@ each other, not against the round-2 absolutes.
   Zero recall cost at every k (hit@5 vector is +1 case), qdrant on disk
   −35% (the vector segment halves; payload does not), and vector search
   latency roughly a third — half the bytes through the page cache. It is
-  a reindex of the live collection, not a toggle, so it is Jeff's call;
+  a reindex of the live collection, not a toggle, so it is the operator's call;
   the build takes ~20 min from a warm embed cache. `eval-chats-f16` is
   left in place as the reference until then.
 
@@ -229,7 +229,7 @@ each other, not against the round-2 absolutes.
 
 The MCP `search` gate auto-enabled the cross-encoder on a corpus of >=10k
 chunks, but returned False whenever no corpus was named ("cross-corpus search:
-don't pay it blind"). That is the call the squad bots actually make, so the
+don't pay it blind"). That is the call the clients actually make, so the
 highest-traffic path in the deployment was the one path that never reranked.
 
 Measured on the LIVE corpora (the round-2/3 `eval-*` copies were dropped; a

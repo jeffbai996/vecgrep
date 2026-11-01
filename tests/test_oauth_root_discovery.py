@@ -132,7 +132,7 @@ def test_owner_unlock_trims_pasted_whitespace(oauth_client):
     """The owner pastes this code from a terminal (grep output, a copied env
     line) — that copy near-universally carries a trailing newline or space.
     A correct code with incidental whitespace around it must still unlock
-    (Jeff 2026-08-22: pasted the real code, got rejected)."""
+    (a correctly pasted code used to be rejected)."""
     r = submit(oauth_client,
         data={
             FORM_TOKEN_FIELD: f"  {TEST_APPROVAL}\n",

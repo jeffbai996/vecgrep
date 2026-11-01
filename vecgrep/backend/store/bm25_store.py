@@ -178,11 +178,11 @@ class _CorpusIndex:
 
 # Default ceiling on resident BM25 indexes, in bytes of on-disk sidecar.
 #
-# Counting CORPORA was the wrong unit. Sidecars on this fleet range from 27 kB
-# (ticker-tape) to 270 MB (chats), so a cap of "1 corpus" means anything from
+# Counting CORPORA was the wrong unit. Sidecars in real use range from 27 kB
+# (a small corpus) to 270 MB (a large chat archive), so a cap of "1 corpus" means anything from
 # nothing to a quarter-gigabyte, and it forced a re-unpickle of the 270 MB
-# index every time a caller touched a different corpus. The squad memory hook
-# searches THREE corpora on every prompt submission of every bot, so that
+# index every time a caller touched a different corpus. A memory hook
+# searches THREE corpora on every prompt submission, so that
 # happened on every turn, all day.
 #
 # Measured 2026-08-26 on a live deployment: twelve searches against ONE corpus cost

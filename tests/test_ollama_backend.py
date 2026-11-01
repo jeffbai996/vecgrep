@@ -276,7 +276,7 @@ def test_batch_connect_error_still_hard_fails() -> None:
 
 def test_keep_alive_sent_by_default(monkeypatch) -> None:
     """Ollama's default keep_alive is 5 minutes, so the first embed after any
-    quiet gap paid a ~2s cold model load — measured 2.13s against the squad
+    quiet gap paid a ~2s cold model load — measured 2.13s against a
     recall hook's 2.0s budget, which logged it as vecgrep being down
     (2026-09-09). The backend pins the model instead of losing that race."""
     monkeypatch.delenv("VECGREP_OLLAMA_KEEP_ALIVE", raising=False)

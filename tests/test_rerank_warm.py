@@ -4,7 +4,7 @@ A search runs in FastAPI's sync threadpool, capped at 8
 (VECGREP_THREAD_POOL_SIZE). `CrossEncoder(name)` imports torch and, on first
 use, downloads weights — minutes. Held inside a search, that occupies one of
 eight threads for the duration and starves every other sync route, health
-check included; on 2026-08-18 squad-watchdog saw the timeout and restarted
+check included; on 2026-08-18 a watchdog saw the timeout and restarted
 vecgrep-serve mid-request at strikes=1.
 
 So: warm in the background, wait a bounded time, and fall back to fusion order

@@ -48,11 +48,11 @@ from .google_bearers import GoogleBearerRegistry
 # Default lifetimes. Access tokens are short (the whole point of OAuth); refresh
 # tokens are long-lived but revocable; codes are seconds-scale (used immediately).
 # The approval lasts a year through the refresh token: the owner approves a
-# client once and expects it to stay connected (Jeff 2026-08-22: "indefinite or
-# like a year"), and rotation keeps that alive without a new approval. The
-# access token a client actually presents on every call lives one hour, so a
-# token that leaks from a client, a log or a trace stops working within the
-# hour instead of a year (security review 2026-10-19).
+# client once and expects it to stay connected, and rotation keeps that alive
+# without a new approval. The access token a client actually presents on every
+# call lives one hour, so a token that leaks from a client, a log or a trace
+# stops working within the hour instead of a year (security review
+# 2026-10-19).
 _ACCESS_TTL_S = 60 * 60
 _REFRESH_TTL_S = 365 * 86400
 _CODE_TTL_S = 300           # 5 minutes

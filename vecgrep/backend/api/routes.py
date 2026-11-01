@@ -458,7 +458,7 @@ def explorer_source(
 
 @router.get("/oauth/status")
 def oauth_status() -> dict:
-    """State for the squad inventory's OAuth panel. Token VALUES never leave
+    """State for the inventory's OAuth panel. Token VALUES never leave
     the store — clients, counts, issuer only."""
     from ..config import get_settings
     s = get_settings()

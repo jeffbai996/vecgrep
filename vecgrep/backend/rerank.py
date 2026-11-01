@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # negatives, so it is the default as of 2026-08-18. It was held back until now
 # for a serve-path reason, not a quality one: loading it took 5+ minutes inside
 # a request, which held one of eight sync-threadpool slots and starved the
-# health route until squad-watchdog (strikes=1) restarted the server
+# health route until a watchdog (strikes=1) restarted the server
 # mid-request. ensure_warm() + wait_ready() below removed that — the model
 # loads in a background thread at startup and a search that arrives before it
 # is ready returns fusion order instead of waiting. Fall back per install with
@@ -49,7 +49,7 @@ DEFAULT_RERANKER = os.environ.get("VECGREP_RERANKER", "BAAI/bge-reranker-v2-m3")
 # threadpool, capped at 8 (VECGREP_THREAD_POOL_SIZE), so a blocking load does
 # not merely slow one request: it holds one of eight threads for the whole load
 # and starves every other sync route, health check included. That is how the
-# v2-m3 first load took the server down on 2026-08-18 -- squad-watchdog saw the
+# v2-m3 first load took the server down on 2026-08-18 -- a watchdog saw the
 # timeout and at strikes=1 restarted vecgrep-serve mid-request. Waiting a few
 # seconds is fine; waiting minutes is an outage.
 RERANK_WAIT_S = float(os.environ.get("VECGREP_RERANK_WAIT_S", "5"))

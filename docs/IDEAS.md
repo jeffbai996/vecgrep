@@ -39,7 +39,7 @@ Documenting what we've explicitly decided against so we don't re-litigate.
 - **Faceted result clustering** — k-means on result vectors to group hits by topic. Looks impressive in screenshots, doesn't actually help. Hits already group naturally by source. Skip unless someone files a real use case.
 - **Notion / Roam / Apple Notes adapters** — each one is its own can of worms (auth, format drift, rate limits). The right path is the plugin API: let people who actually use those tools build adapters and pip install them.
 - **Homepage / vecgrep.dev** — pointless until traction. README is enough.
-- **True multi-user namespacing** — corpora-per-token-holder. Conflicts with the "local-first tool, not framework" stance. Bearer-token auth (shipped) is enough for the "share with my squad over Tailscale" use case.
+- **True multi-user namespacing** — corpora-per-token-holder. Conflicts with the "local-first tool, not framework" stance. Bearer-token auth (shipped) is enough for the "share with a small group over Tailscale" use case.
 
 ## Decisions worth remembering
 

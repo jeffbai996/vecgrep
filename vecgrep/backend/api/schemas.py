@@ -181,7 +181,7 @@ class SearchResponse(BaseModel):
     warnings: list[SearchWarningOut] = Field(default_factory=list)
     # Server-side wall time. A slow search and a slow NETWORK look identical
     # from the browser, and "it took a minute" is not a bug report anyone can
-    # act on (Jeff 2026-09-09). This is the server's own answer, so a gap
+    # act on. This is the server's own answer, so a gap
     # between it and what the page felt is the round trip, not the retrieval.
     took_ms: int | None = None
     # Where took_ms went: admit / embed / vector / bm25 (summed over corpora searched

@@ -198,7 +198,7 @@ def test_full_preview_not_truncated_at_500(home):
     assert r["preview"].count("para.") > 250
 
 
-# --- propose_delete: the inert, human-confirmed removal path (Jeff 2026-06-25) ---
+# --- propose_delete: the inert, human-confirmed removal path ---
 
 def _seed_doc(corpus, doc_id, body):
     """Write a doc straight to the corpus write-dir (no embed). Lets the delete
@@ -292,7 +292,7 @@ def test_discard_cancels_a_delete_proposal(home):
     assert glob.glob(f"{h}/write/notes/notes-001.md")
 
 
-# --- propose_edit PATCH mode: surgical str-replace (Jeff 2026-07-07) ---
+# --- propose_edit PATCH mode: surgical str-replace ---
 # propose_edit gains an old_str/new_str patch mode: instead of re-sending the
 # whole body to fix one line, patch loads the current body, does a strict
 # single-match str-replace, and routes the result through the SAME proposal

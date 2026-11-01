@@ -1708,7 +1708,7 @@ class VecgrepService:
                 # blow up later — a wedged GPU is the live example: the host's
                 # card started reporting a garbage VRAM figure and every
                 # rerank raised `CUDA error: unknown error`, which 500'd the
-                # whole search for every bot in the squad (2026-08-20).
+                # whole search for every client (2026-08-20).
                 # Reranking is an enhancement over a result set we already
                 # have; losing it must degrade the answer, never fail it.
                 logger.warning(
@@ -4099,8 +4099,8 @@ class VecgrepService:
             # QdrantLocal builds get_collections() PURELY from meta.json at open
             # time — so copying the collection DIRECTORY isn't enough; without its
             # meta.json entry the collection is invisible and every search against
-            # the restored corpus returns nothing (silent data-loss on round-trip;
-            # Jeff 2026-07-06). The export ships the source meta.json, so we read
+            # the restored corpus returns nothing (silent data-loss on round-trip).
+            # The export ships the source meta.json, so we read
             # the old collection's config out of it, re-key it to the (possibly
             # renamed) target, and merge it into the live meta.json.
             src_meta = staging / "qdrant" / "meta.json"
@@ -4143,7 +4143,7 @@ class VecgrepService:
         # happens on a plain round-trip — so without this, a restored corpus has
         # NO keyword index, hybrid/bm25 search returns nothing, and a vector-only
         # hit below the model's cosine floor is silently dropped (the round-trip
-        # data-loss bug; Jeff 2026-07-06). Scroll the collection's payloads and
+        # data-loss bug). Scroll the collection's payloads and
         # re-upsert them into BM25 under the target name — text + payload only, no
         # pickle, no re-embedding.
         try:

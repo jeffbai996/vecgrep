@@ -194,7 +194,7 @@ def test_web_ui_default_hits_is_40() -> None:
 
 
 def test_default_budget_is_10_full_100_total():
-    """Jeff's 2026-07-05 bump: 10 full + up to 90 stubs. max_total stays a CAP
+    """The default is 10 full + up to 90 stubs. max_total stays a CAP
     — token_ceiling is the real limit, so a dense set legitimately yields
     fewer stubs. These defaults are what the API/CLI/MCP inherit."""
     from vecgrep.backend.assembly import DEFAULT_FULL_K, DEFAULT_MAX_TOTAL

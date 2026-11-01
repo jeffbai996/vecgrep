@@ -80,7 +80,7 @@ def test_wrappers_default_to_none_not_false():
 
 
 # ── cross-corpus fan-out ─────────────────────────────────────────────────────
-# The default squad-bot call names no corpus. It used to skip rerank outright
+# The default call names no corpus. It used to skip rerank outright
 # ("don't pay it blind"), which meant the highest-traffic call path never got
 # the calibration the reranker exists for -- and the eval showed unreranked
 # hybrid surfacing a confident top hit for almost every off-topic query. The

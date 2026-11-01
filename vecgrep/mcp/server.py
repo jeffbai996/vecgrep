@@ -297,7 +297,7 @@ def _should_rerank(
 ) -> bool:
     """Explicit `rerank` in the call always wins; otherwise decide on size.
 
-    Scoped to one corpus, size that corpus. Unscoped (the default squad-bot
+    Scoped to one corpus, size that corpus. Unscoped (the default
     call) or given a `corpora` list, size the SUM over the corpora the fan-out
     will search: service.search_with_diagnostics merges every corpus into one
     candidate list and only then filters, dedups and reranks, so a cross-corpus
@@ -2163,7 +2163,7 @@ def _offload_sync_tools(fmcp: Any) -> None:
 
     Measured against the live server on 2026-09-12: one MCP search took
     17.90s and /api/health was blocked for 17.89s of it, against a 2ms
-    baseline. The squad watchdog probes that endpoint with a 5s timeout and
+    baseline. A watchdog probes that endpoint with a 5s timeout and
     restarts after three strikes, so a few slow searches in a row bounced the
     service and everything in flight got a 504.
 
@@ -2175,7 +2175,7 @@ def _offload_sync_tools(fmcp: Any) -> None:
     Write/mutating tools stay serialized behind a 1-slot gate, while known
     read-only MCP tools share a bounded read gate (`MCP_READ_GATE_SLOTS`,
     default 6) so a slow cross-corpus search does not block `list_corpora`,
-    `get_chunk`, or concurrent squad searches.
+    `get_chunk`, or concurrent searches.
     """
     import functools
     import inspect as _inspect

@@ -2,8 +2,8 @@
 
 A cross-encoder score is a pure function of (model, query, chunk text): same
 inputs, same logit, every time. So a repeat is free to serve from memory and
-the results are IDENTICAL, which is the whole point -- Jeff 2026-09-12 asked
-for "fast without quality trade".
+the results are IDENTICAL, which is the whole point: faster without a
+quality trade.
 
 Measured before this: a scoped reranked search ran 2.83s against 0.52s
 unreranked, and running the SAME query again cost the full 2.83s over.

@@ -3,7 +3,7 @@
 Readiness only proves the model loaded. `predict()` can fail afterwards, and
 on 2026-08-20 it did: the host GPU began reporting a nonsense VRAM figure and
 every rerank raised `CUDA error: unknown error`. The search endpoint returned
-500 to every bot in the squad, for a corpus that had perfectly good hits sitting
+500 to every client, for a corpus that had perfectly good hits sitting
 in the fused result set. Reranking reorders an answer we already have — losing
 it is a quality hit, not a failure.
 """
