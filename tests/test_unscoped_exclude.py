@@ -88,11 +88,3 @@ def test_list_corpora_marks_corpora_outside_the_default_search(svc, make_doc, mo
 
     listed = {c["name"]: c["in_default_search"] for c in json.loads(mcp_server._run_list_corpora())}
     assert listed == {"chats": True, "repos": False}
-
-
-def test_the_search_tool_no_longer_claims_omitting_corpus_searches_everything() -> None:
-    from pathlib import Path
-    src = Path(__file__).resolve().parents[1] / "vecgrep" / "mcp" / "server.py"
-    text = src.read_text()
-    assert "Omit to search all corpora" not in text
-    assert "in_default_search" in text

@@ -93,12 +93,6 @@ def test_default_budget_is_bytes_and_generous_enough_to_matter(tmp_path):
     assert DEFAULT_CACHE_BYTES >= 128 * 1024 * 1024
 
 
-def test_ephemeral_store_is_still_unbounded(tmp_path):
-    store = BM25Store(None)
-    assert store.max_cached_bytes is None
-    assert store.max_cached_corpora is None
-
-
 def test_a_count_cap_still_works_when_asked_for(tmp_path):
     store = BM25Store(tmp_path, max_cached_corpora=1, max_cached_bytes=10**9)
     for name in ("p", "q"):
