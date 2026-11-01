@@ -305,10 +305,14 @@ def create_app() -> FastAPI:
                     "propose": ("Write and propose", f"run state-changing tools on {raw_service}"),
                 }
             )
+            display_scopes = ctx.get("scopes", ["read"])
+            expand_access = raw_service == "vecgrep" and display_scopes == ["read"]
+            if expand_access:
+                display_scopes = ["read", "propose"]
             rows = "".join(
                 f'<li><span class="dot"></span><span><b>{html.escape(scope_copy.get(sc, (sc, ""))[0])}</b>'
                 f'<small>{html.escape(scope_copy.get(sc, (sc, ""))[1])}</small></span></li>'
-                for sc in ctx.get("scopes", ["read"])
+                for sc in display_scopes
             )
             private_url = _gs().oauth_tailnet_approval_url
             issuer = _us(_gs().oauth_issuer_url or "")
@@ -336,6 +340,8 @@ def create_app() -> FastAPI:
                 if error or throttled else ""
             )
             intent: str | None = None
+            access_choice = ' name="access" value="read-write"' if expand_access else ""
+            approve_button = f'<button type="submit"{access_choice}>Approve &amp; continue</button>'
             if tailnet_login:
                 intent = tailnet_approval_intent(
                     _gs().oauth_approval_token or "",
@@ -344,24 +350,17 @@ def create_app() -> FastAPI:
                 )
                 approval_copy = "Approve this request from your verified Tailscale session."
                 controls = f"""<input type="hidden" name="tailnet_intent" value="{intent}">
-<button type="submit">Approve &amp; continue</button>"""
+{approve_button}"""
                 if private_url:
                     controls += f'<input type="hidden" name="tailnet_login" value="{html.escape(tailnet_login, quote=True)}">'
             elif ctx.get("browser_approved"):
                 approval_copy = "Approve this connection to continue."
-                controls = '<button type="submit">Approve &amp; continue</button>'
+                controls = approve_button
             else:
                 approval_copy = "Enter the owner approval code to allow it."
-                controls = """<label for="token">Owner approval code</label>
+                controls = f"""<label for="token">Owner approval code</label>
 <input id="token" name="token" type="password" autocomplete="current-password" placeholder="••••••••" required autofocus>
-<button type="submit">Approve &amp; continue</button>"""
-            if raw_service == "vecgrep" and ctx.get("scopes") == ["read"]:
-                # Some clients always request read, including during reauth.
-                # Only this separate owner action may expand that request.
-                controls += ('<button type="submit" class="secondary" name="access" value="read-write">'
-                             'Also allow saving and editing</button>'
-                             '<p class="sub">Save and edit notes in enabled corpora. '
-                             'Deletion proposals still require confirmation.</p>')
+{approve_button}"""
             redirect_uri = ctx.get("redirect_uri", "")
             callback_origin = oauth_callback_origin("/authorize?" + urlencode({"redirect_uri": redirect_uri}))
             form_action = "'self'" + (f" {callback_origin}" if callback_origin else "")

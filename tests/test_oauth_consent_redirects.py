@@ -76,6 +76,8 @@ def test_owner_can_explicitly_add_write_access_to_a_read_only_client(client) -> 
     response, fields = page(client, request)
     assert 'name="access" value="read-write"' in response.text
     assert "Save and edit notes" in response.text
+    assert response.text.count('<button type="submit"') == 1
+    assert "Also allow saving and editing" not in response.text
     approved = client.post("/oauth/unlock", data={
         **fields, "token": APPROVAL, "access": "read-write",
     }, follow_redirects=False)
