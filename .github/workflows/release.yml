@@ -48,8 +48,12 @@ jobs:
           build=true
           files=""
           if [[ "$EVENT" == pull_request ]]; then
-            files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
-              --jq '.[] | .filename, (.previous_filename // empty)') || files=""
+            # The files API lists at most 3000 files; build when it may be cut off.
+            count=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .changed_files) || count=""
+            if [[ "$count" =~ ^[0-9]+$ && "$count" -lt 3000 ]]; then
+              files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
+                --jq '.[] | .filename, (.previous_filename // empty)') || files=""
+            fi
           elif [[ "$EVENT" == push && "$GITHUB_REF" == refs/heads/* && "$BEFORE" =~ [1-9a-f] ]]; then
             # The compare API lists at most 300 files; build when it may be cut off.
             files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BEFORE...$GITHUB_SHA" \
