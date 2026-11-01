@@ -42,6 +42,15 @@ later. It grants no access: owner approval and PKCE remain required. Explicit
 registration scopes stay restricted, and authorization without a scope still
 grants only `read`.
 
+For ChatGPT and other clients with tool-level authorization, HTTP tool discovery
+declares `read` for queries and `read propose` for mutations. A read-only token
+calling a mutation receives an MCP `isError` result with an
+`mcp/www_authenticate` challenge requesting `read propose`; the tool does not
+execute. Refresh the client's tool definitions after updating the server, then
+approve the additional scope through the normal OAuth flow. Reconnecting with
+an explicit `scope=read` will still produce a read-only token. Neither discovery
+nor the challenge grants permissions or changes existing tokens.
+
 Point every public TLS proxy route at `127.0.0.1:8766`, including
 authorization and unlock routes. Keep private Tailscale Serve and local
 clients on `VECGREP_API_PORT` (default `8765`). Public and private listeners

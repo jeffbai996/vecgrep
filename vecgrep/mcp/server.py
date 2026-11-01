@@ -3626,6 +3626,10 @@ def build_http_app(
     for tool in fmcp._tool_manager.list_tools():
         tool.annotations = _tool_annotations(tool.name)
 
+    if oauth_issuer_url:
+        from . import oauth_tools
+        oauth_tools.install(fmcp, oauth_issuer_url)
+
     http_app = fmcp.streamable_http_app()
     if oauth_issuer_url:
         # FastMCP carries a second copy of the OAuth routes under the mounted

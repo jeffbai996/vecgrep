@@ -85,6 +85,54 @@ def test_dns_rebinding_host_is_rejected_before_loopback_bypass(
     assert response.status_code == 421
 
 
+def test_oauth_tools_advertise_their_required_scopes(loopback_client):
+    response = loopback_client.post(
+        "/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        headers=MCP_HEADERS,
+    )
+    tools = {tool["name"]: tool for tool in response.json()["result"]["tools"]}
+    for name, scopes in [("search", ["read"]), ("propose_write", ["read", "propose"]),
+                         ("write", ["read", "propose"])]:
+        expected = [{"type": "oauth2", "scopes": scopes}]
+        assert tools[name]["securitySchemes"] == expected
+        assert tools[name]["_meta"]["securitySchemes"] == expected
+
+
+@pytest.mark.parametrize("scopes", [["read"], ["read", "propose"]])
+def test_missing_scope_returns_oauth_challenge_without_running_tool(
+    loopback_client, monkeypatch, scopes,
+):
+    calls = []
+    monkeypatch.setattr(mcp_server, "_run_propose",
+                        lambda *args: calls.append(args) or '{"test": true}')
+    access = mcp_server._shared_provider().store.issue_access_token(
+        "scope-client", scopes, ttl_s=60, resource=TEST_ISSUER,
+    )
+    response = loopback_client.post(
+        "/mcp", headers=MCP_HEADERS | {
+            "X-Forwarded-For": "203.0.113.10",
+            "Authorization": f"Bearer {access.token}",
+        },
+        json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "propose_write", "arguments": {"content": "test", "corpus": "notes"},
+        }},
+    )
+    assert response.status_code == 200
+    result = response.json()["result"]
+    if "propose" in scopes:
+        assert len(calls) == 1
+        assert result["isError"] is False
+        assert "mcp/www_authenticate" not in result.get("_meta", {})
+    else:
+        assert calls == []
+        assert result["isError"] is True
+        challenge = result["_meta"]["mcp/www_authenticate"][0]
+        assert 'scope="read propose"' in challenge
+        assert 'error="insufficient_scope"' in challenge
+        assert 'resource_metadata="https://example.com:10000/.well-known/oauth-protected-resource/mcp"' in challenge
+        assert access.token not in response.text
+
+
 def test_foreign_browser_origin_is_rejected_on_an_allowed_host(
     loopback_client: TestClient,
 ) -> None:
