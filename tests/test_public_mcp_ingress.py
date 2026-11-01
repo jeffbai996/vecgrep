@@ -99,7 +99,11 @@ def test_public_and_private_share_tokens_and_private_access(ingress_app):
         }, json={"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
             "name": "propose_write", "arguments": {"content": "test", "corpus": "notes"},
         }})
-        assert "requires the 'propose' scope" in denied_write.text
+        denied_result = denied_write.json()["result"]
+        assert denied_result["isError"] is True
+        challenge = denied_result["_meta"]["mcp/www_authenticate"][0]
+        assert 'error="insufficient_scope"' in challenge
+        assert 'scope="read propose"' in challenge
         # A second client uses the same lifespan, as do both real sockets.
         private = TestClient(Listener(ingress_app, 8765), base_url="http://127.0.0.1:8765",
                              client=("127.0.0.1", 40000))
