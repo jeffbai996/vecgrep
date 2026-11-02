@@ -97,11 +97,19 @@ def _tool_annotations(name: str) -> Any:
 
     writes = {"write", "edit", "write_temp", "renew_temp", "retire", "unretire",
               "propose_write", "propose_edit", "propose_delete", "propose_merge"}
+    # These tools query registered corpora; source URLs are evidence metadata,
+    # not arbitrary destinations fetched or acted on during the tool call.
+    # Keep unknown tools conservative until their interaction scope is reviewed.
+    closed_world_reads = {
+        "search", "timeline", "incident", "browse", "get_chunk", "get_source",
+        "list_aliases", "list_corpora", "get_corpus", "related", "compare",
+        "stats", "summarize_corpus",
+    }
     return ToolAnnotations(
         readOnlyHint=name not in writes,
         destructiveHint=name == "edit",
         idempotentHint=name not in writes,
-        openWorldHint=True,
+        openWorldHint=name not in closed_world_reads,
     )
 
 

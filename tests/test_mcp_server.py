@@ -46,6 +46,14 @@ def test_build_mcp_server_registers_tools() -> None:
     search = next(t for t in result.root.tools if t.name == "search")
     assert search.inputSchema["properties"]["corpora"]["minItems"] == 1
     assert "list_corpora" in search.description
+    for tool in result.root.tools:
+        if tool.name in {"search", "timeline", "incident", "browse", "get_chunk", "get_source",
+                         "list_aliases", "list_corpora", "get_corpus", "related", "compare", "stats", "summarize_corpus"}:
+            assert tool.annotations.readOnlyHint is True
+            assert tool.annotations.openWorldHint is False
+        else:
+            assert tool.annotations.readOnlyHint is False
+            assert tool.annotations.openWorldHint is True
 
 
 def test_build_http_app_returns_asgi_app() -> None:

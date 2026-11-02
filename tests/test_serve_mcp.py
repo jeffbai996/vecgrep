@@ -135,6 +135,8 @@ def test_search_policy_over_http(client_with_token, monkeypatch):
         'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}})
     search = next(t for t in response.json()['result']['tools'] if t['name'] == 'search')
     assert 'profile' in search['inputSchema']['properties']
+    assert search['annotations']['readOnlyHint'] is True
+    assert search['annotations']['openWorldHint'] is False
     assert 'response_token_ceiling' in search['inputSchema']['properties']
     response = client_with_token.post('/mcp', headers=headers, json={
         'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call', 'params': {
