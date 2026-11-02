@@ -219,7 +219,7 @@ def create_app() -> FastAPI:
         # instance because Starlette only treats those as raw ASGI endpoints.
         app.router.routes.append(
             Route("/mcp", endpoint=_McpBareDelegate(mcp_http_app),
-                  methods=["GET", "POST", "DELETE"])
+                  methods=["GET", "POST", "DELETE", "OPTIONS"])
         )
     else:
         logger.warning("vecgrep[mcp] extra not installed; /mcp endpoint not mounted")

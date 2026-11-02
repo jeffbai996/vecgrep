@@ -481,3 +481,28 @@ def test_serve_headers_from_ipv6_loopback_keep_the_tailnet_bypass(vg_home, monke
         assert client.post("/mcp", json=INITIALIZE, headers=MCP_HEADERS).status_code == 200
         served = client.post("/mcp", json=LIST_TOOLS, headers=MCP_HEADERS | TAILSCALE_SERVE)
         assert served.status_code == 200
+
+@pytest.mark.parametrize("path", ["/mcp", "/mcp/"])
+def test_configured_browser_origin_can_discover_oauth_without_bypassing_it(vg_home, monkeypatch, path):
+    origin = "https://client.example"
+    monkeypatch.setenv("VECGREP_OAUTH_ENABLED", "1")
+    monkeypatch.setenv("VECGREP_OAUTH_ISSUER_URL", TEST_ISSUER)
+    monkeypatch.setenv("VECGREP_OAUTH_APPROVAL_TOKEN", TEST_APPROVAL)
+    monkeypatch.setenv("VECGREP_MCP_ALLOWED_ORIGINS", origin)
+    monkeypatch.setattr(cfg_mod, "_settings", None)
+    monkeypatch.setattr(mcp_server, "_PROVIDER", None)
+    with TestClient(create_app(), base_url="https://example.com:10000", client=("198.51.100.9", 1234)) as client:
+        preflight = client.options(path, headers={"Origin": origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type,mcp-protocol-version"})
+        assert preflight.status_code == 200
+        assert preflight.headers["access-control-allow-origin"] == origin
+        denied = client.post(path, json=INITIALIZE, headers=MCP_HEADERS | {"Origin": origin})
+        assert denied.status_code == 401
+        assert denied.headers["access-control-allow-origin"] == origin
+        assert "www-authenticate" in denied.headers["access-control-expose-headers"].lower()
+        assert "resource_metadata=" in denied.headers["www-authenticate"]
+        foreign = client.options(path, headers={"Origin": "https://unlisted.example",
+            "Access-Control-Request-Method": "POST"})
+        assert foreign.status_code == 400
+        assert "access-control-allow-origin" not in foreign.headers

@@ -3089,6 +3089,26 @@ def _is_verified_tailnet_mcp(scope: dict) -> bool:
     return verified_tailnet_login(scope) is not None
 
 
+class _McpBrowserCors:
+    """Expose discovery challenges only to explicitly configured web clients."""
+
+    def __init__(self, app: Any, origins: list[str]) -> None:
+        from starlette.middleware.cors import CORSMiddleware
+
+        self.router = app.router
+        self._app = CORSMiddleware(
+            app,
+            allow_origins=origins,
+            allow_methods=["GET", "POST", "DELETE"],
+            allow_headers=["Authorization", "Content-Type", "MCP-Protocol-Version",
+                           "Mcp-Session-Id", "Last-Event-ID"],
+            expose_headers=["WWW-Authenticate", "Mcp-Session-Id", "MCP-Protocol-Version"],
+        )
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        await self._app(scope, receive, send)
+
+
 class _McpOAuthBoundary:
     """Dispatch direct-loopback MCP to the shared raw handler, else OAuth.
 
@@ -3655,6 +3675,7 @@ def build_http_app(
         oauth_tools.install(fmcp, oauth_issuer_url)
 
     http_app = fmcp.streamable_http_app()
+    browser_app: Any = http_app
     if oauth_issuer_url:
         # FastMCP carries a second copy of the OAuth routes under the mounted
         # /mcp prefix. Apply the same DCR and trace policy there so callers
@@ -3667,12 +3688,12 @@ def build_http_app(
         http_app.add_middleware(OAuthApprovalMiddleware)
         if oauth_loopback_bypass:
             direct_app = StreamableHTTPASGIApp(fmcp.session_manager)
-            return _McpOAuthBoundary(
+            browser_app = _McpOAuthBoundary(
                 http_app,
                 direct_app,
                 tailscale_identity_bypass=oauth_tailscale_identity_bypass,
             )
-    return http_app
+    return _McpBrowserCors(browser_app, mcp_allowed_origins or [])
 
 
 def run() -> None:
