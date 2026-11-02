@@ -294,7 +294,6 @@ def create_app() -> FastAPI:
             service = html.escape(raw_service)
             heading = f"Connect {client} to {raw_service}" if client else f"Connect to {raw_service}"
             from urllib.parse import urlencode
-            from urllib.parse import urlencode as _ue
             from urllib.parse import urlsplit as _us
             host = html.escape(_us(_gs().oauth_issuer_url or "").hostname or "")
             scope_copy = (
@@ -320,7 +319,7 @@ def create_app() -> FastAPI:
             post_url = "/oauth/unlock"
             tailnet_link = ""
             if private_url and not tailnet_login:
-                href = html.escape(private_url + "?" + _ue({"next": safe_authorize_target(next_target)}), quote=True)
+                href = html.escape(private_url + "?" + urlencode({"next": safe_authorize_target(next_target)}), quote=True)
                 tailnet_link = f'<a class="tailnet-link" href="{href}">Approve with Tailscale</a>'
             if private_url and tailnet_login:
                 post_url = public_origin + "/oauth/unlock"
