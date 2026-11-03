@@ -239,3 +239,21 @@ def test_an_impostor_cannot_accept_registered_bearers(tmp_path):
     _registered_elsewhere(tmp_path, "from-another-mcp", time.time() + 30 * DAY)
 
     assert store.load_access_token("from-another-mcp") is None
+
+
+def test_a_google_redirect_that_is_not_the_pinned_connector_is_not_google(tmp_path):
+    """Any Google Cloud project can register a redirect on Google's hosts; only
+    the owner's pinned connector earns the Gemini lifetime and the registry."""
+    store = _store(tmp_path)
+    store.save_client(_client("other-project", "Google",
+                              ["https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-999-host_example"]))
+    at, _ = store.issue_token_pair("other-project", ["read"], resource=RESOURCE)
+    assert _one_hour_or_less(at)
+
+
+def test_no_client_is_google_when_no_connector_is_pinned(tmp_path, monkeypatch):
+    monkeypatch.delenv("OAUTH_GOOGLE_REDIRECT_URIS")
+    store = _store(tmp_path)
+    store.save_client(_client())
+    at, _ = store.issue_token_pair("vg-google", ["read"], resource=RESOURCE)
+    assert _one_hour_or_less(at)

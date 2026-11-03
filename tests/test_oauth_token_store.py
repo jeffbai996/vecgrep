@@ -151,7 +151,10 @@ def test_token_has_scope(store):
 
 # --- dynamic-client retention bounds ---
 
-def test_unapproved_client_count_is_bounded_without_evicting_authorized_clients(monkeypatch):
+def test_registration_at_the_unapproved_cap_is_refused_and_pending_clients_are_kept(monkeypatch):
+    """Evicting the oldest pending client let one address push out a
+    connector still waiting for approval (funnel review 2026-11-02)."""
+    from vecgrep.backend.auth.store import RegistrationCapacityError
     monkeypatch.setattr("vecgrep.backend.auth.store._now", lambda: 100.0)
     store = TokenStore(max_unapproved_clients=2, unapproved_client_ttl_s=10_000)
     store.save_client(_client("authorized", 1))
@@ -159,13 +162,20 @@ def test_unapproved_client_count_is_bounded_without_evicting_authorized_clients(
 
     store.save_client(_client("unapproved-old", 2))
     store.save_client(_client("unapproved-new", 3))
-    store.save_client(_client("unapproved-newest", 4))
+    with pytest.raises(RegistrationCapacityError):
+        store.save_client(_client("unapproved-newest", 4))
 
-    assert store.get_client("authorized") is not None
-    assert store.get_client("unapproved-old") is None
-    assert set(store.clients()) == {
-        "authorized", "unapproved-new", "unapproved-newest",
-    }
+    assert set(store.clients()) == {"authorized", "unapproved-old", "unapproved-new"}
+
+
+def test_unapproved_registrations_expire_after_an_hour_by_default(monkeypatch):
+    now = [10_000.0]
+    monkeypatch.setattr("vecgrep.backend.auth.store._now", lambda: now[0])
+    store = TokenStore()
+    store.save_client(_client("pending", 10_000))
+    now[0] += 3601
+    store.save_client(_client("later", 13_601))
+    assert store.get_client("pending") is None
 
 
 def test_expired_unapproved_clients_are_pruned(monkeypatch):

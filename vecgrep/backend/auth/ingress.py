@@ -5,6 +5,7 @@ from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 PRIVATE_INGRESS = "vecgrep.private_ingress"
+PUBLIC_INGRESS = "vecgrep.public_ingress"
 
 # The only socket peers that count as "this machine". Not ipaddress.is_loopback:
 # that admits all of 127.0.0.0/8, so a local forwarder bound to 127.0.0.2 would
@@ -66,7 +67,8 @@ class OAuthIngressMiddleware:
         # Unknown ingress never acquires private-network privileges.
         scope = dict(scope)
         scope[PRIVATE_INGRESS] = port == self.private_port
-        if port == self.public_port and port != self.private_port:
+        scope[PUBLIC_INGRESS] = port == self.public_port and port != self.private_port
+        if scope[PUBLIC_INGRESS]:
             if scope["type"] == "websocket":
                 await send({"type": "websocket.close", "code": 1008})
                 return

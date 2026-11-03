@@ -92,7 +92,10 @@ implements one interface (`OAuthAuthorizationServerProvider`, 9 methods in
 - **PKCE** verification (the client proves it started the flow it's
   finishing),
 - **Dynamic Client Registration** — the client registers itself at connect
-  time, which is why there are no client IDs to configure,
+  time, which is why there are no client IDs to configure. Each address may
+  register six clients an hour. A registration that is never approved expires
+  after an hour, and at most 32 can be pending; a new one at the cap is refused,
+  and pending ones are kept,
 - bearer-token gating of every `/mcp` request outside the trusted-network
   bypasses.
 
@@ -145,8 +148,13 @@ bearer another MCP registered only under its own approval of Gemini: its
 scopes, and no later expiry than that approval. Revoking a Gemini bearer at
 any MCP revokes it at all of them. An entry lasts as long as the longest
 copy any MCP records, so a revocation holds while any MCP could still accept
-that token. Gemini is recognised by its OAuth redirect hosts, not by its
-client name. Other clients never touch the registry.
+that token. Gemini is recognised by its exact redirect URIs, listed
+space-separated in `OAUTH_GOOGLE_REDIRECT_URIS`, not by its client name or by
+Google's redirect hosts alone: any Google Cloud project can register a redirect
+on those hosts. A Gemini connector's redirects include the owner's Google
+account in the path (`/r/user_bound_custom-mcp-<account>-<host>`), so copy them
+from the approved Gemini client. With the setting empty, no client is treated
+as Gemini. Other clients never touch the registry.
 
 Scopes are `read` and `propose` only, and write-shaped tools enforce `propose`
 at execution. The write path stays

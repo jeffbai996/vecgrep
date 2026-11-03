@@ -2454,8 +2454,10 @@ def _offload_sync_tools(fmcp: Any) -> None:
 _PROVIDER = None  # singleton — same token store for the gate + the root routes
 
 _REGISTRATION_MAX_BODY_BYTES = 64 * 1024
-_REGISTRATION_RATE_LIMIT = 30
-_REGISTRATION_RATE_WINDOW_S = 60
+# A connector registers once. Six an hour per caller covers retries while
+# setting one up, and keeps a single address from churning registrations.
+_REGISTRATION_RATE_LIMIT = 6
+_REGISTRATION_RATE_WINDOW_S = 3600
 
 
 def _shared_provider(oauth_issuer_url: str | None = None):

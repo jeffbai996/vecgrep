@@ -588,8 +588,10 @@ def test_register_rate_limits_bursts(oauth_client):
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
     }
-    responses = [oauth_client.post("/register", json=registration) for _ in range(31)]
-    assert all(r.status_code == 201 for r in responses[:30])
+    from vecgrep.mcp import server as mcp_server
+    budget = mcp_server._REGISTRATION_RATE_LIMIT
+    responses = [oauth_client.post("/register", json=registration) for _ in range(budget + 1)]
+    assert all(r.status_code == 201 for r in responses[:budget])
     assert responses[-1].status_code == 429
     assert responses[-1].headers["retry-after"]
 

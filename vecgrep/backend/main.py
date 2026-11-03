@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.routing import Mount, Route
 
@@ -46,6 +46,14 @@ from .auth.redirects import (
 )
 from .auth.rest import TokenlessRestHostMiddleware
 from .auth.throttle import UNLOCK_FAILURES, client_key
+from .auth.ingress import PUBLIC_INGRESS
+
+
+def _public_ingress(request: Request) -> bool:
+    """True on the public OAuth listener. The ingress middleware passes
+    /.well-known/* through for the OAuth documents; anything else under it
+    reaches the UI catch-all, which must not answer there."""
+    return request.scope.get(PUBLIC_INGRESS) is True
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
@@ -729,10 +737,12 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
             _icon_route(_name, _media)
 
         @app.get("/{full_path:path}")
-        def spa(full_path: str) -> FileResponse:
+        def spa(full_path: str, request: Request):
             # SPA fallback — any unknown path serves index.html so React
             # router can take over. /api routes are matched earlier and
             # never hit this handler.
+            if _public_ingress(request):
+                return PlainTextResponse("Not found", status_code=404)
             return FileResponse(FRONTEND_DIR / "index.html")
     else:
         @app.get("/")
@@ -744,11 +754,13 @@ h1, p.sub {{ overflow-wrap: anywhere; }} input[type="password"] {{ font-size: 16
             }
 
         @app.get("/{full_path:path}")
-        def no_frontend_fallback(full_path: str) -> dict:
+        def no_frontend_fallback(full_path: str, request: Request):
             # Mirror the SPA catch-all's shape: any unknown path answers 200
             # with the same message, so client behavior is uniform whether or
             # not the frontend is built. /api and the OAuth root routes are
             # matched earlier and never reach this.
+            if _public_ingress(request):
+                return PlainTextResponse("Not found", status_code=404)
             return no_frontend()
 
     from .auth.ingress import OAuthIngressMiddleware

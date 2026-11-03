@@ -54,3 +54,17 @@ def test_registrations_through_the_ingress_are_counted_per_forwarded_address(mon
     first = [asyncio.run(_drive(app, "198.51.100.7")) for _ in range(3)]
     assert first[2] == 429
     assert asyncio.run(_drive(app, "203.0.113.9")) != 429
+
+
+def test_the_default_budget_is_six_registrations_an_hour_per_caller(monkeypatch):
+    """A connector registers once; an hour-long window keeps one address from
+    churning registrations in minutes (funnel review 2026-11-02)."""
+    import time
+    clock = [1_000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    limiter = server._RegistrationRateLimiter()
+    assert [limiter.allow("a")[0] for _ in range(6)] == [True] * 6
+    clock[0] += 59 * 60
+    assert limiter.allow("a")[0] is False
+    clock[0] += 2 * 60
+    assert limiter.allow("a")[0] is True

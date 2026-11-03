@@ -116,6 +116,18 @@ def test_public_listener_does_not_expose_rest(ingress_app):
         assert client.get("/api/health").status_code == 404
 
 
+def test_public_listener_answers_404_for_unknown_well_known_paths(ingress_app):
+    listener = Listener(ingress_app, 8766)
+    with TestClient(listener, base_url="https://example.com") as client:
+        assert client.get("/.well-known/oauth-authorization-server").status_code == 200
+        for path in ("/.well-known/oauth-authorization-server/zzz", "/.well-known/xff-probe"):
+            response = client.get(path)
+            assert response.status_code == 404
+            assert "<html" not in response.text.lower()
+        listener.port = 8765
+        assert client.get("/some/ui/route").status_code == 200
+
+
 def test_public_listener_fails_closed_without_oauth(vg_home, monkeypatch):
     monkeypatch.setenv("VECGREP_OAUTH_ENABLED", "0")
     with TestClient(Listener(create_app(), 8766)) as client:

@@ -27,7 +27,7 @@ from .redirects import (
     validate_redirect_uri,
 )
 from .scopes import VALID_SCOPES, UnsupportedScope, effective_scopes
-from .store import _ACCESS_TTL_S, TokenStore, _is_google_connector
+from .store import _ACCESS_TTL_S, RegistrationCapacityError, TokenStore, _is_google_connector
 
 
 def _same_origin_resource(requested: str | None, configured: str | None) -> bool:
@@ -78,7 +78,11 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
                 validate_redirect_uri(str(uri))
         except ValueError as exc:
             raise RegistrationError("invalid_redirect_uri", "Invalid redirect URI") from exc
-        self.store.save_client(client_info)
+        try:
+            self.store.save_client(client_info)
+        except RegistrationCapacityError as exc:
+            raise RegistrationError("invalid_client_metadata",
+                                    "Registration capacity reached; try again later") from exc
 
     # ----- authorize: issue a code, redirect back to the client -----
     async def authorize(

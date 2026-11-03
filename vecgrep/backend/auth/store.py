@@ -61,7 +61,9 @@ _MAX_UNAPPROVED_CLIENTS = 32
 # earlier access tokens to expire on their own; the cap keeps that from growing
 # the state without bound. Matches ibkr-mcp.
 _MAX_ACCESS_PER_CLIENT = 16
-_UNAPPROVED_CLIENT_TTL_S = 24 * 3600
+# A connector is approved minutes after it registers. An hour frees a slot
+# held by an abandoned or hostile registration. Matches ibkr-mcp.
+_UNAPPROVED_CLIENT_TTL_S = 3600
 
 
 def _now() -> float:
@@ -109,11 +111,20 @@ def _is_google_connector(client: OAuthClientInformationFull | None) -> bool:
     uris = [str(u) for u in (getattr(client, "redirect_uris", None) or ())]
     if not uris:
         return False
+    # Any Google Cloud project can register a redirect on Google's hosts, so
+    # the host alone does not identify the owner's connector. Its exact
+    # redirects are pinned; with none pinned, no client is treated as Gemini.
+    pinned = frozenset(os.environ.get("OAUTH_GOOGLE_REDIRECT_URIS", "").split())
     for uri in uris:
         parts = urlsplit(uri)
-        if parts.scheme != "https" or (parts.hostname or "") not in _GOOGLE_REDIRECT_HOSTS:
+        if (parts.scheme != "https" or (parts.hostname or "") not in _GOOGLE_REDIRECT_HOSTS
+                or uri not in pinned):
             return False
     return True
+
+
+class RegistrationCapacityError(Exception):
+    """The unapproved-registration cap is full."""
 
 
 class TokenStore:
@@ -349,16 +360,21 @@ class TokenStore:
 
     # ----- clients -----
     def save_client(self, info: OAuthClientInformationFull) -> None:
+        """Store a client. A new registration at the unapproved cap is refused:
+        evicting the oldest pending client let one caller push out a connector
+        still waiting for approval."""
         assert info.client_id is not None
+        unapproved = self._prune_unapproved_clients()
+        if info.client_id not in self._clients and unapproved >= self._max_unapproved_clients:
+            raise RegistrationCapacityError("registration capacity reached")
         self._clients[info.client_id] = info
-        self._prune_unapproved_clients()
         self._save()
 
-    def _prune_unapproved_clients(self) -> None:
-        """Bound anonymous DCR state without disrupting approved clients.
+    def _prune_unapproved_clients(self) -> int:
+        """Drop expired anonymous registrations; return how many remain.
 
         Possessing any access or refresh token marks a client authorized. Such
-        clients are never evicted here, even if a token has expired; explicit
+        clients are never pruned here, even if a token has expired; explicit
         client revocation remains the operation that makes one pruneable.
         """
         authorized = {
@@ -366,7 +382,7 @@ class TokenStore:
             for token in (*self._access.values(), *self._refresh.values())
         }
         now = _now()
-        unapproved: list[tuple[float, str]] = []
+        unapproved = 0
         for client_id, client in list(self._clients.items()):
             if client_id in authorized:
                 continue
@@ -377,11 +393,8 @@ class TokenStore:
             ):
                 self._clients.pop(client_id, None)
                 continue
-            unapproved.append((float(issued_at or now), client_id))
-
-        overflow = len(unapproved) - self._max_unapproved_clients
-        for _, client_id in sorted(unapproved)[:max(0, overflow)]:
-            self._clients.pop(client_id, None)
+            unapproved += 1
+        return unapproved
 
     def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         return self._clients.get(client_id)

@@ -63,6 +63,21 @@ def _fresh_rerank_score_cache() -> Iterator[None]:
     rerank.clear_score_cache()
 
 
+# The Google connector redirects the OAuth tests register. Production pins the
+# owner's own Gemini redirects the same way, in OAUTH_GOOGLE_REDIRECT_URIS.
+PINNED_GOOGLE_REDIRECTS = [
+    "https://oauth-redirect.googleusercontent.com/r/custom-mcp",
+    *(f"https://{host}.googleusercontent.com/{kind}/user_bound_custom-mcp-host_example"
+      for kind in ("r", "a")
+      for host in ("oauth-redirect-sandbox", "oauth-redirect-test", "oauth-redirect")),
+]
+
+
+@pytest.fixture(autouse=True)
+def _pinned_google_connector(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OAUTH_GOOGLE_REDIRECT_URIS", " ".join(PINNED_GOOGLE_REDIRECTS))
+
+
 @pytest.fixture(autouse=True)
 def vg_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Isolate VECGREP_HOME per test. Resets the config singleton so the
