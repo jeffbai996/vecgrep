@@ -3490,8 +3490,11 @@ def build_http_app(
             "WRITE a new entry immediately — no human confirm needed. Lands in "
             "the single corpus the operator opened up for direct writes; there "
             "is no corpus parameter, and this tool cannot edit or delete "
-            "anything. USE THIS when the user says 'save this' / 'remember "
-            "this' / 'note this down'. For any other corpus, use propose_write."
+            "anything. For a dated snapshot, a point-in-time read, or an "
+            "imported or generated document, written once with a dated title. "
+            "Not the home for 'remember this': a durable fact goes to the "
+            "operator's memory store and a record the team made goes to its "
+            "journal. For any other corpus, use propose_write."
         )
     )
     def write(content: str, title: str | None = None,
