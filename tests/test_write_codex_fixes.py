@@ -61,14 +61,14 @@ def test_two_new_proposals_get_distinct_ids(tmp_path):
     a = propose("notes", "first version", tmp_path)
     b = propose("notes", "second version", tmp_path)
     assert a.doc_id != b.doc_id
-    assert re.match(r"^notes-\d+$", a.doc_id) and re.match(r"^notes-\d+$", b.doc_id)
+    assert re.match(r"^notes-[0-9a-z]+$", a.doc_id) and re.match(r"^notes-[0-9a-z]+$", b.doc_id)
     assert a.proposal_id != b.proposal_id
 
 
 def test_proposal_id_includes_doc_id_for_readability(tmp_path):
     import re
     p = propose("notes", "x", tmp_path)
-    assert re.match(r"^prop-notes-\d+-", p.proposal_id)
+    assert re.match(r"^prop-notes-[0-9a-z]+-", p.proposal_id)
 
 
 # --- P1: frontmatter parsed into metadata at index time --------------------

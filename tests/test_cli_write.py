@@ -32,7 +32,7 @@ def test_write_creates_and_indexes_a_doc(runner_home):
     r = runner_home.invoke(cli, ["write", "notes", "Cats sit on mats."])
     assert r.exit_code == 0, r.output
     # ids are nanosecond timestamps now (notes-<digits>), not a serial.
-    assert re.search(r"notes-\d+", r.output)  # assigned id reported
+    assert re.search(r"notes-[0-9a-z]+", r.output)  # assigned id reported
     # the markdown doc was written to the corpus dir (files-are-truth)
     import glob
     import os as _os
@@ -65,7 +65,7 @@ def test_edit_overwrites_existing(runner_home):
     w = runner_home.invoke(cli, ["write", "notes", "old content"])
     assert w.exit_code == 0, w.output
     # Use the generated id so the edit exercises the actual newly written doc.
-    match = re.search(r"notes-\d+", w.output)
+    match = re.search(r"notes-[0-9a-z]+", w.output)
     assert match is not None
     doc_id = match.group(0)
     r = runner_home.invoke(cli, ["edit", doc_id, "new content"])

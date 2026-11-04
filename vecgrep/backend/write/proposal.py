@@ -76,8 +76,19 @@ def _slug_prefix(corpus: str) -> str:
     return s
 
 
+_BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def _base36(n: int) -> str:
+    out = ""
+    while n:
+        n, r = divmod(n, 36)
+        out = _BASE36[r] + out
+    return out or "0"
+
+
 def next_doc_id(corpus_dir: Path, corpus: str) -> str:
-    """A fresh doc id for a corpus dir: `<prefix>-<epoch-nanos>`.
+    """A fresh doc id for a corpus dir: `<prefix>-<epoch-nanos in base36>`.
 
     Timestamp-based, not a running serial: agent-proposed entries are throwaway
     (many route upstream on confirm and never persist locally), so a serial
@@ -85,14 +96,17 @@ def next_doc_id(corpus_dir: Path, corpus: str) -> str:
     seconds — propose() writes NOTHING to disk, so a same-second disk-existence
     check can't catch a collision; back-to-back proposals would otherwise share a
     seconds-granularity id and overwrite each other on confirm. Nanos make
-    distinct ids for rapid-fire calls. Still all-digits → `_ID_RE`-valid, so
-    edit/delete id-validation and the corpus-boundary check are unaffected. The
+    distinct ids for rapid-fire calls. The suffix is base36 (12 characters until
+    the year 2100, versus 19 digits): a 19-digit id next to the corpus prefix
+    read as a corpus name in client tool cards. Lowercase alnum keeps it
+    `_ID_RE`-valid, so edit/delete id-validation and the corpus-boundary check
+    are unaffected, and equal-length suffixes still sort by time. The
     disk-existence bump stays as a paranoia backstop."""
     prefix = _slug_prefix(corpus)
     ts = time.time_ns()
-    while (corpus_dir / f"{prefix}-{ts}.md").exists():
+    while (corpus_dir / f"{prefix}-{_base36(ts)}.md").exists():
         ts += 1
-    return f"{prefix}-{ts}"
+    return f"{prefix}-{_base36(ts)}"
 
 
 def _is_single_line_scalar(value: str) -> bool:

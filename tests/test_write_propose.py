@@ -10,7 +10,7 @@ import pytest
 
 from vecgrep.backend.write import proposal as P
 
-_ID = re.compile(r"^note-\d+$")  # <prefix>-<epoch> (timestamp, not a serial)
+_ID = re.compile(r"^note-[0-9a-z]+$")  # <prefix>-<base36 epoch nanos> (timestamp, not a serial)
 
 
 def test_propose_assigns_timestamp_id(tmp_path):
@@ -43,7 +43,7 @@ def test_rendered_doc_carries_schema_frontmatter(tmp_path):
     pr = P.propose("note", "body text here", tmp_path,
                    meta={"origin": "human", "source_kind": "decision", "tags": ["a", "b"]})
     r = pr.rendered
-    assert re.search(r"id: note-\d+", r)
+    assert re.search(r"id: note-[0-9a-z]+", r)
     assert "status: active" in r
     assert "origin: human" in r
     assert "source_kind: decision" in r

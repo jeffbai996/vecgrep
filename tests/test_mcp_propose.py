@@ -32,7 +32,7 @@ def test_propose_writes_nothing_but_persists(home):
     from vecgrep.mcp import server as S
     r = json.loads(S._run_propose("notes", "a proposed fact", source_kind="fact"))
     import re as _re
-    assert r["proposal_id"] and _re.match(r"^notes-\d+$", r["doc_id"])
+    assert r["proposal_id"] and _re.match(r"^notes-[0-9a-z]+$", r["doc_id"])
     assert r["is_edit"] is False
     h = os.environ["VECGREP_HOME"]
     # no doc written
@@ -124,7 +124,7 @@ def test_propose_hook_fires_with_payload(home, tmp_path, monkeypatch):
     assert out.exists(), "hook should have run"
     seen = json.loads(out.read_text())
     import re as _re
-    assert _re.match(r"^prop-notes-\d+-", seen["proposal_id"])
+    assert _re.match(r"^prop-notes-[0-9a-z]+-", seen["proposal_id"])
     assert seen["corpus"] == "notes"
     assert "card me" in seen["preview"]
 

@@ -7,6 +7,11 @@ patch = fixes). The version is a single source of truth in
 
 ## [Unreleased]
 
+### Changed
+- New document ids use a base36 suffix (`notes-dmm8idahfncw`) instead of the
+  19-digit epoch-nanosecond suffix. Existing ids stay valid; the suffix still
+  matches the id rule and equal-length suffixes still sort by time.
+
 ### Added
 - Temp corpus for short-lived documents. `VECGREP_TEMP_CORPUS=<name>` enables
   the MCP `write_temp` and `renew_temp` tools for one plain local corpus. Every
