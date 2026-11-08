@@ -109,10 +109,11 @@ class Settings:
     # is unreachable, before considering OpenAI. Lets a deployment run a primary
     # (e.g. a GPU box) with a local-host fallback. Unset (None) = no fallback.
     ollama_fallback_url: str | None = None
-    # Optional Ollama endpoint for bulk embedding. Batches (indexing) go here
-    # first and fall back to the primary on any failure; single texts
-    # (queries) always use the primary. It must serve the same model as the
-    # primary so vectors stay compatible. Unset (None) = primary only.
+    # Optional Ollama endpoints for bulk embedding, comma-separated. Batches
+    # (indexing) go here first, spread across every endpoint that is up, and
+    # fall back to the primary on any failure; single texts (queries) always
+    # use the primary. Each must serve the same model as the primary so
+    # vectors stay compatible. Unset (None) = primary only.
     ollama_overflow_url: str | None = None
     # Optional per-request Ollama runner batch bound. Lowering this reduces
     # model working memory without changing weights, context, or vector shape.
@@ -398,7 +399,9 @@ def _validate_rest_allowed_host(value: str) -> None:
 def validate_settings(settings: Settings) -> None:
     _validate_url("ollama_url", settings.ollama_url)
     _validate_url("ollama_fallback_url", settings.ollama_fallback_url)
-    _validate_url("ollama_overflow_url", settings.ollama_overflow_url)
+    for url in (settings.ollama_overflow_url or "").split(","):
+        if url.strip():
+            _validate_url("ollama_overflow_url", url.strip())
     _validate_url("qdrant_url", settings.qdrant_url)
     _validate_url("oauth_issuer_url", settings.oauth_issuer_url)
     if settings.oauth_tailnet_approval_url:

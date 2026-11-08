@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -36,6 +38,25 @@ _MIN_CLIP_CHARS = 64
 # again. A host whose GPU has been handed to something else refuses every
 # request; without a cooldown each batch would pay that round trip first.
 _OVERFLOW_COOLDOWN_S = 120.0
+
+
+def parse_overflow_urls(value: str | None) -> list[str]:
+    """The overflow endpoints named by a comma-separated setting, in order."""
+    return [u.strip().rstrip("/") for u in (value or "").split(",") if u.strip()]
+
+
+@dataclass(eq=False)
+class _Overflow:
+    """One overflow endpoint and its own health.
+
+    `benched_until` and `in_flight` are read and written under the backend's
+    pool lock, so concurrent callers see one consistent view of the pool.
+    """
+
+    url: str
+    client: httpx.Client
+    benched_until: float = 0.0
+    in_flight: int = field(default=0)
 
 
 def _is_too_long(body: str) -> bool:
@@ -82,15 +103,15 @@ class OllamaBackend(EmbedBackend):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.num_batch = num_batch
-        # Bulk-embedding endpoint serving the same model. Optional, and never
-        # load-bearing: every failure there falls back to the primary.
-        self.overflow_url = overflow_url.rstrip("/") if overflow_url else None
+        # Bulk-embedding endpoints serving the same model, comma-separated in
+        # the setting. Optional, and never load-bearing: every failure there
+        # falls back to the primary. Listed order is preference order.
+        urls = parse_overflow_urls(overflow_url)
+        self.overflow_url = ",".join(urls) or None
         self.overflow_cooldown_s = _OVERFLOW_COOLDOWN_S
         self._clock = clock
-        self._overflow_benched_until = 0.0
-        self._overflow_client = (
-            self._make_client(read=timeout) if self.overflow_url else None
-        )
+        self._pool_lock = threading.Lock()
+        self._overflows = [_Overflow(u, self._make_client(read=timeout)) for u in urls]
         # Phase-split timeout: a SHORT connect timeout so an unreachable host
         # (asleep / no service) fails over fast instead of hanging the full
         # read budget, but a LONG read timeout so a slow-but-alive embed (big
@@ -100,6 +121,15 @@ class OllamaBackend(EmbedBackend):
         self._client = self._make_client(read=timeout)
         known_dim = _KNOWN_DIMS.get(model) or _KNOWN_DIMS.get(model.partition(":")[0])
         self.dim = known_dim or self._probe_dim()
+
+    @property
+    def _overflow_client(self) -> httpx.Client | None:
+        """The first overflow endpoint's client; kept for single-endpoint callers."""
+        return self._overflows[0].client if self._overflows else None
+
+    @_overflow_client.setter
+    def _overflow_client(self, client: httpx.Client) -> None:
+        self._overflows[0].client = client
 
     def _request_payload(self, input_: str | list[str]) -> dict:
         payload = {"model": self.model, "input": input_, "truncate": True}
@@ -148,10 +178,10 @@ class OllamaBackend(EmbedBackend):
         # A single text is a query (or a one-chunk document): latency matters
         # more than offloading it, so only multi-text calls use the overflow.
         bulk = len(texts) > 1
+        windows = [texts[i : i + _MAX_BATCH] for i in range(0, len(texts), _MAX_BATCH)]
+        done = self._embed_windows_on_overflow(windows) if bulk else [None] * len(windows)
         out: list[list[float]] = []
-        for i in range(0, len(texts), _MAX_BATCH):
-            window = texts[i : i + _MAX_BATCH]
-            rows = self._embed_overflow(window) if bulk else None
+        for window, rows in zip(windows, done):
             if rows is None:
                 rows = self._embed_batch(window, route="primary" if bulk else None)
             if rows is None:
@@ -159,21 +189,84 @@ class OllamaBackend(EmbedBackend):
             out.extend(rows)
         return out
 
-    def _embed_overflow(self, texts: list[str]) -> list[list[float]] | None:
-        """The window from the overflow endpoint, or None to use the primary.
+    def _claim_overflow(self, exclude: set[int] = frozenset()) -> _Overflow | None:
+        """The least-busy endpoint that is not benched, first-listed on a tie."""
+        now = self._clock()
+        with self._pool_lock:
+            ready = [o for i, o in enumerate(self._overflows)
+                     if i not in exclude and now >= o.benched_until]
+            if not ready:
+                return None
+            chosen = min(ready, key=lambda o: o.in_flight)
+            chosen.in_flight += 1
+            return chosen
+
+    def _release_overflow(self, endpoint: _Overflow) -> None:
+        with self._pool_lock:
+            endpoint.in_flight -= 1
+
+    def _embed_windows_on_overflow(
+        self, windows: list[list[str]]
+    ) -> list[list[list[float]] | None]:
+        """Embed windows across the overflow pool; None marks a window for the primary.
+
+        One worker per available endpoint pulls the next unclaimed window, so
+        a faster host simply takes more of them. A worker whose endpoint gets
+        benched stops pulling; the others carry on, and whatever is left when
+        every worker has stopped goes to the primary in the caller.
+        """
+        results: list[list[list[float]] | None] = [None] * len(windows)
+        if not self._overflows:
+            return results
+        next_index = iter(range(len(windows)))
+        index_lock = threading.Lock()
+
+        def take() -> int | None:
+            with index_lock:
+                return next(next_index, None)
+
+        def work(endpoint: _Overflow) -> None:
+            try:
+                while (i := take()) is not None:
+                    results[i] = self._embed_overflow(endpoint, windows[i])
+                    if results[i] is None and self._clock() < endpoint.benched_until:
+                        return
+            finally:
+                self._release_overflow(endpoint)
+
+        workers: list[_Overflow] = []
+        claimed: set[int] = set()
+        while len(workers) < len(windows):
+            endpoint = self._claim_overflow(exclude=claimed)
+            if endpoint is None:
+                break
+            claimed.add(self._overflows.index(endpoint))
+            workers.append(endpoint)
+        if len(workers) <= 1:
+            if workers:
+                work(workers[0])
+            return results
+        threads = [threading.Thread(target=work, args=(e,), daemon=True) for e in workers[1:]]
+        for t in threads:
+            t.start()
+        work(workers[0])
+        for t in threads:
+            t.join()
+        return results
+
+    def _embed_overflow(self, endpoint: _Overflow, texts: list[str]) -> list[list[float]] | None:
+        """The window from one overflow endpoint, or None to use the primary.
 
         Only a clean, correctly-sized, all-finite answer counts. Everything
-        else benches the overflow for the cooldown and returns None. In
+        else benches that endpoint for the cooldown and returns None. In
         particular a refusal is never routed into the per-chunk path, whose
         last resort is a zero vector: a refused overflow says nothing about
         the chunks, and the primary can embed them properly.
         """
-        if self._overflow_client is None or self._clock() < self._overflow_benched_until:
-            return None
         data, rows, reason = None, None, ""
         try:
-            r = self._overflow_client.post(
-                f"{self.overflow_url}/api/embed",
+            r = endpoint.client.post(
+                f"{endpoint.url}/api/embed",
                 json=self._request_payload(texts),
             )
             if r.status_code == 200:
@@ -202,10 +295,11 @@ class OllamaBackend(EmbedBackend):
         record(data if isinstance(data, dict) else {}, model=self.model, route="overflow",
                outcome="fallback", reason=reason or "bad_vectors")
         if reason != "input_too_long":
-            self._overflow_benched_until = self._clock() + self.overflow_cooldown_s
+            with self._pool_lock:
+                endpoint.benched_until = self._clock() + self.overflow_cooldown_s
             logger.info(
-                "Overflow embed endpoint %s did not answer cleanly; using the primary "
-                "for %.0fs", self.overflow_url, self.overflow_cooldown_s,
+                "Overflow embed endpoint %s did not answer cleanly; skipping it "
+                "for %.0fs", endpoint.url, self.overflow_cooldown_s,
             )
         return None
 

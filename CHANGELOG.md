@@ -7,6 +7,19 @@ patch = fixes). The version is a single source of truth in
 
 ## [Unreleased]
 
+### Added
+- `ollama_overflow_url` / `VECGREP_OLLAMA_OVERFLOW_URL` accepts several
+  endpoints, comma-separated, each serving the primary's model. A bulk batch
+  that spans several 64-text windows is embedded on every endpoint that is up
+  at once, and a faster host takes more windows. Each endpoint has its own
+  two-minute cooldown, so one host that sleeps or refuses does not stop the
+  others. A single-window batch goes to the least busy endpoint, the first
+  listed on a tie. Queries still use only the primary, and a single URL
+  behaves as before.
+- Index prewarming gathers texts from several documents into one embed call of
+  up to 512 texts, so a directory of small files reaches the overflow pool as
+  multi-window batches.
+
 ### Changed
 - New document ids use a base36 suffix (`notes-dmm8idahfncw`) instead of the
   19-digit epoch-nanosecond suffix. Existing ids stay valid; the suffix still

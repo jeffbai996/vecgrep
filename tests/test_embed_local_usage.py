@@ -34,7 +34,7 @@ def test_each_embedding_lane_records_reported_input_tokens(receipt_db, lane):
     try:
         if lane == "batch": backend._embed_batch(["private text"])
         elif lane == "single": backend._embed_one_resilient("private text")
-        else: backend._embed_overflow(["private text"])
+        else: backend._embed_overflow(backend._overflows[0], ["private text"])
     finally:
         backend._client.close()
         backend._overflow_client.close()

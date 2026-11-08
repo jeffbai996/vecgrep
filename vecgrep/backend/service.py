@@ -415,6 +415,9 @@ COSINE_FLOOR_MARGIN = float(os.environ.get("VECGREP_COSINE_FLOOR_MARGIN", "0.10"
 _ID_NAMESPACE = uuid.UUID("3a7d9e5f-0c1b-4a2e-9f4d-abcdef000001")
 
 _SECONDS_PER_DAY = 86400.0
+# Texts gathered across documents before one prewarm embed call: eight
+# 64-text windows, enough to keep two or three overflow hosts busy at once.
+_PREWARM_BATCH = 512
 
 # Lowest multiplier recency decay may apply (1.0 disables decay's effect,
 # 0.0 restores the pre-2026-08 unfloored curve). 0.5 measured best on the
@@ -901,6 +904,16 @@ class VecgrepService:
             docs = _expand(source, adapter, include=include)
             recorded_hashes = corpus.source_hashes if corpus is not None else {}
             max_rows = getattr(self._embed_cache, "_max_rows", 0)
+            # Texts from several documents share one embed call, so a backlog
+            # of small files still reaches the backend as multi-window batches
+            # that the overflow pool can spread across its hosts.
+            pending: list[str] = []
+
+            def flush() -> None:
+                if pending:
+                    backend.embed(pending)
+                    pending.clear()
+
             for doc in docs:
                 doc_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
                 if recorded_hashes.get(doc.source_id) == doc_hash:
@@ -915,7 +928,12 @@ class VecgrepService:
                     continue
                 texts = [c.search_text or c.text for c in chunks if (c.search_text or c.text)]
                 if texts and (max_rows <= 0 or len(texts) <= max_rows):
-                    backend.embed(texts)
+                    if max_rows > 0 and len(pending) + len(texts) > max_rows:
+                        flush()
+                    pending.extend(texts)
+                    if len(pending) >= _PREWARM_BATCH:
+                        flush()
+            flush()
         except Exception:  # noqa: BLE001 -- Prewarm is best-effort; canonical errors surface inside _index_locked.
             return
 
