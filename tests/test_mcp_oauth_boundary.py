@@ -571,3 +571,36 @@ def test_oauth_read_only_route_shares_auth_and_hides_writes(
     assert res["isError"] is True
     assert "mcp/www_authenticate" not in (res.get("_meta") or {})
     assert "disabled on the read-only MCP endpoint" in res["content"][0]["text"]
+
+    # A Google connector token on base /mcp also gets strict read-only tools automatically
+    from mcp.shared.auth import OAuthClientInformationFull
+    from pydantic import AnyUrl
+    g_uri = AnyUrl("https://oauth-redirect.googleusercontent.com/r/custom-mcp")
+    store = mcp_server._shared_provider().store
+    store.save_client(OAuthClientInformationFull(
+        client_id="google-ro-client", redirect_uris=[g_uri], scope="read propose",
+    ))
+    g_access, _ = store.issue_token_pair("google-ro-client", ["read", "propose"], resource=TEST_ISSUER)
+    g_headers = MCP_HEADERS | {
+        "X-Forwarded-For": "203.0.113.10",
+        "Authorization": f"Bearer {g_access.token}",
+    }
+    g_listed = loopback_client.post("/mcp", json=LIST_TOOLS, headers=g_headers)
+    assert g_listed.status_code == 200
+    assert {t["name"] for t in g_listed.json()["result"]["tools"]} == set(mcp_server._READ_ONLY_MCP_TOOLS)
+    g_denied = loopback_client.post(
+        "/mcp",
+        headers=g_headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "propose_write",
+                "arguments": {"content": "nope", "corpus": "notes"},
+            },
+        },
+    )
+    assert g_denied.status_code == 200
+    assert g_denied.json()["result"]["isError"] is True
+    assert "disabled on the read-only MCP endpoint" in g_denied.json()["result"]["content"][0]["text"]

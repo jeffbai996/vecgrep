@@ -230,6 +230,9 @@ class TokenStore:
                 changed = True
         return changed
 
+    def is_google_client(self, client_id: str | None) -> bool:
+        return bool(client_id and _is_google_connector(self._clients.get(client_id)))
+
     def _access_ttl_for_client(self, client_id: str) -> int:
         if _is_google_connector(self._clients.get(client_id)):
             return _REFRESH_TTL_S
