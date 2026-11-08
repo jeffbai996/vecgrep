@@ -506,3 +506,68 @@ def test_configured_browser_origin_can_discover_oauth_without_bypassing_it(vg_ho
             "Access-Control-Request-Method": "POST"})
         assert foreign.status_code == 400
         assert "access-control-allow-origin" not in foreign.headers
+
+
+@pytest.mark.parametrize("ro_path", ["/mcp/ro", "/mcp?mode=ro"])
+def test_oauth_read_only_route_shares_auth_and_hides_writes(
+    loopback_client: TestClient,
+    ro_path: str,
+) -> None:
+    # Unauthenticated proxied request to /mcp/ro requires OAuth
+    unauth = loopback_client.post(
+        ro_path,
+        json=INITIALIZE,
+        headers=MCP_HEADERS | {"X-Forwarded-For": "203.0.113.10"},
+    )
+    assert unauth.status_code == 401
+    assert unauth.headers["www-authenticate"].startswith("Bearer ")
+
+    # Protected resource metadata is served for /mcp/ro as well
+    meta_ro = loopback_client.get(
+        "/.well-known/oauth-protected-resource/mcp/ro",
+        headers={"X-Forwarded-For": "203.0.113.10"},
+    )
+    assert meta_ro.status_code == 200
+    assert meta_ro.json()["resource"] == f"{TEST_ISSUER}/ro"
+    assert meta_ro.json()["scopes_supported"] == ["read"]
+
+    access = mcp_server._shared_provider().store.issue_access_token(
+        "ro-oauth-client", ["read"], ttl_s=60, resource=TEST_ISSUER
+    )
+    auth_headers = MCP_HEADERS | {
+        "X-Forwarded-For": "203.0.113.10",
+        "Authorization": f"Bearer {access.token}",
+    }
+    listed = loopback_client.post(ro_path, json=LIST_TOOLS, headers=auth_headers)
+    assert listed.status_code == 200
+    tools = listed.json()["result"]["tools"]
+    assert {t["name"] for t in tools} == set(mcp_server._READ_ONLY_MCP_TOOLS)
+    for t in tools:
+        assert t["annotations"] == {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        }
+        assert t["securitySchemes"] == [{"type": "oauth2", "scopes": ["read"]}]
+
+    # Write tool call on /mcp/ro is rejected as disabled on read-only endpoint,
+    # NOT as an insufficient_scope step-up challenge.
+    denied = loopback_client.post(
+        ro_path,
+        headers=auth_headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "propose_write",
+                "arguments": {"content": "nope", "corpus": "notes"},
+            },
+        },
+    )
+    assert denied.status_code == 200
+    res = denied.json()["result"]
+    assert res["isError"] is True
+    assert "mcp/www_authenticate" not in (res.get("_meta") or {})
+    assert "disabled on the read-only MCP endpoint" in res["content"][0]["text"]

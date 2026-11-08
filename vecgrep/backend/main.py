@@ -269,6 +269,8 @@ def create_app() -> FastAPI:
             name = resolved["client"]
             resource_raw = (q.get("resource") or [""])[0]
             resource_path = urlsplit(resource_raw).path.rstrip("/")
+            if resource_path.endswith("/ro"):
+                resource_path = resource_path[:-3].rstrip("/")
             service = "vecgrep"
             if resource_path and not resource_path.endswith("/vecgrep-mcp"):
                 import os

@@ -36,12 +36,65 @@ a stalled connection.
 from __future__ import annotations
 
 import base64
+import contextvars
 import ipaddress
 import json
 from dataclasses import asdict
 from typing import Any, Literal
+from urllib.parse import parse_qsl
 
 from ..backend.mutation import LockTimeout
+
+# Per-request read-only mode flag set when a caller reaches `/mcp/ro` or passes
+# `?mode=ro`. Read-only mode hides all mutating/propose tools from `tools/list`
+# and rejects any `tools/call` for them.
+_MCP_READ_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "vecgrep_mcp_read_only", default=False
+)
+
+BATCH_READ_TOOLS: tuple[str, ...] = (
+    "browse",
+    "compare",
+    "get_chunk",
+    "get_corpus",
+    "get_source",
+    "incident",
+    "list_aliases",
+    "list_corpora",
+    "related",
+    "search",
+    "stats",
+    "summarize_corpus",
+    "timeline",
+)
+
+_BATCH_READ_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "calls": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "tool": {"type": "string", "enum": list(BATCH_READ_TOOLS)},
+                    "arguments": {"type": "object", "additionalProperties": True},
+                },
+                "required": ["tool"],
+                "additionalProperties": False,
+            },
+            "description": (
+                "1 to 10 read-only tool calls executed in order. Each item has "
+                "'tool' (one of list_corpora, search, get_chunk, browse, "
+                "get_source, get_corpus, timeline, incident, related, compare, "
+                "stats, summarize_corpus, list_aliases) and optional 'arguments'."
+            ),
+        },
+    },
+    "required": ["calls"],
+    "additionalProperties": False,
+}
 
 # --- MCP server icon (SEP-973) ------------------------------------------
 # A lens over scattered points: nearest-neighbour search in a vector space.
@@ -103,7 +156,7 @@ def _tool_annotations(name: str) -> Any:
     closed_world_reads = {
         "search", "timeline", "incident", "browse", "get_chunk", "get_source",
         "list_aliases", "list_corpora", "get_corpus", "related", "compare",
-        "stats", "summarize_corpus",
+        "stats", "summarize_corpus", "batch_read",
     }
     return ToolAnnotations(
         readOnlyHint=name not in writes,
@@ -655,6 +708,73 @@ def _run_get_corpus(name: str) -> str:
             }
             return json.dumps(detail, indent=2)
     return json.dumps({"error": f"corpus not found: {name}"})
+
+
+def _dispatch_read_tool(name: str, args: dict[str, Any]) -> str:
+    if name == "search":
+        return _run_search(args)
+    if name == "timeline":
+        return _run_timeline(args)
+    if name == "incident":
+        return _run_incident(args)
+    if name == "get_chunk":
+        return _run_get_chunk(
+            args.get("corpus", ""),
+            args.get("chunk_id", ""),
+            int(args.get("window", 400)),
+        )
+    if name == "browse":
+        return _run_browse(args)
+    if name == "get_source":
+        return _run_get_source(args.get("corpus", ""), args.get("source_id", ""))
+    if name == "related":
+        return _run_related(args)
+    if name == "compare":
+        return _run_compare(args)
+    if name == "stats":
+        return _run_stats(args)
+    if name == "summarize_corpus":
+        return _run_summarize(args)
+    if name == "list_aliases":
+        return _run_list_aliases()
+    if name == "list_corpora":
+        return _run_list_corpora(include_hidden=bool(args.get("include_hidden", False)))
+    if name == "get_corpus":
+        return _run_get_corpus(args.get("name", ""))
+    raise ValueError(f"Unsupported batch_read tool: {name!r}")
+
+
+def _run_batch_read(calls: list[dict[str, Any]] | Any) -> str:
+    """Run up to 10 read-only vecgrep tools in one round-trip and return their results in order."""
+    if not isinstance(calls, list) or not (1 <= len(calls) <= 10):
+        return json.dumps({
+            "error": "batch_read 'calls' must be a list of 1 to 10 read-only tool calls."
+        })
+    for idx, item in enumerate(calls):
+        if not isinstance(item, dict):
+            return json.dumps({"error": f"calls[{idx}] must be an object."})
+        tool_name = item.get("tool")
+        if tool_name not in BATCH_READ_TOOLS:
+            return json.dumps({
+                "error": (
+                    f"calls[{idx}].tool {tool_name!r} is not allowed in batch_read. "
+                    f"Allowed read-only tools: {list(BATCH_READ_TOOLS)}."
+                )
+            })
+        raw_args = item.get("arguments")
+        if raw_args is not None and not isinstance(raw_args, dict):
+            return json.dumps({"error": f"calls[{idx}].arguments must be an object."})
+    results: list[dict[str, Any]] = []
+    for item in calls:
+        tool_name = item["tool"]
+        raw_args = dict(item.get("arguments") or {})
+        raw_text = _dispatch_read_tool(tool_name, raw_args)
+        try:
+            parsed: Any = json.loads(raw_text)
+        except Exception:  # noqa: BLE001
+            parsed = raw_text
+        results.append({"tool": tool_name, "result": parsed})
+    return json.dumps({"results": results}, indent=2, ensure_ascii=False)
 
 
 # Where an agent's proposals land when it doesn't name a corpus. A dedicated
@@ -2198,6 +2318,17 @@ def build_mcp_server() -> Any:
                     "required": ["name"],
                 },
             ),
+            Tool(
+                name="batch_read",
+                description=(
+                    "Run up to 10 read-only vecgrep tools in one call and return "
+                    "their results in order. Prefer batch_read when a turn needs "
+                    "multiple reads (for example list_corpora plus several search, "
+                    "get_chunk, browse, or timeline calls) to complete in a single "
+                    "round-trip."
+                ),
+                inputSchema=_BATCH_READ_INPUT_SCHEMA,
+            ),
         ]
         for tool in tools:
             tool.annotations = _tool_annotations(tool.name)
@@ -2293,6 +2424,8 @@ def build_mcp_server() -> Any:
                 text = _run_list_corpora(include_hidden=bool(args.get("include_hidden", False)))
             elif name == "get_corpus":
                 text = _run_get_corpus(args.get("name", ""))
+            elif name == "batch_read":
+                text = _run_batch_read(args.get("calls"))
             else:
                 text = json.dumps({"error": f"unknown tool: {name}"})
         except Exception as exc:  # noqa: BLE001 -- Tool and optional metadata failures are converted to their established protocol results.
@@ -2350,6 +2483,7 @@ _READ_ONLY_MCP_TOOLS = frozenset({
     "get_chunk",
     "list_corpora",
     "get_corpus",
+    "batch_read",
 })
 
 
@@ -2547,9 +2681,11 @@ def build_oauth_root_routes(oauth_issuer_url: str) -> list:
         create_protected_resource_routes,
     )
 
+    from pydantic import AnyHttpUrl
     from ..backend.auth.scopes import VALID_SCOPES
     issuer = _oauth_issuer(oauth_issuer_url)
     resource = _oauth_resource(oauth_issuer_url)
+    ro_resource = AnyHttpUrl(str(resource).rstrip("/") + "/ro")
     routes = create_auth_routes(
         provider=_shared_provider(oauth_issuer_url),
         issuer_url=issuer,
@@ -2559,6 +2695,11 @@ def build_oauth_root_routes(oauth_issuer_url: str) -> list:
         resource_url=resource,
         authorization_servers=[issuer],
         scopes_supported=list(VALID_SCOPES),
+    )
+    routes += create_protected_resource_routes(
+        resource_url=ro_resource,
+        authorization_servers=[issuer],
+        scopes_supported=["read"],
     )
     return [
         _guard_oauth_registration(_trace_oauth(advertise_loopback_resource(advertise_public_clients(r))))
@@ -3091,6 +3232,29 @@ def _is_verified_tailnet_mcp(scope: dict) -> bool:
     return verified_tailnet_login(scope) is not None
 
 
+def _prepare_read_only_mcp_scope(scope: dict) -> tuple[bool, dict]:
+    """Detect `/mcp/ro` (mounted as `/ro`) or `?mode=ro` and rewrite `/ro` to `/`."""
+    if scope.get("type") != "http":
+        return False, scope
+    path = scope.get("path") or ""
+    raw_qs = scope.get("query_string", b"")
+    qs_text = raw_qs.decode("latin-1") if isinstance(raw_qs, (bytes, bytearray)) else str(raw_qs)
+    is_ro_path = path in ("/ro", "/ro/", "/mcp/ro", "/mcp/ro/")
+    is_ro_query = any(
+        k == "mode" and v.lower() in ("ro", "readonly", "read_only", "read-only")
+        for k, v in parse_qsl(qs_text, keep_blank_values=True)
+    )
+    if not (is_ro_path or is_ro_query):
+        return False, scope
+    if is_ro_path:
+        scope = {
+            **scope,
+            "path": "/",
+            "raw_path": b"/",
+        }
+    return True, scope
+
+
 class _McpBrowserCors:
     """Expose discovery challenges only to explicitly configured web clients."""
 
@@ -3108,7 +3272,15 @@ class _McpBrowserCors:
         )
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
-        await self._app(scope, receive, send)
+        is_ro, effective_scope = _prepare_read_only_mcp_scope(scope)
+        if not is_ro:
+            await self._app(effective_scope, receive, send)
+            return
+        token = _MCP_READ_ONLY.set(True)
+        try:
+            await self._app(effective_scope, receive, send)
+        finally:
+            _MCP_READ_ONLY.reset(token)
 
 
 class _McpOAuthBoundary:
@@ -3487,6 +3659,19 @@ def build_http_app(
 
     @fmcp.tool(
         description=(
+            "Run up to 10 read-only vecgrep tools in one call and return "
+            "their results in order. Prefer batch_read when a turn needs "
+            "multiple reads (for example list_corpora plus several search, "
+            "get_chunk, browse, or timeline calls) to complete in a single "
+            "round-trip."
+        )
+    )
+    def batch_read(calls: list[dict[str, Any]]) -> str:
+        """calls: 1 to 10 read-only tool calls ({tool, arguments})."""
+        return _run_batch_read(calls)
+
+    @fmcp.tool(
+        description=(
             "WRITE a new entry immediately — no human confirm needed. Lands in "
             "the single corpus the operator opened up for direct writes; there "
             "is no corpus parameter, and this tool cannot edit or delete "
@@ -3672,12 +3857,54 @@ def build_http_app(
             corpus = first.rsplit("-", 1)[0] if "-" in first else first
         return _run_propose_merge(corpus or "", list(doc_ids), content, tags)
 
+    batch_tool = fmcp._tool_manager.get_tool("batch_read")
+    if batch_tool is not None:
+        batch_tool.parameters = _BATCH_READ_INPUT_SCHEMA
+
     for tool in fmcp._tool_manager.list_tools():
         tool.annotations = _tool_annotations(tool.name)
+
+    base_list_tools = fmcp.list_tools
+
+    async def _filtered_list_tools():
+        tools = await base_list_tools()
+        if _MCP_READ_ONLY.get():
+            return [
+                tool for tool in tools
+                if tool.name in _READ_ONLY_MCP_TOOLS
+                and tool.annotations is not None
+                and tool.annotations.readOnlyHint is True
+            ]
+        return tools
+
+    fmcp.list_tools = _filtered_list_tools
+    fmcp._mcp_server.list_tools()(_filtered_list_tools)
 
     if oauth_issuer_url:
         from . import oauth_tools
         oauth_tools.install(fmcp, oauth_issuer_url)
+
+    from mcp.types import CallToolRequest, CallToolResult, ServerResult, TextContent
+
+    base_call_tool = fmcp._mcp_server.request_handlers[CallToolRequest]
+
+    async def _guarded_call_tool(request):
+        if _MCP_READ_ONLY.get() and request.params.name not in _READ_ONLY_MCP_TOOLS:
+            return ServerResult(CallToolResult(
+                content=[TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": (
+                            f"Tool {request.params.name!r} is disabled on the "
+                            "read-only MCP endpoint (/mcp/ro)."
+                        )
+                    }),
+                )],
+                isError=True,
+            ))
+        return await base_call_tool(request)
+
+    fmcp._mcp_server.request_handlers[CallToolRequest] = _guarded_call_tool
 
     http_app = fmcp.streamable_http_app()
     browser_app: Any = http_app

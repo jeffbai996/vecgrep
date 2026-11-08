@@ -42,6 +42,14 @@ def _same_origin_resource(requested: str | None, configured: str | None) -> bool
     )
 
 
+def _matches_resource_or_ro(requested: str | None, configured: str | None) -> bool:
+    if not requested or not configured:
+        return False
+    req = str(requested).rstrip("/")
+    cfg = str(configured).rstrip("/")
+    return req == cfg or req == f"{cfg}/ro"
+
+
 class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
     """Embedded auth server behind the HTTP owner-approval middleware.
 
@@ -96,8 +104,9 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
                 raise ValueError("redirect changed")
         except ValueError as exc:
             raise AuthorizeError("invalid_request", "Invalid redirect URI") from exc
+        allow_ro = _matches_resource_or_ro(str(params.resource) if params.resource else None, self.resource)
         allow_sibling = _is_google_connector(client) and _same_origin_resource(params.resource, self.resource)
-        if self.resource and params.resource not in (None, self.resource) and not allow_sibling:
+        if self.resource and params.resource not in (None, self.resource) and not allow_ro and not allow_sibling:
             # RFC 8707 names this invalid_target, but the SDK validates error
             # codes against a list without it and would answer server_error.
             raise AuthorizeError("invalid_request", "wrong OAuth resource")
@@ -116,7 +125,7 @@ class VecgrepOAuthProvider(OAuthAuthorizationServerProvider):
             )
         except UnsupportedScope as exc:
             raise AuthorizeError("invalid_scope", str(exc)) from exc
-        target_resource = self.resource if allow_sibling else (params.resource or self.resource)
+        target_resource = self.resource if (allow_ro or allow_sibling) else (params.resource or self.resource)
         code = self.store.issue_authorization_code(
             client_id=client.client_id,
             scopes=scopes,

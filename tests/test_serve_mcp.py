@@ -149,3 +149,110 @@ def test_search_policy_over_http(client_with_token, monkeypatch):
     assert calls[0]['corpus_name'] == 'notes'
     assert payload['search_info']['ignored_parameters'] == []
     assert payload['search_info']['response_token_ceiling'] == 8000
+
+
+@pytest.mark.parametrize("ro_path", ["/mcp/ro", "/mcp?mode=ro"])
+def test_mcp_read_only_route_filters_tools_and_blocks_writes(
+    client_with_token: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    ro_path: str,
+) -> None:
+    from vecgrep.mcp import server
+
+    monkeypatch.setattr(server, "_run_list_corpora", lambda include_hidden=False: '[{"name": "notes"}]')
+    monkeypatch.setattr(server, "_run_list_aliases", lambda: '{"gpu": ["3090"]}')
+
+    headers = {"Accept": "application/json, text/event-stream"}
+    resp = client_with_token.post(
+        ro_path,
+        headers=headers,
+        json={"jsonrpc": "2.0", "id": 10, "method": "tools/list", "params": {}},
+    )
+    assert resp.status_code == 200, resp.text
+    tools = resp.json()["result"]["tools"]
+    names = {t["name"] for t in tools}
+    expected_ro = {
+        "search",
+        "get_chunk",
+        "get_source",
+        "browse",
+        "timeline",
+        "incident",
+        "related",
+        "compare",
+        "list_corpora",
+        "get_corpus",
+        "stats",
+        "summarize_corpus",
+        "list_aliases",
+        "batch_read",
+    }
+    assert names == expected_ro
+    forbidden = {
+        "write",
+        "write_temp",
+        "renew_temp",
+        "edit",
+        "retire",
+        "unretire",
+        "propose_write",
+        "propose_edit",
+        "propose_delete",
+        "propose_merge",
+    }
+    assert names.isdisjoint(forbidden)
+    for t in tools:
+        assert list(t["annotations"].items()) == [
+            ("readOnlyHint", True),
+            ("destructiveHint", False),
+            ("idempotentHint", True),
+            ("openWorldHint", False),
+        ]
+
+    # batch_read executes multiple read-only tools in one round-trip
+    batch_resp = client_with_token.post(
+        ro_path,
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {
+                "name": "batch_read",
+                "arguments": {
+                    "calls": [
+                        {"tool": "list_corpora", "arguments": {}},
+                        {"tool": "list_aliases"},
+                    ]
+                },
+            },
+        },
+    )
+    assert batch_resp.status_code == 200
+    batch_result = batch_resp.json()["result"]
+    assert not batch_result.get("isError"), batch_result
+    batch_payload = json.loads(batch_result["content"][0]["text"])
+    assert batch_payload["results"] == [
+        {"tool": "list_corpora", "result": [{"name": "notes"}]},
+        {"tool": "list_aliases", "result": {"gpu": ["3090"]}},
+    ]
+
+    # Any mutating or propose tool call is rejected on /mcp/ro and ?mode=ro
+    for blocked in ("write", "propose_write", "edit", "retire"):
+        write_resp = client_with_token.post(
+            ro_path,
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 12,
+                "method": "tools/call",
+                "params": {
+                    "name": blocked,
+                    "arguments": {"content": "should fail"},
+                },
+            },
+        )
+        assert write_resp.status_code == 200
+        write_result = write_resp.json()["result"]
+        assert write_result["isError"] is True
+        assert "disabled on the read-only MCP endpoint" in write_result["content"][0]["text"]

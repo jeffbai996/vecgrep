@@ -33,6 +33,8 @@ def test_build_mcp_server_registers_tools() -> None:
         "list_aliases", "list_corpora", "get_corpus",
         # v1.2 insight tools
         "related", "compare", "stats", "summarize_corpus",
+        # batch_read single round-trip read fan-out
+        "batch_read",
         # write path — parity with the HTTP transport as of v1.1
         "propose_write", "propose_edit", "propose_delete", "propose_merge",
         # direct (unconfirmed) write path — single operator-designated corpus,
@@ -48,8 +50,11 @@ def test_build_mcp_server_registers_tools() -> None:
     assert "list_corpora" in search.description
     for tool in result.root.tools:
         if tool.name in {"search", "timeline", "incident", "browse", "get_chunk", "get_source",
-                         "list_aliases", "list_corpora", "get_corpus", "related", "compare", "stats", "summarize_corpus"}:
+                         "list_aliases", "list_corpora", "get_corpus", "related", "compare", "stats",
+                         "summarize_corpus", "batch_read"}:
             assert tool.annotations.readOnlyHint is True
+            assert tool.annotations.destructiveHint is False
+            assert tool.annotations.idempotentHint is True
             assert tool.annotations.openWorldHint is False
         else:
             assert tool.annotations.readOnlyHint is False
