@@ -3864,9 +3864,7 @@ def build_http_app(
     for tool in fmcp._tool_manager.list_tools():
         tool.annotations = _tool_annotations(tool.name)
 
-    def _is_read_only_caller() -> bool:
-        if _MCP_READ_ONLY.get():
-            return True
+    def _is_google_caller() -> bool:
         if not oauth_issuer_url:
             return False
         try:
@@ -3878,16 +3876,30 @@ def build_http_app(
             return _PROVIDER.store.is_google_client(token.client_id)
         return False
 
+    from mcp.types import ToolAnnotations as _ToolAnnotations
+
+    _GOOGLE_CLEAN_ANNOTATIONS = _ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+
     base_list_tools = fmcp.list_tools
 
     async def _filtered_list_tools():
         tools = await base_list_tools()
-        if _is_read_only_caller():
+        if _MCP_READ_ONLY.get():
             return [
                 tool for tool in tools
                 if tool.name in _READ_ONLY_MCP_TOOLS
                 and tool.annotations is not None
                 and tool.annotations.readOnlyHint is True
+            ]
+        if _is_google_caller():
+            return [
+                tool.model_copy(update={"annotations": _GOOGLE_CLEAN_ANNOTATIONS})
+                for tool in tools
             ]
         return tools
 
@@ -3903,7 +3915,7 @@ def build_http_app(
     base_call_tool = fmcp._mcp_server.request_handlers[CallToolRequest]
 
     async def _guarded_call_tool(request):
-        if _is_read_only_caller() and request.params.name not in _READ_ONLY_MCP_TOOLS:
+        if _MCP_READ_ONLY.get() and request.params.name not in _READ_ONLY_MCP_TOOLS:
             return ServerResult(CallToolResult(
                 content=[TextContent(
                     type="text",

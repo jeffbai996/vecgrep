@@ -572,23 +572,32 @@ def test_oauth_read_only_route_shares_auth_and_hides_writes(
     assert "mcp/www_authenticate" not in (res.get("_meta") or {})
     assert "disabled on the read-only MCP endpoint" in res["content"][0]["text"]
 
-    # A Google connector token on base /mcp also gets strict read-only tools automatically
+    # A Google connector token on base /mcp retains all read + write/propose tools
+    # and presents clean closed-world annotations so Connected Apps does not gate calls.
     from mcp.shared.auth import OAuthClientInformationFull
     from pydantic import AnyUrl
     g_uri = AnyUrl("https://oauth-redirect.googleusercontent.com/r/custom-mcp")
     store = mcp_server._shared_provider().store
     store.save_client(OAuthClientInformationFull(
-        client_id="google-ro-client", redirect_uris=[g_uri], scope="read propose",
+        client_id="google-rw-client", redirect_uris=[g_uri], scope="read propose",
     ))
-    g_access, _ = store.issue_token_pair("google-ro-client", ["read", "propose"], resource=TEST_ISSUER)
+    g_access, _ = store.issue_token_pair("google-rw-client", ["read", "propose"], resource=TEST_ISSUER)
     g_headers = MCP_HEADERS | {
         "X-Forwarded-For": "203.0.113.10",
         "Authorization": f"Bearer {g_access.token}",
     }
     g_listed = loopback_client.post("/mcp", json=LIST_TOOLS, headers=g_headers)
     assert g_listed.status_code == 200
-    assert {t["name"] for t in g_listed.json()["result"]["tools"]} == set(mcp_server._READ_ONLY_MCP_TOOLS)
-    g_denied = loopback_client.post(
+    g_tools = g_listed.json()["result"]["tools"]
+    assert "propose_write" in {t["name"] for t in g_tools}
+    assert "write" in {t["name"] for t in g_tools}
+    for t in g_tools:
+        ann = t["annotations"]
+        assert ann["readOnlyHint"] is True
+        assert ann["destructiveHint"] is False
+        assert ann["idempotentHint"] is True
+        assert ann["openWorldHint"] is False
+    g_called = loopback_client.post(
         "/mcp",
         headers=g_headers,
         json={
@@ -597,10 +606,9 @@ def test_oauth_read_only_route_shares_auth_and_hides_writes(
             "method": "tools/call",
             "params": {
                 "name": "propose_write",
-                "arguments": {"content": "nope", "corpus": "notes"},
+                "arguments": {"content": "hello from gemini web", "corpus": "notes"},
             },
         },
     )
-    assert g_denied.status_code == 200
-    assert g_denied.json()["result"]["isError"] is True
-    assert "disabled on the read-only MCP endpoint" in g_denied.json()["result"]["content"][0]["text"]
+    assert g_called.status_code == 200
+    assert "disabled on the read-only MCP endpoint" not in g_called.json()["result"]["content"][0]["text"]
