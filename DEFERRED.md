@@ -21,13 +21,13 @@ Each entry below preserves the upstream one-line reason. Existing full-suite and
 | --- | --- | --- |
 | `scripts/rerank_benchmark.py:89` | TRY004 | Malformed benchmark content uses one ValueError contract. |
 | `scripts/rerank_benchmark.py:99` | TRY004 | Malformed benchmark content uses one ValueError contract. |
-| `tests/conftest.py:112` | BLE001, S110 | Teardown must not mask the test result if a backend close fails. |
+| `tests/conftest.py:127` | BLE001, S110 | Teardown must not mask the test result if a backend close fails. |
 | `tests/eval_harness.py:244` | BLE001, S110 | Evaluation teardown must not replace its collected result. |
-| `tests/test_bm25_bulk_persist.py:100` | BLE001, S110 | Cleanup of a deliberately interrupted store must not mask the assertion. |
+| `tests/test_bm25_store.py:736` | BLE001, S110 | Cleanup of a deliberately interrupted store must not mask the assertion. |
 | `tests/test_oauth_token_store.py:430` | BLE001 | The test reports any failure below. |
 | `tests/test_search_stage_timings.py:92` | F401 | Importing applies the level. |
-| `tests/test_search_text_write_paths.py:70` | BLE001, S110 | The following assertions verify recovery after the injected indexing failure. |
-| `tests/test_write_source_alias.py:80` | BLE001, S110 | Test cleanup must not mask the alias assertions. |
+| `tests/test_symbol_query.py:133` | BLE001, S110 | The following assertions verify recovery after the injected indexing failure. |
+| `tests/test_confirm.py:356` | BLE001, S110 | Test cleanup must not mask the alias assertions. |
 | `vecgrep/backend/api/admin.py:128` | BLE001, S110 | Reset must release stale service references even if a backend cannot close. |
 | `vecgrep/backend/api/routes.py:655` | BLE001 | No reason recorded at the site. |
 | `vecgrep/backend/auth/google_bearers.py:118` | BLE001 | Registry failures retain the logged auth-boundary error contract. |

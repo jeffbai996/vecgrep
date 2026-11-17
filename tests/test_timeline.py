@@ -1,13 +1,6 @@
-"""Phase 5 — timeline mode.
-
-`timeline()` answers "what happened?" questions with an ordered event
-sequence instead of ranked chunks: search finds the anchor chunks, the
-top source files are selected, one CONTIGUOUS slice per file is pulled
-around the anchors, and each slice is parsed into (speaker, time, text)
-events — chronological within a file, files ordered by document date.
-Non-transcript sources degrade to the raw slice (no fake events).
-"""
 from __future__ import annotations
+
+import pytest
 
 from vecgrep.backend.timeline import parse_events
 
@@ -136,3 +129,158 @@ def test_build_timeline_type_hints_resolve_at_runtime() -> None:
     assert "payload_for" in hints
     assert "source_text_for" in hints
 
+# ── test_anchors_incident ──
+
+# ── 8a: line anchors ─────────────────────────────────────────────────────────
+
+def test_results_carry_line_ranges(svc, make_doc) -> None:
+    p = make_doc(
+        "lines.md",
+        "alpha first line here\nbeta second line here\ngamma third line here\n"
+        "delta fourth line here\nepsilon fifth line here\n",
+    )
+    svc.index(str(p), "c")
+    hits = svc.search("gamma third line", "c", top_k=3)
+    assert hits
+    h = hits[0]
+    assert h.line_start is not None and h.line_end is not None
+    assert 1 <= h.line_start <= h.line_end
+    # The chunk containing 'gamma' must include line 3 in its range.
+    assert h.line_start <= 3 <= h.line_end
+
+
+def test_anchor_string_format(svc, make_doc) -> None:
+    p = make_doc("anchor.md", "one\ntwo\nthree\nfour anchor target line\nfive\n")
+    svc.index(str(p), "c")
+    h = svc.search("four anchor target", "c", top_k=1)[0]
+    a = h.anchor
+    assert a.startswith(h.source_id)
+    assert f"#L{h.line_start}" in a
+    assert a.endswith((f"-L{h.line_end}", f"#L{h.line_start}"))
+
+
+def test_eval_fixture_lines_are_plausible(svc) -> None:
+    from tests import eval_harness as eh
+
+    eh.build_eval_corpus(svc)
+    hits = svc.search("ERR-0451", "evalchat", top_k=5)
+    for h in hits:
+        assert h.line_start is not None and h.line_start >= 1
+        assert h.line_end >= h.line_start
+
+
+# ── 8b: incident object ──────────────────────────────────────────────────────
+
+def test_incident_assembles_structured_answer(svc) -> None:
+    from tests import eval_harness as eh
+
+    eh.build_eval_corpus(svc)
+    inc = svc.incident("relay-service ERR-0451 outage", "evalchat")
+    assert inc is not None
+    assert inc["title"] == "relay-service ERR-0451 outage"
+    assert inc["sources"], "must name its evidence files"
+    assert "alice" in inc["participants"]
+    assert inc["confidence"] in ("exact", "strong", "related", "weak")
+    # Primary timeline is a chronological event list.
+    events = inc["primary_timeline"]
+    assert len(events) >= 5
+    times = [e["time"] for e in events]
+    assert times == sorted(times)
+
+
+def test_incident_separates_primary_from_related(svc) -> None:
+    from tests import eval_harness as eh
+
+    eh.build_eval_corpus(svc)
+    inc = svc.incident("relay-service ERR-0451 outage", "evalchat")
+    primary_files = {inc["primary_source"]}
+    related_files = {g["source_id"] for g in inc["related"]}
+    assert primary_files.isdisjoint(related_files), (
+        "the primary file must not repeat in related context"
+    )
+
+
+def test_incident_time_range_spans_events(svc) -> None:
+    from tests import eval_harness as eh
+
+    eh.build_eval_corpus(svc)
+    inc = svc.incident("relay-service ERR-0451 outage", "evalchat")
+    tr = inc["time_range"]
+    assert tr["start"] and tr["end"] and tr["start"] <= tr["end"]
+
+
+def test_incident_respects_filters(svc) -> None:
+    from tests import eval_harness as eh
+
+    eh.build_eval_corpus(svc)
+    inc = svc.incident(
+        "relay-service ERR-0451 outage", "evalchat",
+        filters=["date:2026-01-15"],
+    )
+    all_sources = [inc["primary_source"], *(g["source_id"] for g in inc["related"])]
+    assert all("2026-01-08" not in s for s in all_sources)
+
+
+def test_incident_none_when_nothing_found(svc) -> None:
+    from tests import eval_harness as eh
+
+    eh.build_eval_corpus(svc)
+    assert svc.incident("qqqzzznope", "evalchat", mode="bm25") is None
+
+# ── test_browse_window ──
+
+def test_browse_since_until_range(svc) -> None:
+    from tests import eval_harness as eh
+
+    eh.build_eval_corpus(svc)
+    # channel-a has 2026-01-08 and 2026-01-15; a range covering only the 15th.
+    groups = svc.browse("evalchat", channel="channel-a",
+                        since="2026-01-10", until="2026-01-15")
+    assert {g["source_id"].split("/")[-1] for g in groups} == {"2026-01-15.md"}
+    # until is inclusive of its whole day.
+    groups = svc.browse("evalchat", channel="channel-a",
+                        since="2026-01-08", until="2026-01-08")
+    assert {g["source_id"].split("/")[-1] for g in groups} == {"2026-01-08.md"}
+
+
+def test_browse_since_alone_is_a_valid_selector(svc) -> None:
+    from tests import eval_harness as eh
+
+    eh.build_eval_corpus(svc)
+    groups = svc.browse("evalchat", since="2026-01-09")
+    assert groups, "range-only browse must work without channel/date"
+    for g in groups:
+        assert g["source_id"].endswith("2026-01-15.md")
+
+
+def test_browse_tail_keeps_newest_events(svc) -> None:
+    from tests import eval_harness as eh
+
+    eh.build_eval_corpus(svc)
+    full = svc.browse("evalchat", channel="channel-a")
+    all_events = [e for g in full for e in g["events"]]
+    assert len(all_events) > 5
+    tailed = svc.browse("evalchat", channel="channel-a", tail=5)
+    got = [e for g in tailed for e in g["events"]]
+    assert len(got) == 5
+    assert got == all_events[-5:], "tail must be the newest events, in order"
+
+
+def test_browse_tail_larger_than_corpus_returns_everything(svc) -> None:
+    from tests import eval_harness as eh
+
+    eh.build_eval_corpus(svc)
+    full = svc.browse("evalchat", channel="channel-a")
+    tailed = svc.browse("evalchat", channel="channel-a", tail=10_000)
+    assert [e for g in tailed for e in g["events"]] == \
+        [e for g in full for e in g["events"]]
+
+
+def test_browse_bad_range_dates_raise(svc) -> None:
+    from tests import eval_harness as eh
+
+    eh.build_eval_corpus(svc)
+    with pytest.raises(ValueError):
+        svc.browse("evalchat", since="not-a-date")
+    with pytest.raises(ValueError):
+        svc.browse("evalchat", until="13/01/2026")

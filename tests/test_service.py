@@ -1,18 +1,15 @@
-"""Service-layer tests — the layer where every bug we've shipped lived.
-
-Covers:
-- index() round-trip + chunk_count accuracy across re-index
-- incremental skip via content hash
-- hybrid / vector / bm25 modes return ranked SearchResult
-- filters narrow results post-retrieval
-- explain payload populates per-retriever fields
-- delete_corpus clears qdrant + bm25 + registry
-"""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
+import pytest
+
+from tests import eval_harness as eh
 from tests.conftest import StubEmbed
+from vecgrep.backend.embed.base import EmbedBackend
+from vecgrep.backend.embed.cache import CachedBackend
+from vecgrep.backend.service import VecgrepService, _collection_for
 
 
 def test_index_then_search_round_trip(svc, make_doc):
@@ -543,3 +540,328 @@ def test_recovery_count_mismatch_is_not_skipped_by_matching_hash(svc, make_doc):
     docs, chunks, skipped = svc.index(str(p), 'test',
         resume_source_counts={str(p.resolve()): max(0, count - 1)})
     assert docs == 1 and chunks == count and skipped == 0
+
+# ── test_tools_v12 ──
+
+def _built(svc):
+    eh.build_eval_corpus(svc)
+    return svc
+
+
+# ── related ──────────────────────────────────────────────────────────────────
+
+def test_related_excludes_self_and_bounds(svc) -> None:
+    svc = _built(svc)
+    seed = svc.search("relay-service", "evalchat", top_k=1)[0]
+    rel = svc.related(seed.chunk_id, "evalchat", top_k=5)
+    assert rel, "neighbours exist in a 55-chunk corpus"
+    assert len(rel) <= 5
+    assert all(r.chunk_id != seed.chunk_id for r in rel)
+    assert all(r.corpus == "evalchat" for r in rel)
+
+
+def test_related_unknown_chunk_raises(svc) -> None:
+    svc = _built(svc)
+    import pytest
+
+    from vecgrep.backend.service import CorpusError
+    with pytest.raises(CorpusError):
+        svc.related("nope-not-a-chunk", "evalchat")
+
+
+# ── compare ──────────────────────────────────────────────────────────────────
+
+def test_compare_two_windows(svc) -> None:
+    """Fixtures span 2026-01-08 and 2026-01-15 — split the windows between
+    them and both sides populate, with per-side source sets and the delta."""
+    svc = _built(svc)
+    out = svc.compare(
+        "relay-service", "evalchat",
+        a_after="2026-01-01", a_before="2026-01-12",
+        b_after="2026-01-12", b_before="2026-01-31",
+        top_k=8,
+    )
+    assert out["a"]["results"] and out["b"]["results"]
+    a_srcs = set(out["a"]["sources"])
+    b_srcs = set(out["b"]["sources"])
+    assert a_srcs and b_srcs and a_srcs.isdisjoint(b_srcs)
+    assert set(out["only_in_b"]) == b_srcs - a_srcs
+    assert out["windows"]["a"]["after"] == "2026-01-01"
+
+
+def test_compare_empty_window_is_explicit(svc) -> None:
+    svc = _built(svc)
+    out = svc.compare(
+        "relay-service", "evalchat",
+        a_after="2020-01-01", a_before="2020-02-01",   # nothing there
+        b_after="2026-01-01", b_before="2026-01-31",
+    )
+    assert out["a"]["results"] == []
+    assert out["b"]["results"]
+
+
+# ── corpus_stats ─────────────────────────────────────────────────────────────
+
+def test_corpus_stats_counts_and_span(svc) -> None:
+    svc = _built(svc)
+    st = svc.corpus_stats("evalchat")
+    assert st["corpus"] == "evalchat"
+    assert st["chunks"] == 55
+    assert st["docs"] == 4
+    assert st["date_span"]["first"].startswith("2026-01-")
+    assert st["date_span"]["last"].startswith("2026-01-")
+    # fixtures are 01-08 and 01-15 per channel — the days between are gaps
+    assert st["gap_days"] >= 1
+    assert st["sources"]  # per-source chunk counts present
+
+
+def test_corpus_stats_unknown_corpus_raises(svc) -> None:
+    import pytest
+
+    from vecgrep.backend.service import CorpusError
+    with pytest.raises(CorpusError):
+        svc.corpus_stats("nope")
+
+
+# ── summarize_corpus ─────────────────────────────────────────────────────────
+
+def test_summarize_corpus_rollup(svc) -> None:
+    svc = _built(svc)
+    out = svc.summarize_corpus("evalchat", sample=10)
+    assert out["corpus"] == "evalchat"
+    assert out["chunks"] == 55
+    # enrichment-powered speaker tally (fixtures have alice/bob/ops-bot)
+    speakers = dict(out["top_speakers"])
+    assert "alice" in speakers
+    assert out["date_span"]["first"]
+    # sampling is explicit, never silent
+    assert out["sampled"] is True
+    assert len(out["sample_chunks"]) == 10
+    assert all(isinstance(c, dict) and c.get("text") for c in out["sample_chunks"])
+
+
+def test_summarize_corpus_window_filters(svc) -> None:
+    svc = _built(svc)
+    out = svc.summarize_corpus("evalchat", after="2026-01-12", sample=10)
+    # only the 01-15 docs → fewer chunks than the whole corpus
+    assert 0 < out["chunks"] < 55
+
+# ── test_orphaned_source ──
+
+def _index(svc: VecgrepService, path: Path, corpus: str) -> None:
+    svc.index(str(path), corpus)
+
+
+def test_diagnose_reports_a_source_whose_file_is_gone(svc, make_doc):
+    live = make_doc("live.md", "the fund GPs are Alice and Bob")
+    dead = make_doc("dead.md", "the fund GPs are Carol and Dave")
+    _index(svc, live, "fixture")
+    _index(svc, dead, "fixture")
+
+    dead.unlink()
+
+    issues = svc.diagnose(corpora={"fixture"})
+    orphans = [i for i in issues if i["kind"] == "orphaned_source"]
+    assert len(orphans) == 1, f"expected the deleted source to be reported, got {issues}"
+    assert orphans[0]["source_id"] == str(dead)
+    assert orphans[0]["fixable"] is True
+
+
+def test_reconcile_purges_the_orphan_from_both_backends(svc, make_doc):
+    live = make_doc("live.md", "the fund GPs are Alice and Bob")
+    dead = make_doc("dead.md", "the fund GPs are Carol and Dave")
+    _index(svc, live, "fixture")
+    _index(svc, dead, "fixture")
+    dead.unlink()
+
+    svc.reconcile(corpora={"fixture"})
+
+    # Vector side: no points left for the dead source.
+    collection = "vecgrep__fixture"
+    assert svc.store.source_counts(collection).get(str(dead), 0) == 0
+
+    # BM25 side: this is the half-purge trap. A keyword query that the dead
+    # doc would answer must not return it.
+    hits = svc.bm25.search("fixture", "Carol Dave fund GPs", 10)
+    dead_hits = [h for h in hits if h[2].get("source_id") == str(dead)]
+    assert not dead_hits, f"BM25 still serves the deleted source: {dead_hits}"
+
+    # The living source is untouched — a purge must not be a corpus wipe.
+    assert svc.store.source_counts(collection).get(str(live), 0) > 0
+
+
+def test_reconcile_leaves_a_present_source_alone(svc, make_doc):
+    keep = make_doc("keep.md", "the fund GPs are Alice and Bob")
+    _index(svc, keep, "fixture")
+
+    svc.reconcile(corpora={"fixture"})
+
+    collection = "vecgrep__fixture"
+    assert svc.store.source_counts(collection).get(str(keep), 0) > 0
+    corpus = svc.registry.get("fixture")
+    assert str(keep) in corpus.sources
+
+
+def test_url_sources_are_never_treated_as_orphans(svc, make_doc):
+    """A URL can't be stat'd; treating an unreachable one as deleted would
+    purge real data on a network blip."""
+    doc = make_doc("page.md", "the fund GPs are Alice and Bob")
+    _index(svc, doc, "fixture")
+    corpus = svc.registry.get("fixture")
+    corpus.sources.append("https://example.com/gone")
+    svc.registry.upsert(corpus)
+
+    issues = svc.diagnose(corpora={"fixture"})
+    orphans = [i for i in issues if i["kind"] == "orphaned_source"]
+    assert not orphans, f"a URL source must never be reported as orphaned: {orphans}"
+
+# ── test_migrate ──
+
+class _M1(EmbedBackend):
+    name = "stub"
+    model = "m1"
+    dim = 8
+
+    def embed(self, texts):
+        return [[(len(t) % 7 + i) / 10 for i in range(self.dim)] for t in texts]
+
+
+class _M2(EmbedBackend):
+    name = "ollama"
+    model = "m2"
+    dim = 8
+
+    def embed(self, texts):
+        return [[(len(t) % 5 + i) / 10 for i in range(self.dim)] for t in texts]
+
+
+@pytest.mark.parametrize("lexical_backend", ["pickle", "sqlite"])
+def test_migrate_swaps_backend_and_keeps_data(svc, make_doc, monkeypatch, lexical_backend):
+    if lexical_backend == "sqlite":
+        from vecgrep.backend.store.bm25_sqlite import BM25SqliteStore
+
+        svc.bm25 = BM25SqliteStore(svc.settings.home / "bm25")
+    p = make_doc("doc.md", "Cats and dogs and fish. Three sentences here.")
+    svc.index(str(p), "test")
+    pre_hits = svc.search("cats", "test", top_k=5)
+    assert pre_hits
+
+    # Patch the factory so migrate() resolves to M2 regardless of env.
+    import vecgrep.backend.service as s_mod
+
+    monkeypatch.setattr(s_mod, "get_embed_backend", lambda settings, prefer=None: _M2())
+
+    out = svc.migrate_corpus("test", to_backend="ollama", to_model="m2")
+    assert out.embed_backend == "ollama"
+    assert out.embed_model == "m2"
+    assert out.dim == 8
+
+    # Force the search backend to M2 (cache cleared because the old M1 entry
+    # is now stale for this corpus).
+    svc._backend_cache.clear()
+    svc._backend_cache["auto"] = CachedBackend(_M2(), svc._embed_cache)
+    svc._backend_cache["ollama"] = svc._backend_cache["auto"]
+
+    post_hits = svc.search("cats", "test", top_k=5)
+    assert post_hits, "search after migrate should still return hits"
+    # Payload's `corpus` field must be the final name, not the temp.
+    for h in post_hits:
+        assert h.corpus == "test"
+
+
+def test_migrate_no_op_raises(svc, make_doc):
+    p = make_doc("doc.md", "noop test content here")
+    svc.index(str(p), "test")
+    import pytest
+
+    from vecgrep.backend.store import CorpusError
+
+    # Asking to migrate to the same backend+model the corpus is already on
+    # should refuse rather than silently churn.
+    corpus = svc.list_corpora()[0]
+    with pytest.raises(CorpusError):
+        svc.migrate_corpus(
+            "test",
+            to_backend=corpus.embed_backend,
+            to_model=corpus.embed_model,
+        )
+
+# ── test_corpus_datatype ──
+
+def _dt(svc, name: str) -> str:
+    info = svc.store.client.get_collection(_collection_for(name))
+    return str(info.config.params.vectors.datatype).lower()
+
+
+def test_new_corpus_defaults_to_float32(svc, make_doc):
+    svc.index(str(make_doc("a.md", "hello world")), "c1")
+    assert svc.registry.get("c1").datatype == "float32"
+
+
+def test_migrate_converts_the_collection_and_persists_the_choice(svc, make_doc):
+    svc.index(str(make_doc("a.md", "alpha beta gamma")), "c1")
+    before = svc.store.client.count(_collection_for("c1"), exact=True).count
+    assert before > 0
+
+    svc.migrate_datatype("c1", "float16")
+
+    assert svc.registry.get("c1").datatype == "float16"
+    assert "float16" in _dt(svc, "c1")
+    assert svc.store.client.count(_collection_for("c1"), exact=True).count == before
+
+
+def test_a_reindex_after_migrating_keeps_float16(svc, make_doc):
+    """The whole point. An index that recreates the collection must not
+    quietly hand the corpus back to float32."""
+    svc.index(str(make_doc("a.md", "alpha beta gamma")), "c1")
+    svc.migrate_datatype("c1", "float16")
+    svc.index(str(make_doc("b.md", "delta epsilon")), "c1")
+    assert svc.registry.get("c1").datatype == "float16"
+    assert "float16" in _dt(svc, "c1")
+
+
+def test_migrating_to_the_current_datatype_is_a_no_op(svc, make_doc):
+    svc.index(str(make_doc("a.md", "alpha")), "c1")
+    n = svc.store.client.count(_collection_for("c1"), exact=True).count
+    svc.migrate_datatype("c1", "float32")
+    assert svc.store.client.count(_collection_for("c1"), exact=True).count == n
+
+
+def test_an_unknown_datatype_is_refused(svc, make_doc):
+    import pytest
+
+    svc.index(str(make_doc("a.md", "alpha")), "c1")
+    with pytest.raises(ValueError):
+        svc.migrate_datatype("c1", "bfloat16")
+    assert svc.registry.get("c1").datatype == "float32"
+
+
+def test_quantization_persists_across_datatype_migration_and_reindex(
+    svc, make_doc, monkeypatch
+):
+    from qdrant_client import models as qm
+
+    svc.index(str(make_doc("a.md", "alpha beta gamma")), "c1")
+    updated = svc.set_quantization("c1", "int8")
+    assert updated.quantization == "int8"
+    assert svc.registry.get("c1").quantization == "int8"
+
+    created_quant: dict[str, object] = {}
+    orig_create = svc.store.client.create_collection
+
+    def spy_create(collection_name: str, **kwargs):
+        created_quant[collection_name] = kwargs.get("quantization_config")
+        return orig_create(collection_name=collection_name, **kwargs)
+
+    monkeypatch.setattr(svc.store.client, "create_collection", spy_create)
+    svc.migrate_datatype("c1", "float16")
+    live_col = _collection_for("c1")
+    info = svc.store.client.get_collection(live_col)
+    assert info.config.params.vectors.datatype == qm.Datatype.FLOAT16
+    qcfg = created_quant.get(live_col)
+    assert isinstance(qcfg, qm.ScalarQuantization)
+    assert qcfg.scalar.always_ram is True
+    assert svc.registry.get("c1").quantization == "int8"
+
+    svc.index(str(make_doc("b.md", "delta epsilon")), "c1")
+    assert svc.registry.get("c1").quantization == "int8"

@@ -1,27 +1,21 @@
-"""Phase 3 — date / path / time filters as hard constraints.
-
-The caller (an AI assistant) passes explicit filters; vecgrep pushes them as
-hard constraints so a "this morning" question stops dragging in last week's
-lore. No natural-language inference here — that's the assistant's job.
-
-Forms added to the existing filter grammar (source:/corpus:/meta.K=V):
-
-    date:YYYY-MM-DD      — doc_timestamp inside that UTC day
-    after:<iso>          — doc_timestamp >= <iso> (date or datetime)
-    before:<iso>         — doc_timestamp <  <iso>
-    channel:<name>       — metadata channel match (quote-tolerant)
-    source_path:<glob>   — fnmatch on source_id (alias of source:)
-
-Hard-constraint semantics: chunks with NO doc_timestamp fail any time filter
-(if you asked for a date, undated evidence doesn't qualify), and an
-unparseable time value matches NOTHING — failing closed makes a typo'd date
-visible as zero results instead of silently leaking the old lore back in.
-"""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
-from vecgrep.backend.service import SearchResult, _passes_filters
+import pytest
+
+from vecgrep.backend.service import (
+    DEFAULT_MODE,
+    SEARCH_MODES,
+    SearchResult,
+    _passes_filters,
+    _validate_search_mode,
+)
+from vecgrep.backend.store import CorpusError
+from vecgrep.backend.store.corpora import (
+    CorpusError as CorpusError_search_mode_validation,
+)
 
 
 def _ts(iso: str) -> float:
@@ -294,3 +288,150 @@ def test_negated_speaker_and_has() -> None:
     assert not _passes_filters(r, ["-speaker:alice"])
     assert not _passes_filters(r, ["-has:code"])
     assert _passes_filters(r, ["-speaker:mac", "-has:table"])
+
+# ── test_filter_schema ──
+
+def test_reports_source_and_corpus_always(svc, make_doc):
+    p = make_doc("d.md", "plain content here. another sentence follows.")
+    svc.index(str(p), "c")
+    schema = svc.filterable_fields("c")
+    assert schema["corpus"] == "c"
+    assert "source" in schema["filters"]
+    assert "corpus" in schema["filters"]
+    assert schema["filters"]["source"]["form"] == "source:GLOB"
+
+
+def test_discovers_meta_keys_and_values(svc, make_doc):
+    """Markdown adapter records adapter+path metadata; those keys show up."""
+    p = make_doc("d.md", "content. more content.")
+    svc.index(str(p), "c")
+    schema = svc.filterable_fields("c")
+    meta_keys = schema["filters"]["meta"]["keys"]
+    # The markdown adapter writes {"adapter": "markdown", "path": ...}.
+    assert "adapter" in meta_keys
+    assert "markdown" in meta_keys["adapter"]
+
+
+def test_reports_doc_timestamp_presence(svc, make_doc):
+    dated = make_doc("d.md", "Saved: 2026-05-18T00:00:00+00:00\n\nbody content.")
+    svc.index(str(dated), "c")
+    schema = svc.filterable_fields("c")
+    assert schema["has_doc_timestamp"] is True
+
+
+def test_unknown_corpus_raises(svc):
+    with pytest.raises(CorpusError):
+        svc.filterable_fields("nonexistent")
+
+
+def test_schema_is_json_serializable(svc, make_doc):
+    """get_corpus serializes this to JSON — sets must be converted to lists."""
+    p = make_doc("d.md", "content here.")
+    svc.index(str(p), "c")
+    schema = svc.filterable_fields("c")
+    json.dumps(schema)  # must not raise (no raw sets)
+
+# ── test_search_mode_validation ──
+
+def test_known_modes_are_the_literal_members() -> None:
+    assert SEARCH_MODES == {"hybrid", "vector", "bm25"}
+    assert DEFAULT_MODE in SEARCH_MODES
+
+
+@pytest.mark.parametrize("mode", sorted(SEARCH_MODES))
+def test_known_modes_pass(mode: str) -> None:
+    _validate_search_mode(mode)  # must not raise
+
+
+@pytest.mark.parametrize("mode", ["dense", "semantic", "embedding", "HYBRID", "", "  "])
+def test_unknown_modes_raise(mode: str) -> None:
+    with pytest.raises(CorpusError_search_mode_validation) as e:
+        _validate_search_mode(mode)
+    # The message must name the valid set — an agent that guessed "dense"
+    # needs to learn what to guess next without reading the source.
+    for known in SEARCH_MODES:
+        assert known in str(e.value)
+
+
+def test_search_rejects_unknown_mode_before_touching_a_corpus(svc, make_doc) -> None:
+    p = make_doc("doc.md", "alpha content here. beta content here.")
+    svc.index(str(p), "test")
+
+    with pytest.raises(CorpusError_search_mode_validation):
+        svc.search("alpha", "test", mode="dense")
+
+
+def test_search_rejects_unknown_mode_with_no_corpora(svc) -> None:
+    """Validation is at the entry point, so it fires even on an empty install
+    — the old code returned [] here for a *valid* reason and [] for an invalid
+    mode, which is exactly the ambiguity being removed."""
+    with pytest.raises(CorpusError_search_mode_validation):
+        svc.search("anything", mode="dense")
+
+
+def test_valid_mode_still_searches(svc, make_doc) -> None:
+    p = make_doc("doc.md", "alpha content here. beta content here.")
+    svc.index(str(p), "test")
+    assert svc.search("alpha", "test", mode="bm25")
+
+# ── test_write_metadata_readpath ──
+
+class _TestSearchResult(SearchResult):
+    text: str
+
+
+def _result(text="t", metadata=None, corpus="c", source_id="s"):
+    r = _TestSearchResult.__new__(_TestSearchResult)
+    r.corpus = corpus
+    r.source_id = source_id
+    r.text = text
+    r.metadata = metadata or {}
+    r.score = 1.0
+    r.matched_by = ["vector"]
+    r.explain = {}
+    return r
+
+
+# --- default status:active filtering (the one real behavior change) ---
+
+class TestDefaultActiveFilter:
+    def test_active_chunk_passes_default(self):
+        r = _result(metadata={"status": "active"})
+        assert _passes_filters(r, ["meta.status=active"]) is True
+
+    def test_superseded_chunk_blocked_by_active_filter(self):
+        r = _result(metadata={"status": "superseded"})
+        assert _passes_filters(r, ["meta.status=active"]) is False
+
+    def test_legacy_chunk_without_status_treated_as_active(self):
+        # Back-compat: a chunk indexed before the schema has no status key.
+        # It must NOT vanish under a default status:active filter.
+        r = _result(metadata={})
+        assert _passes_filters(r, ["meta.status=active"], default_active=True) is True
+
+    def test_legacy_chunk_blocked_only_under_strict_match(self):
+        # Without the back-compat default, a literal meta.status=active match
+        # excludes a chunk that has no status (the pre-existing strict behavior).
+        r = _result(metadata={})
+        assert _passes_filters(r, ["meta.status=active"]) is False
+
+
+# --- source_kind / tier filters (already meta.* keys; pin they work) ---
+
+class TestSchemaFieldFilters:
+    def test_filter_by_source_kind(self):
+        decision = _result(metadata={"source_kind": "decision"})
+        journal = _result(metadata={"source_kind": "journal"})
+        assert _passes_filters(decision, ["meta.source_kind=decision"]) is True
+        assert _passes_filters(journal, ["meta.source_kind=decision"]) is False
+
+    def test_filter_by_tier(self):
+        protected = _result(metadata={"tier": "protected"})
+        normal = _result(metadata={"tier": "normal"})
+        assert _passes_filters(protected, ["meta.tier=protected"]) is True
+        assert _passes_filters(normal, ["meta.tier=protected"]) is False
+
+    def test_filters_and_together(self):
+        r = _result(metadata={"status": "active", "tier": "protected"})
+        assert _passes_filters(r, ["meta.status=active", "meta.tier=protected"]) is True
+        assert _passes_filters(r, ["meta.status=active", "meta.tier=normal"]) is False

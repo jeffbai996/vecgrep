@@ -1,12 +1,7 @@
-"""Embedding cache tests.
-
-Past bugs / risks covered:
-- Cached vectors keyed wrongly across (model, text)
-- Cache miss leaks the wrong text -> wrong vector
-"""
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -770,3 +765,67 @@ def test_cached_backend_embed_chunks_missing_texts(tmp_path):
     assert inner.calls == 2
     # Verify everything is now in cache
     assert len(cache.get_many(backend.identity, texts)) == 300
+
+# ── test_cache_sweep_service ──
+
+def _seed(tmp_path: Path) -> Path:
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "a.md").write_text("alpha beta gamma. delta epsilon zeta.\n", encoding="utf-8")
+    (root / "b.md").write_text("one two three. four five six.\n", encoding="utf-8")
+    return root
+
+
+def test_cache_sweep_keeps_every_live_chunk_and_drops_the_rest(svc, tmp_path: Path) -> None:
+    root = _seed(tmp_path)
+    svc.index(str(root), "docs")
+    cache: EmbedCache = svc._embed_cache
+    identity = svc._backend_cache["auto"]._inner.identity
+    before = sum(cache.stats().values())
+    assert before > 0
+    # an orphan under the live identity and a whole identity no corpus uses
+    cache.put_many(identity, ["orphaned chunk text"], [[1.0] * 16])
+    cache.put_many("ollama:retired-model", ["anything"], [[1.0] * 16])
+    plan = svc.cache_sweep(dry_run=True)
+    assert plan["deleted"] == {identity: 1, "ollama:retired-model": 1}
+    assert plan["kept"][identity] == before
+    assert sum(cache.stats().values()) == before + 2, "dry run deletes nothing"
+    done = svc.cache_sweep()
+    assert done["deleted"] == {identity: 1, "ollama:retired-model": 1}
+    assert cache.stats() == {identity: before}
+    # every live chunk text is still a hit
+    texts = [pl["text"] for _pid, pl in svc.store.iter_payloads("vecgrep__docs", include_payload_fields={"text"})]
+    assert texts and len(cache.get_many(identity, texts)) == len(set(texts))
+
+# ── test_embed_cache_shutdown_flush ──
+
+def test_service_flush_persists_pending_touches(tmp_path, monkeypatch):
+    from vecgrep.backend.service import VecgrepService
+
+    monkeypatch.setenv("VECGREP_HOME", str(tmp_path))
+    svc = VecgrepService()
+    cache = svc._embed_cache
+    assert cache is not None
+
+    cache.put_many("id", ["warm"], [[1.0]])
+    cache._conn.execute("UPDATE embed_cache SET last_used = 0")
+    cache._conn.commit()
+    cache.get_many("id", ["warm"])
+
+    (buffered,) = cache._conn.execute("SELECT last_used FROM embed_cache").fetchone()
+    assert buffered == 0
+
+    svc.flush_embed_cache()
+
+    (stored,) = cache._conn.execute("SELECT last_used FROM embed_cache").fetchone()
+    assert stored > 0
+
+
+def test_flush_is_safe_without_a_cache(tmp_path, monkeypatch):
+    """Ephemeral services have no cache; shutdown must not raise."""
+    from vecgrep.backend.service import VecgrepService
+
+    monkeypatch.setenv("VECGREP_HOME", str(tmp_path))
+    svc = VecgrepService(ephemeral=True)
+    assert svc._embed_cache is None
+    svc.flush_embed_cache()  # must not raise

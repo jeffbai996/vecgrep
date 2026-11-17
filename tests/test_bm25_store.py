@@ -1,16 +1,19 @@
-"""BM25 store regression tests.
-
-Past bugs covered:
-- by_source map drifting after delete (chunk_count miscounts on reindex)
-- pickle round-trip losing entries
-- tokenizer not splitting underscore/CamelCase identifiers
-- short-query partial-token matches dominating fused ranking
-"""
 from __future__ import annotations
+
+import pickle
+from pathlib import Path
 
 import pytest
 
-from vecgrep.backend.store.bm25_store import BM25Store, tokenize
+from vecgrep.backend import service as sm
+from vecgrep.backend.store.bm25_sqlite import BM25SqliteStore
+from vecgrep.backend.store.bm25_store import (
+    DEFAULT_CACHE_BYTES,
+    BM25Store,
+    query_tokens,
+    tokenize,
+)
+from vecgrep.backend.store.corpora import CorpusError
 
 
 def test_tokenize_splits_identifiers():
@@ -487,3 +490,259 @@ def test_cjk_query_finds_cjk_document(tmp_path):
                  [{"source_id": "a"}, {"source_id": "b"}, {"source_id": "c"}])
     hits = store.search("c", "Jeff banned the phrase 三十而立", top_k=3)
     assert hits and hits[0][0] == "a"
+
+# ── test_bm25_query_stopwords ──
+
+def test_stopwords_are_dropped_from_the_query():
+    assert query_tokens("ferry to the island") == ["ferry", "island"]
+
+
+def test_content_words_cjk_and_identifiers_survive():
+    assert query_tokens("getUserName 测试 for qdrant") == ["get", "user", "name", "测试", "qdrant"]
+
+
+def test_an_all_stopword_query_keeps_its_words():
+    assert query_tokens("to be or not to be") == ["to", "be", "or", "not", "to", "be"]
+
+
+def _store(kind, tmp_path):
+    store = BM25Store(tmp_path / "pkl") if kind == "pkl" else BM25SqliteStore(tmp_path / "db")
+    docs = [("a", "the ferry to the island leaves at noon"),
+            ("b", "to and from the office and back to the house"),
+            ("c", "ferry island timetable")]
+    store.upsert("c", [d[0] for d in docs], [d[1] for d in docs],
+                 [{"source_id": d[0], "chunk_index": 0} for d in docs])
+    return store
+
+
+def test_a_chunk_matching_only_stopwords_is_not_a_candidate(tmp_path):
+    for kind in ("pkl", "sqlite"):
+        hits = _store(kind, tmp_path / kind).search("c", "ferry to the island", top_k=10)
+        assert {h[0] for h in hits} == {"a", "c"}, kind
+
+
+def test_missing_a_stopword_costs_no_coverage(tmp_path):
+    """"ferry island timetable" holds every CONTENT word of the query."""
+    for kind in ("pkl", "sqlite"):
+        hits = _store(kind, tmp_path / kind).search("c", "ferry to the island timetable", top_k=10)
+        assert hits[0][0] == "c", kind
+
+# ── test_bm25_weight_per_corpus ──
+
+def _seed(tmp_path: Path) -> Path:
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "a.md").write_text("alpha beta gamma delta.\n" * 3, encoding="utf-8")
+    (root / "b.md").write_text("epsilon zeta eta theta.\n" * 3, encoding="utf-8")
+    return root
+
+
+def test_set_and_reset_bm25_weight(svc, tmp_path: Path) -> None:
+    svc.index(str(_seed(tmp_path)), "docs")
+    assert svc.registry.get("docs").bm25_weight is None
+    c = svc.set_bm25_weight("docs", 0.5)
+    assert c.bm25_weight == 0.5 and svc.registry.get("docs").bm25_weight == 0.5
+    c = svc.set_bm25_weight("docs", None)
+    assert c.bm25_weight is None
+    with pytest.raises(CorpusError):
+        svc.set_bm25_weight("docs", -1.0)
+
+
+def test_corpus_weight_overrides_global_in_fusion(svc, tmp_path: Path, monkeypatch) -> None:
+    svc.index(str(_seed(tmp_path)), "docs")
+    seen = []
+    real = sm._bm25_fusion_weight
+
+    def spy(corpus):
+        w = real(corpus)
+        seen.append(w)
+        return w
+
+    monkeypatch.setattr(sm, "_bm25_fusion_weight", spy)
+    monkeypatch.setattr(sm, "BM25_WEIGHT", 1.5)
+    svc.search("alpha", "docs", mode="hybrid", top_k=3)
+    assert seen[-1] == 1.5
+    svc.set_bm25_weight("docs", 0.5)
+    svc.search("alpha", "docs", mode="hybrid", top_k=3)
+    assert seen[-1] == 0.5
+
+# ── test_bm25_cache_budget ──
+
+def _corpus(store: BM25Store, name: str, filler_bytes: int) -> None:
+    """Write a sidecar of roughly `filler_bytes` so the budget can see it."""
+    p = store._path(name)
+    assert p is not None
+    p.parent.mkdir(parents=True, exist_ok=True)
+    idx = store._load(name)
+    idx.ids.append("x" * filler_bytes)
+    p.write_bytes(pickle.dumps(idx))
+    store.evict(name)
+
+
+def test_small_corpora_all_stay_resident(tmp_path):
+    # The whole point: a handful of tiny corpora must not evict each other.
+    store = BM25Store(tmp_path, max_cached_bytes=1_000_000)
+    for name in ("a", "b", "c", "d"):
+        _corpus(store, name, 1000)
+    for name in ("a", "b", "c", "d"):
+        store._load(name)
+    assert set(store._cache) == {"a", "b", "c", "d"}
+
+
+def test_a_large_corpus_evicts_to_stay_inside_the_budget(tmp_path):
+    store = BM25Store(tmp_path, max_cached_bytes=200_000)
+    _corpus(store, "small", 1000)
+    _corpus(store, "big", 150_000)
+    store._load("small")
+    store._load("big")
+    assert "big" in store._cache
+    assert sum(store._cached_bytes.values()) <= 200_000
+
+
+def test_rotating_corpora_does_not_thrash_when_they_fit(tmp_path):
+    # The regression this exists for: rotating between corpora that all fit
+    # inside the budget must load each ONCE, not once per visit.
+    store = BM25Store(tmp_path, max_cached_bytes=1_000_000)
+    for name in ("one", "two", "three"):
+        _corpus(store, name, 1000)
+    # Count real UNPICKLES, not visits: _load consults _disk_version on every
+    # call, including cache hits, so counting that would count visits.
+    import vecgrep.backend.store.bm25_store as mod
+
+    unpickles = []
+    real_loads = mod.pickle.loads
+
+    def counting(data):
+        unpickles.append(len(data))
+        return real_loads(data)
+
+    mod.pickle.loads = counting
+    try:
+        for _ in range(5):
+            for name in ("one", "two", "three"):
+                store._load(name)
+    finally:
+        mod.pickle.loads = real_loads
+    # three unpickles total, not fifteen
+    assert len(unpickles) == 3, len(unpickles)
+
+
+def test_one_corpus_bigger_than_the_budget_is_still_servable(tmp_path):
+    store = BM25Store(tmp_path, max_cached_bytes=1000)
+    _corpus(store, "huge", 50_000)
+    idx = store._load("huge")
+    assert idx is not None
+    assert "huge" in store._cache
+
+
+def test_default_budget_is_bytes_and_generous_enough_to_matter(tmp_path):
+    store = BM25Store(tmp_path)
+    assert store.max_cached_bytes == DEFAULT_CACHE_BYTES
+    assert store.max_cached_corpora is None
+    assert DEFAULT_CACHE_BYTES >= 128 * 1024 * 1024
+
+
+def test_a_count_cap_still_works_when_asked_for(tmp_path):
+    store = BM25Store(tmp_path, max_cached_corpora=1, max_cached_bytes=10**9)
+    for name in ("p", "q"):
+        _corpus(store, name, 1000)
+    store._load("p")
+    store._load("q")
+    assert set(store._cache) == {"q"}
+
+# ── test_bm25_bulk_persist ──
+
+def _seed_bm25_bulk_persist(tmp_path: Path, n: int = 6) -> Path:
+    root = tmp_path / "src"
+    root.mkdir()
+    for i in range(n):
+        (root / f"doc-{i}.md").write_text(
+            f"document number {i} about topic-{i} and shared-word.\n", encoding="utf-8")
+    return root
+
+
+def test_directory_index_persists_bm25_once_and_stays_searchable(svc, tmp_path, monkeypatch) -> None:
+    root = _seed_bm25_bulk_persist(tmp_path)
+    calls = []
+    real = BM25Store._persist_now
+
+    def counting(self, corpus):
+        calls.append(corpus)
+        return real(self, corpus)
+
+    monkeypatch.setattr(BM25Store, "_persist_now", counting)
+    docs, _unused_chunks, _ = svc.index(str(root), "docs")
+    assert docs == 6
+    assert calls.count("docs") == 1, f"expected ONE persist for a 6-doc directory, got {calls.count('docs')}"
+    assert not (svc.settings.home / "bm25" / "docs.pkl.dirty").exists()
+    for i in range(6):
+        hits = svc.search(f"topic-{i}", "docs", mode="bm25", top_k=3)
+        assert hits and hits[0].source_id.endswith(f"doc-{i}.md")
+
+
+def test_single_source_index_still_persists_immediately(svc, tmp_path, monkeypatch) -> None:
+    root = _seed_bm25_bulk_persist(tmp_path, n=1)
+    calls = []
+    real = BM25Store._persist_now
+    monkeypatch.setattr(BM25Store, "_persist_now", lambda self, c: (calls.append(c), real(self, c))[1])
+    svc.index(str(root / "doc-0.md"), "docs")
+    assert calls.count("docs") == 1
+
+
+def test_cross_corpus_access_cannot_evict_an_active_bulk_index(tmp_path) -> None:
+    store = BM25Store(tmp_path / "bm25", max_cached_corpora=1)
+    payload = lambda source: {"source_id": source, "text": source}
+    store.upsert("chats", ["base"], ["base"], [payload("base")])
+
+    with store.bulk("chats"):
+        store.upsert("chats", ["first"], ["first"], [payload("first")])
+        # A request for another corpus used to evict chats here. The next
+        # chats write then reloaded the stale on-disk pre-bulk snapshot.
+        store.upsert("notes", ["note"], ["note"], [payload("note")])
+        store.upsert("chats", ["second"], ["second"], [payload("second")])
+
+    reloaded = BM25Store(tmp_path / "bm25", max_cached_corpora=1)
+    assert reloaded.count("chats") == 3
+    assert set(reloaded._load("chats").ids) == {"base", "first", "second"}
+
+
+def test_interrupted_bulk_leaves_marker_and_next_service_rebuilds_from_qdrant(svc, tmp_path) -> None:
+    root = _seed_bm25_bulk_persist(tmp_path)
+    svc.index(str(root), "docs")
+    bm25_dir = svc.settings.home / "bm25"
+    # Simulate a crash mid-bulk: the marker is down and the on-disk pickle is
+    # stale (we delete it outright -- worst case).
+    (bm25_dir / "docs.pkl.dirty").write_text("crash", encoding="utf-8")
+    (bm25_dir / "docs.pkl").unlink()
+    svc.bm25.evict("docs")
+    inner = svc._backend_cache["auto"]._inner
+    svc.store.client.close()   # embedded qdrant admits one process at a time
+
+    from vecgrep.backend.embed.cache import CachedBackend
+    from vecgrep.backend.service import VecgrepService
+    svc2 = VecgrepService(ephemeral=False)
+    assert svc2._embed_cache is not None
+    svc2._backend_cache["auto"] = CachedBackend(inner, svc2._embed_cache)
+    try:
+        assert not (bm25_dir / "docs.pkl.dirty").exists(), "startup must clear the marker"
+        assert (bm25_dir / "docs.pkl").exists(), "startup must rebuild the sidecar"
+        expected = svc2.store.count("vecgrep__docs")
+        assert svc2.bm25.count("docs") == expected
+        hits = svc2.search("topic-3", "docs", mode="bm25", top_k=3)
+        assert hits and hits[0].source_id.endswith("doc-3.md")
+    finally:
+        try:
+            svc2.store.client.close()
+        except Exception:  # noqa: BLE001, S110 -- Cleanup of a deliberately interrupted store must not mask the assertion.
+            pass
+
+
+def test_rebuild_bm25_regenerates_sidecar_from_qdrant(svc, tmp_path) -> None:
+    root = _seed_bm25_bulk_persist(tmp_path)
+    svc.index(str(root), "docs")
+    (svc.settings.home / "bm25" / "docs.pkl").unlink()
+    svc.bm25.evict("docs")
+    n = svc.rebuild_bm25("docs")
+    assert n == svc.store.count("vecgrep__docs")
+    hits = svc.search("topic-2", "docs", mode="bm25", top_k=3)
+    assert hits and hits[0].source_id.endswith("doc-2.md")

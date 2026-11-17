@@ -1,17 +1,14 @@
-"""Unified relevance-score calibration (item 2).
-
-When reranking is on (the default), every hit's similarity_pct comes from ONE
-formula: a calibrated sigmoid over the cross-encoder score. This is the single
-canonical relevance number, computed identically regardless of which retriever
-found the hit. These tests pin the calibration shape and the wiring, without
-loading torch (the cross-encoder is monkeypatched).
-"""
 from __future__ import annotations
 
 from typing import Any, cast
 
 from vecgrep.backend import service as svc_mod
-from vecgrep.backend.service import _calibration_for, _cosine_to_pct, _rerank_to_pct
+from vecgrep.backend.service import (
+    _bm25_to_result,
+    _calibration_for,
+    _cosine_to_pct,
+    _rerank_to_pct,
+)
 
 
 def test_cosine_calibration_is_model_aware() -> None:
@@ -198,3 +195,19 @@ def test_tagged_ref_lowers_the_pre_fusion_cosine_floor() -> None:
     assert _cosine_floor("bge-m3:batch4k") == _cosine_floor("bge-m3")
     # And it must sit below bge-m3's real hit band, not above it.
     assert _cosine_floor("bge-m3:batch4k") < 0.52
+
+# ── test_lexical_confidence_cap ──
+
+def test_best_lexical_hit_cannot_claim_strong_semantic_confidence():
+    for score in (0.001, 1.0, 100.0):
+        hit = _bm25_to_result('notes', 'chunk', score, {'corpus':'notes','source_id':'example.md','text':'example'}, ['bm25'], max_score=score)
+        assert hit.similarity_pct < 40
+        assert hit.relevance_label == 'lexical-only'
+
+
+def test_service_lexical_hits_are_bounded_and_negative_query_stays_empty(svc, make_doc):
+    svc.index(str(make_doc('one.md', 'Cobalt river crossing. Unique orange bridge.')), 'notes')
+    svc.index(str(make_doc('two.md', 'Violet mountain hiking.')), 'notes')
+    hits = svc.search('cobalt', 'notes', mode='bm25', rerank=False)
+    assert hits and all(hit.similarity_pct < 40 for hit in hits)
+    assert not svc.search('zzzzmissingterm', 'notes', mode='bm25', rerank=False)

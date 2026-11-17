@@ -1,0 +1,15 @@
+{
+  "gates": [
+    {
+      "prefix": "",
+      "command": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "-x",
+        "tests"
+      ]
+    }
+  ]
+}

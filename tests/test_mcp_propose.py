@@ -1,11 +1,8 @@
-"""MCP propose path — the injection-safe write surface.
-
-claude.ai (an agent that ingests untrusted content) can PROPOSE but never write
-directly: propose_write/propose_edit create an inert pending proposal; only a
-human `vecgrep confirm` turns it into a write. These tests pin: propose writes
-nothing, the proposal persists, and a subsequent CLI confirm performs the write.
-"""
 from __future__ import annotations
+
+import pytest
+
+pytest.importorskip("mcp")
 
 import glob
 import json
@@ -13,8 +10,6 @@ import os
 from pathlib import Path
 
 import pytest
-
-pytest.importorskip("mcp")
 
 
 @pytest.fixture
@@ -432,12 +427,131 @@ def test_propose_edit_patch_confirm_round_trip(home):
 
 
 def test_proposed_patch_receipt_contains_surrounding_lines_without_applying(home):
-    from vecgrep.mcp import server as S
     from click.testing import CliRunner
+
     from vecgrep.cli.main import cli
+    from vecgrep.mcp import server as S
     seed=json.loads(S._run_propose('notes','Above\nOriginal\nBelow'))
     assert CliRunner().invoke(cli,['confirm',seed['proposal_id']]).exit_code==0
     result=json.loads(S._run_propose('notes',None,edit_id=seed['doc_id'],old_str='Original',new_str='Proposed'))
     assert ' Above\n' in result['unified_diff'] and ' Below\n' in result['unified_diff']
     assert '-Original\n' in result['unified_diff'] and '+Proposed\n' in result['unified_diff']
-    assert 'Original' in S._doc_body('notes',seed['doc_id'])
+    assert 'Original' in (S._doc_body('notes',seed['doc_id']) or '')
+
+# ── test_mcp_propose_meta_only ──
+
+@pytest.fixture
+def home_mcp_propose_meta_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("VECGREP_HOME", str(tmp_path / "vg"))
+    monkeypatch.setenv("VECGREP_PROPOSE_ALLOWED_CORPORA", "notes")
+    import vecgrep.backend.config as cfg
+    monkeypatch.setattr(cfg, "_settings", None)
+    return tmp_path
+
+
+def _seed_doc_mcp_propose_meta_only(doc_id: str, body: str) -> None:
+    from vecgrep.mcp import server as S
+    d = S._write_dir("notes")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{doc_id}.md").write_text(f"---\nid: {doc_id}\n---\n\n{body}\n")
+
+
+def test_meta_only_edit_keeps_body_and_sets_tags(home_mcp_propose_meta_only):
+    from vecgrep.mcp import server as S
+    _seed_doc_mcp_propose_meta_only("notes-1", "unchanged body")
+    out = json.loads(S._run_propose("notes", None, edit_id="notes-1",
+                                    tags=["ops", "runbook"]))
+    assert "error" not in out, out
+    assert "unchanged body" in out["preview"]
+    assert "tags: [ops, runbook]" in out["preview"]
+    h = os.environ["VECGREP_HOME"]
+    pend = json.loads(Path(glob.glob(f"{h}/write/_pending/*.json")[0]).read_text())
+    assert pend["meta"].get("meta_only") is True
+    # The marker is routing metadata, never rendered frontmatter.
+    assert "meta_only" not in pend["rendered"]
+
+
+def test_meta_only_without_any_meta_is_an_error(home_mcp_propose_meta_only):
+    from vecgrep.mcp import server as S
+    _seed_doc_mcp_propose_meta_only("notes-1", "x")
+    out = json.loads(S._run_propose("notes", None, edit_id="notes-1"))
+    assert "error" in out
+
+
+def test_meta_only_requires_edit_target(home_mcp_propose_meta_only):
+    from vecgrep.mcp import server as S
+    out = json.loads(S._run_propose("notes", None, tags=["x"]))
+    assert "error" in out
+
+# ── test_mcp_propose_merge ──
+
+@pytest.fixture
+def home_mcp_propose_merge(tmp_path, monkeypatch):
+    monkeypatch.setenv("VECGREP_HOME", str(tmp_path / "vg"))
+    monkeypatch.setenv("VECGREP_PROPOSE_ALLOWED_CORPORA", "notes")
+    import vecgrep.backend.config as cfg
+    monkeypatch.setattr(cfg, "_settings", None)
+    return tmp_path
+
+
+def _seed(d: Path, doc_id: str) -> None:
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{doc_id}.md").write_text(f"---\nid: {doc_id}\n---\n\nbody {doc_id}\n")
+
+
+def test_mcp_merge_happy_path(home_mcp_propose_merge):
+    from vecgrep.mcp import server as S
+    d = S._corpus_doc_dir("notes")
+    _seed(d, "notes-1")
+    _seed(d, "notes-2")
+    out = json.loads(S._run_propose_merge("notes", ["notes-1", "notes-2"],
+                                          "merged synthesis"))
+    assert out.get("doc_id") == "notes-1"
+    assert out.get("absorbs") == ["notes-2"]
+    assert "pending" in out.get("status", "")
+    # Proposal only — the absorbed doc is still on disk.
+    assert (d / "notes-2.md").exists()
+
+
+def test_mcp_merge_respects_corpus_allowlist(home_mcp_propose_merge, monkeypatch):
+    from vecgrep.mcp import server as S
+    monkeypatch.setenv("VECGREP_PROPOSE_ALLOWED_CORPORA", "notes")
+    out = json.loads(S._run_propose_merge("forbidden", ["x-1", "x-2"], "m"))
+    assert "error" in out
+    assert "not agent-writable" in out["error"]
+
+
+def test_mcp_merge_rejects_empty_content(home_mcp_propose_merge):
+    from vecgrep.mcp import server as S
+    d = S._corpus_doc_dir("notes")
+    _seed(d, "notes-1")
+    _seed(d, "notes-2")
+    out = json.loads(S._run_propose_merge("notes", ["notes-1", "notes-2"], "   "))
+    assert "error" in out
+    assert "no auto-concat" in out["error"]
+
+
+def test_mcp_merge_surfaces_proposal_errors(home_mcp_propose_merge):
+    from vecgrep.mcp import server as S
+    d = S._corpus_doc_dir("notes")
+    _seed(d, "notes-1")
+    # One id — propose_merge raises ProposalError, which must surface as JSON.
+    out = json.loads(S._run_propose_merge("notes", ["notes-1"], "m"))
+    assert "error" in out
+    assert "at least two" in out["error"]
+
+
+def test_stdio_merge_dispatches_with_the_same_corpus_inference(monkeypatch):
+    import asyncio
+
+    from mcp.types import CallToolRequest, CallToolRequestParams
+
+    from vecgrep.mcp import server
+    calls = []
+    monkeypatch.setattr(server, '_run_propose_merge',
+                        lambda *args: calls.append(args) or '{"status":"pending"}')
+    request = CallToolRequest(method='tools/call', params=CallToolRequestParams(
+        name='propose_merge', arguments={'doc_ids': ['notes-1', 'notes-2'], 'content': 'Combined.'}))
+    result = asyncio.run(server.build_mcp_server().request_handlers[CallToolRequest](request))
+    assert not result.root.isError
+    assert calls == [('notes', ['notes-1', 'notes-2'], 'Combined.', None)]
