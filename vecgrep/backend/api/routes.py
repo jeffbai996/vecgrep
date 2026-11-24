@@ -6,7 +6,7 @@ import threading
 from dataclasses import asdict
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from ..config import get_settings
 from ..embed import EmbedBackendError
@@ -215,8 +215,20 @@ def delete_source(name: str, id: str) -> dict:
     return {"deleted": id}
 
 
+_PROXY_TRANSIT_HEADERS = ("tailscale-user-login", "x-forwarded-for", "x-forwarded-host", "forwarded")
+
+
 @router.post("/index", response_model=IndexResponse)
-def index(req: IndexRequest) -> IndexResponse:
+def index(req: IndexRequest, request: Request) -> IndexResponse:
+    settings = get_settings()
+    if not (settings.api_token or "").strip():
+        peer = request.client.host if request.client else ""
+        proxied = any(request.headers.get(h) is not None for h in _PROXY_TRANSIT_HEADERS)
+        if peer not in ("127.0.0.1", "::1", "testclient") or proxied:
+            raise HTTPException(
+                status_code=403,
+                detail="indexing over a proxy or remote peer requires api_token",
+            )
     svc = _service()
     failed: list[str] = []
     try:

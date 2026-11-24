@@ -3303,8 +3303,21 @@ class _McpOAuthBoundary:
         self.router = secured_app.router
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
-        trusted = _is_direct_loopback_mcp(scope) or (
-            self._tailscale_identity_bypass and _is_verified_tailnet_mcp(scope)
+        headers = {k.lower(): v.decode("latin-1") for k, v in (scope.get("headers") or [])}
+        origin = headers.get(b"origin")
+        host = headers.get(b"host", "")
+        cross_origin = False
+        if origin is not None:
+            from urllib.parse import urlsplit as _urlsplit
+            try:
+                oh = (_urlsplit(origin).hostname or "").lower()
+                hh = (_urlsplit("http://" + host).hostname or "").lower()
+                cross_origin = not oh or oh != hh
+            except ValueError:
+                cross_origin = True
+        trusted = (not cross_origin) and (
+            _is_direct_loopback_mcp(scope)
+            or (self._tailscale_identity_bypass and _is_verified_tailnet_mcp(scope))
         )
         app = self._direct_app if trusted else self._secured_app
         await app(scope, receive, send)
