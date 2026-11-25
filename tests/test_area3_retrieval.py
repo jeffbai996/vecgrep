@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -255,7 +256,8 @@ def test_f_retr_03_recency_decay_applied_in_vector_and_bm25_modes(tmp_path: Path
     not only in hybrid mode."""
     svc = _make_service(tmp_path)
     old_doc = tmp_path / "2020-01-01-old.md"
-    new_doc = tmp_path / "2026-10-25-new.md"
+    recent_date = datetime.now(timezone.utc).date() - timedelta(days=1)
+    new_doc = tmp_path / f"{recent_date.isoformat()}-new.md"
     old_doc.write_text("# Doc\n\nShared target_keyword content for decay test.\n", encoding="utf-8")
     new_doc.write_text("# Doc\n\nShared target_keyword content for decay test.\n", encoding="utf-8")
 
@@ -266,7 +268,7 @@ def test_f_retr_03_recency_decay_applied_in_vector_and_bm25_modes(tmp_path: Path
     for mode in ("vector", "bm25"):
         hits = svc.search("target_keyword", "notes", mode=mode)
         assert len(hits) == 2
-        assert "2026-10-25-new.md" in hits[0].source_id
+        assert new_doc.name in hits[0].source_id
         assert hits[0].score > hits[1].score
 
 
