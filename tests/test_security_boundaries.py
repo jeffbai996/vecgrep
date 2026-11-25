@@ -403,3 +403,39 @@ def test_mcp_oauth_boundary_refuses_tailscale_bypass_for_cross_origin_browser():
     }
     asyncio.run(boundary(scope, None, None))
     assert called == ["secured"]
+
+
+def test_url_fetch_uses_one_dns_resolution_and_preserves_tls_host(monkeypatch):
+    import socket
+    import httpx
+    from vecgrep.backend.ingestion.adapters import url
+
+    resolved = []
+    def resolver(host, port, **kwargs):
+        resolved.append(host)
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+                 ("93.184.216.34", port or 443))]
+
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs["trust_env"] is False
+            assert kwargs["follow_redirects"] is False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get(self, endpoint, *, headers, extensions):
+            assert endpoint.host == "93.184.216.34"
+            assert endpoint.raw_path == b"/a%2Fb?x=1"
+            assert headers["Host"] == "publisher.example:8443"
+            assert extensions["sni_hostname"] == "publisher.example"
+            return httpx.Response(200, text="A public article")
+
+    monkeypatch.setattr(url.socket, "getaddrinfo", resolver)
+    monkeypatch.setattr(url.httpx, "Client", Client)
+    response = url._get_public("https://publisher.example:8443/a%2Fb?x=1", {})
+    assert response.text == "A public article"
+    assert resolved == ["publisher.example"]

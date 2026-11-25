@@ -3,7 +3,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 from collections.abc import Iterator
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
@@ -16,36 +16,66 @@ _STRIP_TAGS = ("script", "style", "noscript", "svg", "iframe", "form")
 _MAX_REDIRECTS = 5
 
 
-def _assert_public_url(url: str, *, resolver=socket.getaddrinfo) -> None:
-    """Reject non-http(s) URLs or hosts resolving to loopback/private/tailnet IPs."""
+def _public_address(address: str) -> bool:
     try:
-        parsed = urlsplit((url or "").strip())
-    except ValueError as exc:
-        raise AdapterError(f"Invalid URL: {url}") from exc
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise AdapterError(f"Unsupported URL scheme: {url}")
-    host = parsed.hostname.lower()
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped:
+            return _public_address(str(ip.ipv4_mapped))
+        if (ip.scope_id or ip.sixtofour or ip.teredo or ip.is_site_local
+                or ip in ipaddress.ip_network("64:ff9b::/96")):
+            return False
+    return ip.is_global and not (ip.is_multicast or ip.is_reserved)
+
+
+def _public_destination(url: str, *, resolver=None) -> tuple[httpx.URL, list[str]]:
+    try:
+        parsed = httpx.URL(url.strip())
+    except (httpx.InvalidURL, ValueError) as exc:
+        raise AdapterError("Invalid URL") from exc
+    if parsed.scheme not in ("http", "https") or not parsed.host or parsed.userinfo:
+        raise AdapterError("Expected an HTTP or HTTPS URL without credentials")
+    host = parsed.raw_host.decode("ascii").lower().rstrip(".")
     if host == "localhost" or host.endswith((".localhost", ".local", ".ts.net")):
         raise AdapterError(f"Refusing non-public URL host: {host}")
     try:
-        if not ipaddress.ip_address(host).is_global:
-            raise AdapterError(f"Refusing non-public URL IP: {host}")
-        return
+        literal = ipaddress.ip_address(host)
     except ValueError:
-        pass
-    try:
-        answers = resolver(host, None, type=socket.SOCK_STREAM)
-    except OSError as exc:
-        raise AdapterError(f"Could not resolve URL host {host}: {exc}") from exc
-    addrs = {a[4][0] for a in answers}
-    if not addrs:
-        raise AdapterError(f"No addresses resolved for {host}")
-    for addr in addrs:
         try:
-            if not ipaddress.ip_address(addr).is_global:
-                raise AdapterError(f"Refusing URL resolving to non-public IP: {host}")
-        except ValueError as exc:
-            raise AdapterError(f"Invalid resolved IP for {host}") from exc
+            answers = (resolver or socket.getaddrinfo)(
+                host, parsed.port, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            raise AdapterError(f"Could not resolve URL host {host}") from exc
+        addresses = list(dict.fromkeys(row[4][0] for row in answers))
+    else:
+        addresses = [str(literal)]
+    if not addresses or not all(_public_address(addr) for addr in addresses):
+        raise AdapterError(f"Refusing URL with no public DNS answer or a non-public IP: {host}")
+    return parsed, addresses
+
+
+def _assert_public_url(url: str, *, resolver=None) -> None:
+    _public_destination(url, resolver=resolver)
+
+
+def _get_public(url: str, headers: dict[str, str]) -> httpx.Response:
+    original, addresses = _public_destination(url)
+    # One pool per hop. Use the vetted numeric address for the dial while
+    # retaining the URL's authority for Host, TLS SNI and certificate checks.
+    with httpx.Client(trust_env=False, follow_redirects=False, timeout=20.0) as client:
+        for index, address in enumerate(addresses):
+            try:
+                return client.get(
+                    original.copy_with(host=address),
+                    headers={**headers, "Host": original.netloc.decode("ascii")},
+                    extensions={"sni_hostname": original.raw_host.decode("ascii").rstrip(".")},
+                )
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                if index == len(addresses) - 1:
+                    raise
+    raise AssertionError("destination has no addresses")
 
 
 @register_adapter
@@ -58,20 +88,13 @@ class URLAdapter(Adapter):
 
     def load(self, source: str) -> Iterator[Document]:
         current = source
-        _assert_public_url(current)
         headers = {"User-Agent": "vecgrep/0.1 (+https://github.com/jeffbai996/vecgrep)"}
         try:
             r = None
             for _ in range(_MAX_REDIRECTS + 1):
-                r = httpx.get(
-                    current,
-                    follow_redirects=False,
-                    timeout=20.0,
-                    headers=headers,
-                )
+                r = _get_public(current, headers)
                 if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("location"):
                     current = urljoin(current, r.headers["location"])
-                    _assert_public_url(current)
                     continue
                 break
             else:
