@@ -211,6 +211,41 @@ def test_tokenless_rest_routes_allow_only_exact_configured_proxy_host(
     assert near_miss.status_code == 421
 
 
+def test_tokenless_served_rest_keeps_reads_but_rejects_writes(vg_home, monkeypatch):
+    monkeypatch.setenv("VECGREP_REST_ALLOWED_HOSTS", "private-proxy.example:8443")
+    monkeypatch.setattr(cfg_mod, "_settings", None)
+
+    with TestClient(
+        create_app(),
+        base_url="https://private-proxy.example:8443",
+        client=("198.51.100.2", 50000),
+    ) as client:
+        assert client.get("/api/config").status_code == 200
+        assert client.post("/api/search", json={}).status_code != 403
+        assert client.delete("/api/corpora/__not_real__").status_code == 403
+        assert client.post("/api/corpora/__not_real__/weight", json={}).status_code == 403
+
+
+def test_tokenless_local_write_rejects_proxy_header_spoof(vg_home):
+    with TestClient(
+        create_app(),
+        base_url="http://127.0.0.1:8765",
+        client=("127.0.0.1", 50000),
+    ) as client:
+        assert client.delete("/api/corpora/__not_real__").status_code == 404
+        assert client.delete(
+            "/api/corpora/__not_real__",
+            headers={"X-Forwarded-For": "198.51.100.2"},
+        ).status_code == 403
+
+    with TestClient(
+        create_app(),
+        base_url="http://127.0.0.1:8765",
+        client=("198.51.100.2", 50000),
+    ) as client:
+        assert client.delete("/api/corpora/__not_real__").status_code == 403
+
+
 def test_authenticated_rest_proxy_preserves_non_loopback_host(
     vg_home, monkeypatch
 ):
