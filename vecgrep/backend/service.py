@@ -80,6 +80,7 @@ from .timeline import (
     build_timeline,
     parse_events,
 )
+from .privacy import is_opt_in_only, opt_in_hidden
 from .write.temp import is_expired
 
 
@@ -1693,6 +1694,11 @@ class VecgrepService:
         # A temp doc (write/temp.py) leaves search the moment its own expiry
         # passes, whether or not the sweep has deleted it yet.
         results = [r for r in results if not is_expired(r.metadata)]
+        # An opt-in-only doc (privacy.py) appears only when a filter names it.
+        results = [
+            r for r in results
+            if not opt_in_hidden(r.metadata, r.source_id, user_filters)
+        ]
 
         # Collapse near-duplicate chunks from the same source before selecting,
         # so adjacent sentence-windows and repeated messages (bot alert spam,
@@ -1997,6 +2003,11 @@ class VecgrepService:
             for rec in self._explorer_records_for(corpus.name):
                 source_id = str(rec.get("source_id") or "")
                 meta = rec.get("metadata") or {}
+                if opt_in_hidden(
+                    meta, source_id,
+                    [f"source:{source_path}"] if source_path else [],
+                ):
+                    continue
                 if channel is not None:
                     have = str(meta.get("channel", "")).strip().strip("\"'")
                     if have != channel:
@@ -2259,7 +2270,8 @@ class VecgrepService:
             results: list[SearchResult] = []
             for h in hits:
                 r = _hit_to_result(h, ["vector"], model=corpus.embed_model)
-                if r.chunk_id == chunk_id or is_expired(r.metadata):
+                if (r.chunk_id == chunk_id or is_expired(r.metadata)
+                        or is_opt_in_only(r.metadata)):
                     continue
                 results.append(r)
             return dedup_near_duplicates(results)[:top_k]
@@ -2383,6 +2395,8 @@ class VecgrepService:
             compact_samples: list[tuple[str, int, str]] = []
             if not invalid_window:
                 for p in self.bm25.iter_payloads(corpus.name):
+                    if is_opt_in_only(p.get("metadata")):
+                        continue
                     doc_ts = p.get("doc_timestamp")
                     if has_window:
                         if doc_ts is None:

@@ -139,6 +139,8 @@ For Claude Desktop or Cursor, add `{"mcpServers": {"vecgrep": {"command": "vecgr
 
 An agent can read widely and change very little. The `propose_*` tools write an inert file under `$VECGREP_HOME/write/_pending`, and nothing is indexed until a person runs `vecgrep pending` and then `vecgrep confirm <proposal-id>`. Only one corpus accepts proposals unless `VECGREP_PROPOSE_ALLOWED_CORPORA` says otherwise. Direct `write` and `edit` are off until `VECGREP_DIRECT_WRITE_CORPUS=<name>` names the one corpus they may touch. They are capped, edits leave a backup, protected documents are refused, and nothing can be deleted directly. `write_temp` stores notes that expire on their own, once `VECGREP_TEMP_CORPUS` is set. `retire` takes a stale document in the direct-write corpus out of search with a stated reason, and `unretire` brings it back. A document retired for longer than `VECGREP_RETIRE_RETENTION_DAYS` (default 30) leaves the index, and its file is kept as a backup.
 
+A document tagged `opt-in-only` or `quarantine` stays out of search, timeline, compare, related, browse and corpus summaries unless the caller names it: a `meta.title=` or `meta.id=` filter with its exact value, or a `source:` glob that contains its file stem. Naming its corpus, a broad glob such as `source:*`, or a negated filter does not count. Reads by id (`get_source`, `get_chunk`) are not gated.
+
 ## Configuration
 
 State lives in `~/.vecgrep`, or wherever `VECGREP_HOME` points, and only your user can read it. Settings come from environment variables first, then `config.json`, then the defaults in `vecgrep/backend/config.py`. The ones most people touch:
